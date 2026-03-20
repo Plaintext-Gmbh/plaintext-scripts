@@ -1,61 +1,30 @@
 #!/bin/bash
-# This Source Code Form is subject to the terms of the Mozilla Public
-# License, v. 2.0. If a copy of the MPL was not distributed with this
-# file, You can obtain one at https://mozilla.org/MPL/2.0/.
-#
 # ═══════════════════════════════════════════════════════════════
 #  Build Logic Library (shared via plaintext-scripts)
 #  Business logic for build, release, deploy, and version mgmt.
 #  Sourced by: build
-#  Requires: tui-common.sh, SCRIPT_DIR set, cwd = SCRIPT_DIR
-#
-#  Configuration (priority high → low):
-#    1. Individual environment variables
-#    2. PLAINTEXT_BUILD_CONFIG env (full config content)
-#    3. plaintext-build.cfg in project directory
-#    4. build-conf.txt in project directory (legacy)
+#  Requires: tui-common.sh, build-conf.txt loaded
+#  Expects: SCRIPT_DIR set, cwd = SCRIPT_DIR
 # ═══════════════════════════════════════════════════════════════
 
-# ── Load project configuration ───────────────────────────────
-# Sources: PLAINTEXT_BUILD_CONFIG env > plaintext-build.cfg > build-conf.txt
-# Individual ENV variables always take precedence over config values.
-_load_config() {
-    local config_content=""
-
-    if [ -n "${PLAINTEXT_BUILD_CONFIG:-}" ]; then
-        config_content="$PLAINTEXT_BUILD_CONFIG"
-    elif [ -f "$SCRIPT_DIR/plaintext-build.cfg" ]; then
-        config_content=$(cat "$SCRIPT_DIR/plaintext-build.cfg")
-    elif [ -f "$SCRIPT_DIR/build-conf.txt" ]; then
-        config_content=$(cat "$SCRIPT_DIR/build-conf.txt")
-    else
-        echo "ERROR: No build configuration found." >&2
-        echo "  Set PLAINTEXT_BUILD_CONFIG env or create plaintext-build.cfg in $SCRIPT_DIR" >&2
-        exit 1
-    fi
-
+# ── Load project configuration from build-conf.txt ───────────
+if [ -f "$SCRIPT_DIR/build-conf.txt" ]; then
     while IFS='=' read -r key value; do
-        [[ "$key" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "${key// }" ]] && continue
-        key="${key#"${key%%[![:space:]]*}"}"
-        key="${key%"${key##*[![:space:]]}"}"
+        [[ "$key" =~ ^#.*$ ]] && continue
+        [[ -z "$key" ]] && continue
         value="${value%%#*}"
         value="${value%"${value##*[![:space:]]}"}"
-        value="${value#"${value%%[![:space:]]*}"}"
-        # Individual ENV variables take precedence over config values
-        local _existing
-        _existing="$(printenv "$key" 2>/dev/null)" || _existing=""
-        if [ -z "$_existing" ]; then
-            export "$key"="$value"
-        fi
-    done <<< "$config_content"
-}
-_load_config
+        export "$key"="$value"
+    done < "$SCRIPT_DIR/build-conf.txt"
+else
+    echo "ERROR: build-conf.txt not found in $SCRIPT_DIR" >&2
+    exit 1
+fi
 
 # Validate required config
-: "${IMAGE_NAME:?IMAGE_NAME must be set in config (plaintext-build.cfg or PLAINTEXT_BUILD_CONFIG env)}"
-: "${WEBAPP_MODULE:?WEBAPP_MODULE must be set in config}"
-: "${TUI_TITLE:?TUI_TITLE must be set in config}"
+: "${IMAGE_NAME:?IMAGE_NAME must be set in build-conf.txt}"
+: "${WEBAPP_MODULE:?WEBAPP_MODULE must be set in build-conf.txt}"
+: "${TUI_TITLE:?TUI_TITLE must be set in build-conf.txt}"
 
 # Auto-detect container runtime (podman on macOS, docker on Linux)
 if [ -f "/opt/homebrew/bin/podman" ]; then
@@ -86,23 +55,19 @@ ensure_podman_running() {
     echo -e "${GREEN}✓ Podman machine started${NC}"
 }
 
-# ── Derived defaults (config/env values used if set) ─────────
-# NAS_HOST: auto-detect by hostname if not configured
-if [ -z "${NAS_HOST:-}" ]; then
-    if [ "$(hostname)" = "plaintext-zorin" ]; then
-        NAS_HOST="192.100.0.1"
-    else
-        NAS_HOST="192.168.1.224"
-    fi
+# Auto-detect NAS IP: Use NAT IP when running on Zorin VM
+if [ "$(hostname)" = "plaintext-zorin" ]; then
+    NAS_HOST="192.100.0.1"
+else
+    NAS_HOST="192.168.1.224"
 fi
 
-REGISTRY="${NAS_HOST}:${REGISTRY_PORT:-6666}"
+REGISTRY="${NAS_HOST}:6666"
 VERSION_FILE="version.txt"
 VERSION_RELEASE_FILE="versionRelease.txt"
-DEPLOY_SERVER="${DEPLOY_USER:-mad}@${NAS_HOST}"
+DEPLOY_SERVER="mad@${NAS_HOST}"
 DEPLOY_PATH="${DEPLOY_PATH:-/volume1/docker/${IMAGE_NAME}}"
-COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yaml}"
-NAS_REMOTE_TEMP="${NAS_REMOTE_TEMP:-/volume1/docker/temp}"
+COMPOSE_FILE="docker-compose.yaml"
 
 # ── Legacy color aliases (used by business logic echo statements) ─
 GREEN='\033[0;32m'
@@ -138,6 +103,9 @@ show_usage() {
     echo -e "    ${YELLOW}3${NC} = Patch version (x.x.X)"
     echo -e "  ${GREEN}./build deploy-prod${NC}        - Deploy last release to PROD"
 }
+
+# NAS remote temp path for image transfer
+NAS_REMOTE_TEMP="/volume1/docker/temp"
 
 # Function to push image to NAS
 push_to_registry() {
@@ -321,6 +289,72 @@ check_container_health() {
     return 1
 }
 
+# ── Session Transfer (Blue-Green) ─────────────────────────────
+
+# Export sessions from a running container (non-blocking: returns 0 even on failure)
+export_sessions() {
+    local CONTAINER="$1"
+    local OUTPUT_FILE="$2"
+
+    echo -e "${BLUE}Exporting sessions from ${CONTAINER}...${NC}"
+
+    local RESULT
+    RESULT=$(ssh ${DEPLOY_SERVER} "sudo docker exec ${CONTAINER} \
+        wget -qO- --header='Authorization: Bearer ${SESSION_TRANSFER_TOKEN}' \
+        http://localhost:8080/nosec/root/sessions/export 2>/dev/null" 2>/dev/null) || true
+
+    if [ -z "$RESULT" ] || ! echo "$RESULT" | grep -q '"sessionCount"'; then
+        echo -e "${YELLOW}⚠ Session export failed or empty (non-critical, continuing)${NC}"
+        echo "" > "$OUTPUT_FILE"
+        return 1
+    fi
+
+    echo "$RESULT" > "$OUTPUT_FILE"
+    local COUNT
+    COUNT=$(echo "$RESULT" | grep -o '"sessionCount":[0-9]*' | grep -o '[0-9]*')
+    echo -e "${GREEN}✓ Exported ${COUNT:-0} sessions${NC}"
+    return 0
+}
+
+# Import sessions into a running container (non-blocking: returns 0 even on failure)
+import_sessions() {
+    local CONTAINER="$1"
+    local INPUT_FILE="$2"
+
+    # Skip if export file is empty or missing
+    if [ ! -s "$INPUT_FILE" ]; then
+        echo -e "${YELLOW}⚠ No session data to import (skipping)${NC}"
+        return 0
+    fi
+
+    echo -e "${BLUE}Importing sessions to ${CONTAINER}...${NC}"
+
+    # Transfer session data to NAS, copy into container, POST it
+    cat "${INPUT_FILE}" | ssh ${DEPLOY_SERVER} "cat > /tmp/sessions-import.json" 2>/dev/null || true
+
+    local RESULT
+    RESULT=$(ssh ${DEPLOY_SERVER} "
+        sudo docker cp /tmp/sessions-import.json ${CONTAINER}:/tmp/sessions-import.json 2>/dev/null && \
+        sudo docker exec ${CONTAINER} wget -qO- \
+            --post-file=/tmp/sessions-import.json \
+            --header='Authorization: Bearer ${SESSION_TRANSFER_TOKEN}' \
+            --header='Content-Type: application/json' \
+            http://localhost:8080/nosec/root/sessions/import 2>/dev/null
+        sudo docker exec ${CONTAINER} rm -f /tmp/sessions-import.json 2>/dev/null
+        rm -f /tmp/sessions-import.json
+    " 2>/dev/null) || true
+
+    if echo "$RESULT" | grep -q '"imported"'; then
+        local IMPORTED
+        IMPORTED=$(echo "$RESULT" | grep -o '"imported":[0-9]*' | grep -o '[0-9]*')
+        echo -e "${GREEN}✓ Imported ${IMPORTED:-0} sessions${NC}"
+    else
+        echo -e "${YELLOW}⚠ Session import failed (non-critical, users may need to re-login)${NC}"
+    fi
+
+    return 0
+}
+
 # Deploy image to the inactive slot using blue-green strategy
 deploy_blue_green() {
     local ENV_NAME="$1"
@@ -359,19 +393,27 @@ deploy_blue_green() {
         return 1
     fi
 
-    # Switch nginx to the new slot
+    # Session transfer: export from active, import to new, THEN switch
+    local ACTIVE_CONTAINER="${IMAGE_NAME}-${ENV_NAME}-${ACTIVE_SLOT}"
+    if [ -n "${SESSION_TRANSFER_TOKEN}" ]; then
+        local SESSION_DUMP="/tmp/session-dump-${IMAGE_NAME}-${ENV_NAME}.json"
+        export_sessions "${ACTIVE_CONTAINER}" "${SESSION_DUMP}"
+        import_sessions "${CONTAINER_NAME}" "${SESSION_DUMP}"
+        rm -f "${SESSION_DUMP}"
+    fi
+
+    # Switch nginx to the new slot (sessions are already imported)
     echo -e "${BLUE}Health check passed - switching traffic...${NC}"
     if ! switch_active "$ENV_NAME" "$INACTIVE_SLOT"; then
         echo -e "${RED}✗ Nginx switch failed! Traffic still on ${ACTIVE_SLOT}.${NC}"
         return 1
     fi
 
-    # Stop the old container to avoid two instances on the same DB
-    local OLD_CONTAINER="${IMAGE_NAME}-${ENV_NAME}-${ACTIVE_SLOT}"
+    # Stop the old container to avoid two instances on the same DB (and duplicate crons)
     local OLD_SERVICE="${ENV_NAME}-${ACTIVE_SLOT}"
-    echo -e "${BLUE}Stopping old container ${OLD_CONTAINER}...${NC}"
+    echo -e "${BLUE}Stopping old container ${ACTIVE_CONTAINER}...${NC}"
     ssh ${DEPLOY_SERVER} "cd ${DEPLOY_PATH} && sudo docker compose stop ${OLD_SERVICE}" 2>/dev/null || true
-    echo -e "${GREEN}✓ Old container stopped${NC}"
+    echo -e "${GREEN}✓ Old container ${ACTIVE_CONTAINER} stopped${NC}"
 
     echo -e "${GREEN}=== Blue-Green deploy complete: ${ENV_NAME} now on ${INACTIVE_SLOT} (${IMAGE_TAG}) ===${NC}"
     return 0

@@ -1,0 +1,60 @@
+#!/bin/bash
+# Generiert die naechste Flyway-Versionsnummer und prueft auf Konflikte
+
+# Verwende Unix-Timestamp (Sekunden seit 1970-01-01)
+NEXT_VERSION=$(date +%s)
+
+echo "================================================================"
+echo "Flyway Version Generator"
+echo "================================================================"
+echo ""
+echo "Generierte Versionsnummer: $NEXT_VERSION"
+echo ""
+
+# Finde alle existierenden Flyway-Migrationen
+echo "Pruefe existierende Migrationen..."
+MIGRATION_FILES=$(find . -type f -name "V*__*.sql" 2>/dev/null | sort)
+
+if [ -z "$MIGRATION_FILES" ]; then
+    echo "Keine Migrationen gefunden"
+    echo ""
+    echo "Version $NEXT_VERSION kann verwendet werden"
+    exit 0
+fi
+
+# Extrahiere die hoechste Versionsnummer
+MAX_VERSION=0
+MAX_VERSION_FILE=""
+
+while IFS= read -r file; do
+    # Extrahiere Versionsnummer aus Dateinamen (z.B. V820887909__...)
+    VERSION=$(basename "$file" | sed 's/^V\([0-9]*\)__.*/\1/')
+
+    if [ "$VERSION" -gt "$MAX_VERSION" ]; then
+        MAX_VERSION=$VERSION
+        MAX_VERSION_FILE=$file
+    fi
+done <<< "$MIGRATION_FILES"
+
+echo "Hoechste existierende Version: $MAX_VERSION"
+echo "Datei: $MAX_VERSION_FILE"
+echo ""
+
+# Vergleiche mit generierter Version
+if [ "$NEXT_VERSION" -le "$MAX_VERSION" ]; then
+    echo "FEHLER: Generierte Version ($NEXT_VERSION) ist kleiner oder gleich der hoechsten existierenden Version ($MAX_VERSION)"
+    echo ""
+    echo "Vorschlag: Verwende eine hoehere Version als $MAX_VERSION"
+    SUGGESTED_VERSION=$((MAX_VERSION + 1))
+    echo "   Empfohlen: $SUGGESTED_VERSION"
+    exit 1
+else
+    DIFF=$((NEXT_VERSION - MAX_VERSION))
+    echo "Version $NEXT_VERSION kann verwendet werden"
+    echo "   (ist $DIFF Sekunden neuer als die letzte Migration)"
+fi
+
+echo ""
+echo "================================================================"
+echo "Verwendung: V${NEXT_VERSION}__<beschreibung>.sql"
+echo "================================================================"

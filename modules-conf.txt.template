@@ -1,0 +1,44 @@
+# ═══════════════════════════════════════════════════════════════
+#  modules-conf.txt - Module Configuration
+#  Place this file in your project root (next to pom.xml).
+#  Used by the Module Manager TUI (./modules).
+# ═══════════════════════════════════════════════════════════════
+#
+# Format:
+#   ROOT_MODULE=<artifact-name>       Always-on modules (not toggleable)
+#   TOGGLE=<artifact>|<group>|<name>  Toggleable module with group and display name
+#   DEP=<module>|<dependency>         Module depends on dependency
+#   LOCKED=<artifact>                 Toggleable module that cannot be turned off
+#   WEBAPP_POM=<relative-path>        Path to webapp pom.xml (optional, auto-detected from build-conf.txt)
+#
+# Groups are used to organize the TUI display. Common groups:
+#   root, admin, feature
+#
+# Example for a project called "myapp":
+
+# ── Always-on modules (not shown in toggle list) ─────────────
+ROOT_MODULE=myapp-common
+ROOT_MODULE=myapp-interfaces
+ROOT_MODULE=myapp-jpa
+
+# ── Toggleable: root group ───────────────────────────────────
+TOGGLE=myapp-email|root|email
+TOGGLE=myapp-flyway|root|flyway
+
+# ── Toggleable: admin group ──────────────────────────────────
+TOGGLE=myapp-admin-settings|admin|settings
+TOGGLE=myapp-admin-users|admin|users
+
+# ── Toggleable: feature group ────────────────────────────────
+TOGGLE=myapp-feature-a|feature|feature-a
+TOGGLE=myapp-feature-b|feature|feature-b
+
+# ── Dependencies ─────────────────────────────────────────────
+# Format: module|dependency (module requires dependency to build)
+DEP=myapp-feature-b|myapp-email
+
+# ── Locked modules (always on, cannot be toggled off) ────────
+LOCKED=myapp-admin-settings
+
+# ── Webapp POM (optional, auto-detected from WEBAPP_MODULE in build-conf.txt) ──
+# WEBAPP_POM=myapp-webapp/pom.xml
