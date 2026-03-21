@@ -112,3 +112,99 @@ get_status_line() {
     fi
     echo "stopped"
 }
+
+# ── Playwright Integration Tests ──────────────────────────────
+
+do_playwright_build() {
+    echo -e "${FG_BLUE}${BOLD}Playwright Tests (build + start + test)${RESET}"
+    cd "$SCRIPT_DIR"
+    local MVN="mvn"
+    [[ -f "$SCRIPT_DIR/mvnw" ]] && MVN="$SCRIPT_DIR/mvnw"
+
+    local TEST_PORT=9090
+    local APP_PID=""
+
+    cleanup_playwright() {
+        if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" 2>/dev/null; then
+            echo -e "${FG_YELLOW}Stopping test app (PID: $APP_PID)...${RESET}"
+            kill "$APP_PID" 2>/dev/null || true
+            sleep 2
+            kill -9 "$APP_PID" 2>/dev/null || true
+        fi
+    }
+    trap cleanup_playwright RETURN
+
+    echo -e "${FG_YELLOW}1. Building project...${RESET}"
+    $MVN clean package -DskipTests -q || { echo -e "${FG_RED}Build failed${RESET}"; return 1; }
+
+    echo -e "${FG_YELLOW}2. Starting app on port $TEST_PORT...${RESET}"
+    java -jar "$WEBAPP_MODULE/target/"*.jar \
+        --server.port=$TEST_PORT \
+        --spring.docker.compose.enabled=false \
+        > /tmp/playwright-app.log 2>&1 &
+    APP_PID=$!
+
+    echo -e "${FG_YELLOW}3. Waiting for app...${RESET}"
+    local count=0
+    while [[ $count -lt 90 ]]; do
+        if curl -s http://localhost:$TEST_PORT/login.xhtml > /dev/null 2>&1; then
+            echo -e "${FG_GREEN}App ready!${RESET}"
+            break
+        fi
+        if ! kill -0 "$APP_PID" 2>/dev/null; then
+            echo -e "${FG_RED}App crashed! See /tmp/playwright-app.log${RESET}"
+            return 1
+        fi
+        sleep 1
+        count=$((count+1))
+    done
+
+    if [[ $count -eq 90 ]]; then
+        echo -e "${FG_RED}Timeout waiting for app${RESET}"
+        return 1
+    fi
+
+    echo -e "${FG_YELLOW}4. Running Playwright tests...${RESET}"
+    $MVN failsafe:integration-test failsafe:verify \
+        -pl "$WEBAPP_MODULE" \
+        -Dit.test=PlaywrightPageIT \
+        -Dtest.server.port=$TEST_PORT \
+        -Dtest.server.url=http://localhost:$TEST_PORT
+    local result=$?
+
+    if [[ $result -eq 0 ]]; then
+        echo -e "${FG_GREEN}All Playwright tests passed!${RESET}"
+    else
+        echo -e "${FG_RED}Playwright tests failed!${RESET}"
+    fi
+    return $result
+}
+
+do_playwright_running() {
+    echo -e "${FG_BLUE}${BOLD}Playwright Tests (against running app)${RESET}"
+    cd "$SCRIPT_DIR"
+    local MVN="mvn"
+    [[ -f "$SCRIPT_DIR/mvnw" ]] && MVN="$SCRIPT_DIR/mvnw"
+
+    local TEST_PORT=8080
+
+    if ! curl -s http://localhost:$TEST_PORT/login.xhtml > /dev/null 2>&1; then
+        echo -e "${FG_RED}App not running on port $TEST_PORT${RESET}"
+        return 1
+    fi
+
+    echo -e "${FG_YELLOW}Running Playwright tests against localhost:$TEST_PORT...${RESET}"
+    $MVN failsafe:integration-test failsafe:verify \
+        -pl "$WEBAPP_MODULE" \
+        -Dit.test=PlaywrightPageIT \
+        -Dtest.server.port=$TEST_PORT \
+        -Dtest.server.url=http://localhost:$TEST_PORT
+    local result=$?
+
+    if [[ $result -eq 0 ]]; then
+        echo -e "${FG_GREEN}All Playwright tests passed!${RESET}"
+    else
+        echo -e "${FG_RED}Playwright tests failed!${RESET}"
+    fi
+    return $result
+}
