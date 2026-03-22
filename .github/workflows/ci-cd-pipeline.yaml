@@ -1,0 +1,366 @@
+# Reusable CI/CD Pipeline for all Plaintext projects
+#
+# Jobs: CI (Build+Test+Coverage) → Deploy → Verify DEV → Verify PROD
+#
+# deploy-target values:
+#   ci-only      – Build + Test only (no deployment)
+#   snapshot-dev – Snapshot build + deploy to DEV
+#   release-dev  – Release + deploy to DEV
+#   release-all  – Release + deploy to DEV + deploy to PROD
+
+name: CI/CD Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      deploy-target:
+        description: 'Deployment target: ci-only | snapshot-dev | release-dev | release-all'
+        required: true
+        type: string
+      project-name:
+        description: 'Project display name (e.g. plaintext-app)'
+        required: true
+        type: string
+      database-name:
+        description: 'PostgreSQL database name for integration tests'
+        required: false
+        type: string
+        default: 'plaintext'
+      java-version:
+        description: 'Java version for build and tests'
+        required: false
+        type: string
+        default: '25'
+      dev-url:
+        description: 'DEV environment base URL for version check and E2E tests'
+        required: false
+        type: string
+        default: ''
+      prod-url:
+        description: 'PROD environment base URL for version check and E2E tests'
+        required: false
+        type: string
+        default: ''
+      playwright-enabled:
+        description: 'Run Playwright E2E tests after deployment verification'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      TWINGATE_SERVICE_KEY:
+        required: true
+      MVN_DEPLOY_TOKEN:
+        required: true
+      SSH_PRIVATE_KEY:
+        required: false
+
+jobs:
+  # ── Build + Test + Coverage ────────────────────────────────────
+  ci:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: ${{ inputs.database-name }}
+          POSTGRES_USER: plaintext
+          POSTGRES_PASSWORD: plaintext
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U plaintext"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+          cache: maven
+          server-id: plaintext
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+
+      - name: Build & Test
+        run: mvn clean install -B
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5434/${{ inputs.database-name }}
+          SPRING_DATASOURCE_USERNAME: plaintext
+          SPRING_DATASOURCE_PASSWORD: plaintext
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.MVN_DEPLOY_TOKEN }}
+
+      - name: Generate Coverage Report
+        if: always()
+        run: mvn jacoco:report -B
+        continue-on-error: true
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: '**/target/surefire-reports/*.xml'
+          retention-days: 7
+
+      - name: Upload Coverage Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: '**/target/site/jacoco/'
+          retention-days: 14
+
+      - name: Coverage Summary
+        if: always()
+        run: |
+          echo "## Code Coverage – ${{ inputs.project-name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Module | Coverage |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|----------|" >> $GITHUB_STEP_SUMMARY
+          for report in $(find . -path "*/target/site/jacoco/jacoco.csv" 2>/dev/null); do
+            module=$(echo "$report" | sed 's|./\(.*\)/target/.*|\1|')
+            if [ -f "$report" ]; then
+              missed=$(tail -n +2 "$report" | awk -F',' '{sum+=$4} END {print sum+0}')
+              covered=$(tail -n +2 "$report" | awk -F',' '{sum+=$5} END {print sum+0}')
+              total=$((missed + covered))
+              if [ "$total" -gt 0 ]; then
+                pct=$((covered * 100 / total))
+                echo "| $module | ${pct}% (${covered}/${total}) |" >> $GITHUB_STEP_SUMMARY
+              fi
+            fi
+          done
+
+  # ── Deploy ─────────────────────────────────────────────────────
+  deploy:
+    name: "Deploy (${{ inputs.deploy-target }})"
+    needs: ci
+    if: inputs.deploy-target != 'ci-only'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Connect to Twingate
+        uses: twingate/github-action@v1
+        with:
+          service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.MVN_DEPLOY_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.email "github@plaintext.ch"
+          git config user.name "GithubActions"
+
+      - name: Checkout plaintext-scripts
+        uses: actions/checkout@v4
+        with:
+          repository: daniel-marthaler/plaintext-scripts
+          path: plaintext-scripts
+          token: ${{ secrets.MVN_DEPLOY_TOKEN }}
+
+      - name: Install plaintext-scripts
+        run: |
+          cp -r plaintext-scripts $HOME/.plaintext-scripts
+          chmod +x $HOME/.plaintext-scripts/*.sh
+
+      - name: Setup JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+
+      - name: Configure Maven
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml << EOF
+          <settings>
+            <servers>
+              <server>
+                <id>plaintext</id>
+                <username>daniel-marthaler</username>
+                <password>${{ secrets.MVN_DEPLOY_TOKEN }}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H 192.168.1.224 >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh-keyscan -H 192.168.0.7 >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Build & Deploy
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.MVN_DEPLOY_TOKEN }}
+          CI: 'true'
+        run: |
+          chmod +x ./build
+          case "${{ inputs.deploy-target }}" in
+            snapshot-dev)
+              echo "=== Snapshot Build + Deploy DEV ==="
+              ./build build deploy
+              ;;
+            release-dev)
+              echo "=== Release + Deploy DEV ==="
+              ./build release deploy-healthcheck
+              ;;
+            release-all)
+              echo "=== Release + Deploy DEV + PROD ==="
+              ./build 56
+              ;;
+            *)
+              echo "Unknown deploy target: ${{ inputs.deploy-target }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Deploy Summary
+        if: always()
+        run: |
+          echo "## Deploy Summary – ${{ inputs.project-name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Target** | \`${{ inputs.deploy-target }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Version** | $(cat version.txt 2>/dev/null || echo 'n/a') |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Release** | $(cat versionRelease.txt 2>/dev/null || echo 'n/a') |" >> $GITHUB_STEP_SUMMARY
+
+  # ── Verify DEV ─────────────────────────────────────────────────
+  verify-dev:
+    name: Verify DEV
+    needs: deploy
+    if: inputs.deploy-target != 'ci-only' && inputs.dev-url != ''
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Connect to Twingate
+        uses: twingate/github-action@v1
+        with:
+          service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
+
+      - name: Version Check DEV
+        run: |
+          echo "Verifying DEV at ${{ inputs.dev-url }}/nosec/version ..."
+          for i in $(seq 1 24); do
+            RESPONSE=$(curl -sf "${{ inputs.dev-url }}/nosec/version" 2>/dev/null) && {
+              echo "DEV running: $RESPONSE"
+              echo "## Verify DEV" >> $GITHUB_STEP_SUMMARY
+              echo "Version: \`$RESPONSE\`" >> $GITHUB_STEP_SUMMARY
+              exit 0
+            }
+            echo "Waiting for DEV... ($i/24)"
+            sleep 5
+          done
+          echo "DEV version check failed after 2 minutes"
+          exit 1
+
+      - name: Checkout
+        if: inputs.playwright-enabled
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        if: inputs.playwright-enabled
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Playwright
+        if: inputs.playwright-enabled
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Playwright E2E Tests (DEV)
+        if: inputs.playwright-enabled
+        run: npx playwright test
+        env:
+          BASE_URL: ${{ inputs.dev-url }}
+
+      - name: Upload Playwright Report (DEV)
+        if: inputs.playwright-enabled && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-dev
+          path: playwright-report/
+          retention-days: 7
+
+  # ── Verify PROD ────────────────────────────────────────────────
+  verify-prod:
+    name: Verify PROD
+    needs: verify-dev
+    if: inputs.deploy-target == 'release-all' && inputs.prod-url != ''
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Connect to Twingate
+        uses: twingate/github-action@v1
+        with:
+          service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
+
+      - name: Version Check PROD
+        run: |
+          echo "Verifying PROD at ${{ inputs.prod-url }}/nosec/version ..."
+          for i in $(seq 1 24); do
+            RESPONSE=$(curl -sf "${{ inputs.prod-url }}/nosec/version" 2>/dev/null) && {
+              echo "PROD running: $RESPONSE"
+              echo "## Verify PROD" >> $GITHUB_STEP_SUMMARY
+              echo "Version: \`$RESPONSE\`" >> $GITHUB_STEP_SUMMARY
+              exit 0
+            }
+            echo "Waiting for PROD... ($i/24)"
+            sleep 5
+          done
+          echo "PROD version check failed after 2 minutes"
+          exit 1
+
+      - name: Checkout
+        if: inputs.playwright-enabled
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        if: inputs.playwright-enabled
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Playwright
+        if: inputs.playwright-enabled
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Playwright E2E Tests (PROD)
+        if: inputs.playwright-enabled
+        run: npx playwright test
+        env:
+          BASE_URL: ${{ inputs.prod-url }}
+
+      - name: Upload Playwright Report (PROD)
+        if: inputs.playwright-enabled && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-prod
+          path: playwright-report/
+          retention-days: 7
