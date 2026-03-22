@@ -8,7 +8,7 @@
 #   release-dev  – Release + deploy to DEV
 #   release-all  – Release + deploy to DEV + deploy to PROD
 
-name: CI/CD Pipeline
+name: Build And Deploy Pipeline
 
 on:
   workflow_call:
