@@ -42,7 +42,12 @@ on:
         type: string
         default: ''
       playwright-enabled:
-        description: 'Run Playwright E2E tests after deployment verification'
+        description: 'Run Node.js Playwright E2E tests after deployment'
+        required: false
+        type: boolean
+        default: false
+      integration-tests-enabled:
+        description: 'Run Java Playwright integration tests (Maven Failsafe) against deployed app'
         required: false
         type: boolean
         default: false
@@ -276,17 +281,58 @@ jobs:
           echo "DEV version check failed after 2 minutes"
           exit 1
 
+      # ── Java Integration Tests (Maven Failsafe) ──
       - name: Checkout
-        if: inputs.playwright-enabled
+        if: inputs.integration-tests-enabled || inputs.playwright-enabled
         uses: actions/checkout@v4
 
+      - name: Setup JDK ${{ inputs.java-version }}
+        if: inputs.integration-tests-enabled
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+          cache: maven
+          server-id: plaintext
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+
+      - name: Install Playwright Browser
+        if: inputs.integration-tests-enabled
+        run: npx playwright install --with-deps chromium
+
+      - name: Integration Tests (DEV)
+        if: inputs.integration-tests-enabled
+        run: mvn verify -B -Dsurefire.skip=true -Dtest.server.url=${{ inputs.dev-url }}
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.MVN_DEPLOY_TOKEN }}
+
+      - name: Upload Integration Test Results (DEV)
+        if: inputs.integration-tests-enabled && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results-dev
+          path: '**/target/failsafe-reports/*.xml'
+          retention-days: 7
+
+      - name: Upload Screenshots (DEV)
+        if: inputs.integration-tests-enabled && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-screenshots-dev
+          path: '**/target/screenshots/'
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # ── Node.js Playwright Tests ──
       - name: Setup Node.js
         if: inputs.playwright-enabled
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - name: Install Playwright
+      - name: Install Node.js Playwright
         if: inputs.playwright-enabled
         run: |
           npm ci
@@ -335,17 +381,58 @@ jobs:
           echo "PROD version check failed after 2 minutes"
           exit 1
 
+      # ── Java Integration Tests (Maven Failsafe) ──
       - name: Checkout
-        if: inputs.playwright-enabled
+        if: inputs.integration-tests-enabled || inputs.playwright-enabled
         uses: actions/checkout@v4
 
+      - name: Setup JDK ${{ inputs.java-version }}
+        if: inputs.integration-tests-enabled
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+          cache: maven
+          server-id: plaintext
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+
+      - name: Install Playwright Browser
+        if: inputs.integration-tests-enabled
+        run: npx playwright install --with-deps chromium
+
+      - name: Integration Tests (PROD)
+        if: inputs.integration-tests-enabled
+        run: mvn verify -B -Dsurefire.skip=true -Dtest.server.url=${{ inputs.prod-url }}
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.MVN_DEPLOY_TOKEN }}
+
+      - name: Upload Integration Test Results (PROD)
+        if: inputs.integration-tests-enabled && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results-prod
+          path: '**/target/failsafe-reports/*.xml'
+          retention-days: 7
+
+      - name: Upload Screenshots (PROD)
+        if: inputs.integration-tests-enabled && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-screenshots-prod
+          path: '**/target/screenshots/'
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # ── Node.js Playwright Tests ──
       - name: Setup Node.js
         if: inputs.playwright-enabled
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - name: Install Playwright
+      - name: Install Node.js Playwright
         if: inputs.playwright-enabled
         run: |
           npm ci
