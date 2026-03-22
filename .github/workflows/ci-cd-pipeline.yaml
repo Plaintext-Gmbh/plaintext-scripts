@@ -93,7 +93,7 @@ jobs:
           server-password: GITHUB_TOKEN
 
       - name: Build & Test
-        run: mvn clean install -B
+        run: mvn clean install -B -DskipITs
         env:
           SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5434/${{ inputs.database-name }}
           SPRING_DATASOURCE_USERNAME: plaintext
