@@ -251,8 +251,20 @@ check_container_health() {
     local INTERVAL=5
     local ELAPSED=0
 
+    # For SNAPSHOT builds the Docker tag is "latest" but the /nosec/version endpoint
+    # returns the Maven version (e.g. "2.425.0-SNAPSHOT").  In that case we skip the
+    # version string comparison and only verify health status.
+    local SKIP_VERSION_MATCH=false
+    if [ "$EXPECTED_VERSION" == "latest" ]; then
+        SKIP_VERSION_MATCH=true
+    fi
+
     echo -e "${BLUE}=== Health checking container: ${CONTAINER_NAME} ===${NC}"
-    echo -e "${BLUE}Expected version: ${GREEN}${EXPECTED_VERSION}${NC}"
+    if [ "$SKIP_VERSION_MATCH" == "true" ]; then
+        echo -e "${BLUE}Expected version: ${GREEN}any (snapshot / latest)${NC}"
+    else
+        echo -e "${BLUE}Expected version: ${GREEN}${EXPECTED_VERSION}${NC}"
+    fi
     echo -e "${BLUE}Max wait: ${MAX_WAIT}s${NC}"
 
     while [ $ELAPSED -lt $MAX_WAIT ]; do
@@ -262,7 +274,17 @@ check_container_health() {
         VERSION_RESPONSE=$(ssh ${DEPLOY_SERVER} \
             "sudo docker exec ${CONTAINER_NAME} wget -qO- http://localhost:8080/nosec/version 2>/dev/null || echo ''")
 
-        if [ "$VERSION_RESPONSE" == "$EXPECTED_VERSION" ]; then
+        local VERSION_OK=false
+        if [ "$SKIP_VERSION_MATCH" == "true" ]; then
+            # For snapshot builds: accept any non-empty version response
+            if [ -n "$VERSION_RESPONSE" ]; then
+                VERSION_OK=true
+            fi
+        elif [ "$VERSION_RESPONSE" == "$EXPECTED_VERSION" ]; then
+            VERSION_OK=true
+        fi
+
+        if [ "$VERSION_OK" == "true" ]; then
             local HEALTH_RESPONSE
             HEALTH_RESPONSE=$(ssh ${DEPLOY_SERVER} \
                 "sudo docker exec ${CONTAINER_NAME} wget -qO- http://localhost:8080/actuator/health 2>/dev/null || echo ''")
@@ -550,10 +572,23 @@ check_version() {
     local MAX_WAIT=120
     local INTERVAL=5
     local ELAPSED=0
+
+    # For SNAPSHOT builds the Docker tag is "latest" but the /nosec/version endpoint
+    # returns the Maven version (e.g. "2.425.0-SNAPSHOT").  In that case we only
+    # verify that the endpoint responds successfully, without matching the exact string.
+    local SKIP_VERSION_MATCH=false
+    if [ "$EXPECTED_VERSION" == "latest" ]; then
+        SKIP_VERSION_MATCH=true
+    fi
+
     echo -e "${BLUE}=== Checking version endpoint ===${NC}"
     echo -e "${BLUE}URL: ${VERSION_URL}${NC}"
-    echo -e "${BLUE}Expected version: ${GREEN}${EXPECTED_VERSION}${NC}"
-    echo -e "${BLUE}Max wait time: ${MAX_WAIT} seconds (4 minutes)${NC}"
+    if [ "$SKIP_VERSION_MATCH" == "true" ]; then
+        echo -e "${BLUE}Expected version: ${GREEN}any (snapshot / latest)${NC}"
+    else
+        echo -e "${BLUE}Expected version: ${GREEN}${EXPECTED_VERSION}${NC}"
+    fi
+    echo -e "${BLUE}Max wait time: ${MAX_WAIT} seconds${NC}"
 
     while [ $ELAPSED -lt $MAX_WAIT ]; do
         echo -e "${YELLOW}Checking version... (${ELAPSED}s / ${MAX_WAIT}s)${NC}"
@@ -562,7 +597,10 @@ check_version() {
         HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$VERSION_URL" 2>/dev/null || echo "000")
 
         if [ "$HTTP_STATUS" == "200" ]; then
-            if [ "$VERSION_RESPONSE" == "$EXPECTED_VERSION" ]; then
+            if [ "$SKIP_VERSION_MATCH" == "true" ]; then
+                echo -e "${GREEN}✓ Version check passed! Deployed version: ${VERSION_RESPONSE}${NC}"
+                return 0
+            elif [ "$VERSION_RESPONSE" == "$EXPECTED_VERSION" ]; then
                 echo -e "${GREEN}✓ Version check passed! Deployed version: ${VERSION_RESPONSE}${NC}"
                 return 0
             else
