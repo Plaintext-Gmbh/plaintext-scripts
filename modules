@@ -1,18 +1,15 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
-#  MODULE MANAGER - Interactive TUI
+#  PLAINTEXT MODULE MANAGER - Interactive TUI
 #  Toggle modules on/off for faster development builds.
 #  Disabled modules are commented out in pom.xml files.
 #  Pre-push hook re-enables all modules automatically.
-#
-#  Shared via ~/codeplain/plaintext-scripts/
-#  Module definitions are read from modules-conf.txt in the
-#  project root.
 # ═══════════════════════════════════════════════════════════════
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# PROJECT_DIR must be set by caller (e.g. start script) or defaults to cwd
+SCRIPT_DIR="${PROJECT_DIR:-$(pwd)}"
 
 source "$HOME/codeplain/plaintext-scripts/tui-common.sh"
 source "$HOME/codeplain/plaintext-scripts/tui-modules-logic.sh"
@@ -23,16 +20,16 @@ if [[ "$1" == "apply" ]]; then
     load_state
     if has_disabled; then
         apply_changes
-        echo -e "${FG_GREEN}Applied ($(count_enabled)/${TOTAL} enabled)${RESET}"
+        echo -e "${FG_GREEN}✓ Applied ($(count_enabled)/${TOTAL} enabled)${RESET}"
     else
-        echo -e "${FG_GREEN}All modules already enabled${RESET}"
+        echo -e "${FG_GREEN}✓ All modules already enabled${RESET}"
     fi
     exit 0
 fi
 
 if [[ "$1" == "restore" || "$1" == "on" ]]; then
     restore_all
-    echo -e "${FG_GREEN}All modules re-enabled${RESET}"
+    echo -e "${FG_GREEN}✓ All modules re-enabled${RESET}"
     exit 0
 fi
 
@@ -42,16 +39,16 @@ if [[ "$1" == "status" ]]; then
     echo -e "${FG_BLUE}Module Status: ${FG_CYAN}${enabled}/${TOTAL} enabled${RESET}"
     for ((i=0; i<TOTAL; i++)); do
         if [[ "${TOGGLE_STATE[$i]}" == "1" ]]; then
-            echo -e "  ${FG_GREEN}[x]${RESET} ${TOGGLE_NAMES[$i]}"
+            echo -e "  ${FG_GREEN}☑${RESET} ${TOGGLE_NAMES[$i]}"
         else
-            echo -e "  ${FG_DIM}[ ] ${TOGGLE_NAMES[$i]}${RESET}"
+            echo -e "  ${FG_DIM}☐ ${TOGGLE_NAMES[$i]}${RESET}"
         fi
     done
     exit 0
 fi
 
 if [[ "$1" == "help" || "$1" == "-h" || "$1" == "--help" ]]; then
-    echo -e "${FG_BLUE}${BOLD}Module Manager${RESET}"
+    echo -e "${FG_BLUE}${BOLD}Plaintext Module Manager${RESET}"
     echo ""
     echo -e "  ${FG_CYAN}./modules${RESET}          Interactive TUI"
     echo -e "  ${FG_CYAN}./modules status${RESET}   Show current state"
@@ -76,21 +73,6 @@ trap cleanup EXIT
 tui_init
 tput smcup
 
-# Read TUI_TITLE from build-conf.txt if available
-_MODULE_TITLE="MODULE MANAGER"
-if [[ -f "$SCRIPT_DIR/build-conf.txt" ]]; then
-    while IFS='=' read -r key value; do
-        [[ "$key" =~ ^#.*$ ]] && continue
-        [[ -z "$key" ]] && continue
-        value="${value%%#*}"
-        value="${value%"${value##*[![:space:]]}"}"
-        if [[ "$key" == "TUI_TITLE" ]]; then
-            _MODULE_TITLE="${value} MODULES"
-            break
-        fi
-    done < "$SCRIPT_DIR/build-conf.txt"
-fi
-
 draw() {
     local TERM_ROWS TERM_COLS
     TERM_ROWS=$(tput lines)
@@ -110,14 +92,14 @@ draw() {
 
     local row=$start_row
 
-    # ── Blue band header ──
+    # ── Blue band header (uses custom rendering, not tui_hline) ──
     tput cup $row $col
     printf "${BG_BLUE}${FG_WHITE}${BOLD}"
-    local j; for ((j=0; j<TUI_W+2; j++)); do printf "%s" "▄"; done
+    local j; for ((j=0; j<TUI_W+2; j++)); do printf "▄"; done
     printf "${RESET}"
 
     row=$((row + 1)); tput cup $row $col
-    local title="$_MODULE_TITLE"
+    local title="PLAINTEXT MODULE MANAGER"
     local tlen=${#title}
     local lp=$(( (TUI_W - tlen) / 2 ))
     local rp=$((TUI_W - tlen - lp))
@@ -135,18 +117,21 @@ draw() {
     tui_hline "┌" "─" "┐"
 
     # Build display list: (type, index) - "g"=group header, "i"=item
-    local DLIST_TYPE=()
-    local DLIST_IDX=()
-    local DLIST_LABEL=()
+    # We pre-compute which display-line the cursor item is on
+    local DLIST_TYPE=()   # "g" or "i"
+    local DLIST_IDX=()    # module index for "i", -1 for "g"
+    local DLIST_LABEL=()  # group name for "g", display name for "i"
     local cursor_dline=-1
     local prev_grp=""
     local i dline=0
     for ((i=0; i<TOTAL; i++)); do
         local grp="${TOGGLE_GROUP[$i]}"
         if [[ "$grp" != "$prev_grp" ]]; then
-            # Capitalize first letter for group header
-            local grp_label="$(echo "${grp:0:1}" | tr '[:lower:]' '[:upper:]')${grp:1}"
-            DLIST_LABEL+=("$grp_label")
+            case "$grp" in
+                root)    DLIST_LABEL+=("Root") ;;
+                admin)   DLIST_LABEL+=("Admin") ;;
+                feature) DLIST_LABEL+=("Features") ;;
+            esac
             DLIST_TYPE+=("g")
             DLIST_IDX+=(-1)
             dline=$((dline + 1))
@@ -162,7 +147,7 @@ draw() {
     done
     local DLIST_TOTAL=${#DLIST_TYPE[@]}
 
-    # Calculate viewport
+    # Calculate viewport (fixed overhead: header=4, box_top=1, footer=5, bottom=1 = 11)
     local fixed_overhead=11
     local viewport=$((TERM_ROWS - fixed_overhead))
     [[ $viewport -lt 5 ]] && viewport=5
@@ -193,11 +178,13 @@ draw() {
         row=$((row + 1)); tput cup $row $col
 
         if [[ "${DLIST_TYPE[$d]}" == "g" ]]; then
+            # Group header
             tui_row "  ${DLIST_LABEL[$d]}" "${FG_BLUE}${BOLD}"
             rendered=$((rendered + 1))
             continue
         fi
 
+        # Module item (custom rendering for checkboxes, locked state, colors)
         local mi="${DLIST_IDX[$d]}"
         local dname="${DLIST_LABEL[$d]}"
         local is_sel=0
@@ -210,23 +197,23 @@ draw() {
         if [[ $locked -eq 1 ]]; then
             local icon="■" item_color="${FG_DIM}" icon_color="${FG_DIM}"
         elif [[ $is_on -eq 1 ]]; then
-            local icon="[x]" item_color="${FG_CYAN}" icon_color="${FG_GREEN}"
+            local icon="☑" item_color="${FG_CYAN}" icon_color="${FG_GREEN}"
         else
-            local icon="[ ]" item_color="${FG_DIM}" icon_color="${FG_DIM}"
+            local icon="☐" item_color="${FG_DIM}" icon_color="${FG_DIM}"
         fi
 
         if [[ $is_sel -eq 1 ]]; then
-            local text="  > ${icon} ${dname}"
+            local text="  ▸ ${icon} ${dname}"
             if [[ $locked -eq 1 ]]; then
-                text="  > ${icon} ${dname} (locked)"
+                text="  ▸ ${icon} ${dname} (locked)"
             fi
             local pad2=$((TUI_W - ${#text}))
             [[ $pad2 -lt 0 ]] && pad2=0
             printf "${BG_SELECT}${FG_DBLUE}│${RESET}"
             if [[ $locked -eq 1 ]]; then
-                printf "${BG_SELECT}  > ${FG_DIM}${icon} %s (locked)" "$dname"
+                printf "${BG_SELECT}  ▸ ${FG_DIM}${icon} %s (locked)" "$dname"
             else
-                printf "${BG_SELECT}  > ${icon_color}${icon} ${FG_WHITE}${BOLD}%s" "$dname"
+                printf "${BG_SELECT}  ▸ ${icon_color}${icon} ${FG_WHITE}${BOLD}%s" "$dname"
             fi
             printf "%${pad2}s" ""
             printf "${RESET}${BG_SELECT}${FG_DBLUE}│${RESET}"
@@ -255,7 +242,7 @@ draw() {
     tui_hline "├" "─" "┤"
 
     row=$((row + 1)); tput cup $row $col
-    tui_row "  Up/Down Navigate  SPC Toggle  A/N All" "${FG_DIM}"
+    tui_row "  ↑↓ Navigate  SPC Toggle  A/N All" "${FG_DIM}"
 
     row=$((row + 1)); tput cup $row $col
     tui_hline "├" "─" "┤"
@@ -279,11 +266,11 @@ show_help() {
     tput clear
     tput cup $row $col; tui_hline "┌" "─" "┐"
     row=$((row+1)); tput cup $row $col; tui_row "" ""
-    row=$((row+1)); tput cup $row $col; tui_row "  MODULE MANAGER - HELP" "${FG_WHITE}${BOLD}"
+    row=$((row+1)); tput cup $row $col; tui_row "  PLAINTEXT MODULE MANAGER - HELP" "${FG_WHITE}${BOLD}"
     row=$((row+1)); tput cup $row $col; tui_row "" ""
     row=$((row+1)); tput cup $row $col; tui_hline "├" "─" "┤"
     row=$((row+1)); tput cup $row $col; tui_row "  Tastatur:" "${FG_CYAN}${BOLD}"
-    row=$((row+1)); tput cup $row $col; tui_row "    Up Down   Navigieren" "${FG_CYAN}"
+    row=$((row+1)); tput cup $row $col; tui_row "    ↑ ↓       Navigieren" "${FG_CYAN}"
     row=$((row+1)); tput cup $row $col; tui_row "    SPACE     Modul ein/ausschalten" "${FG_CYAN}"
     row=$((row+1)); tput cup $row $col; tui_row "    A / N     Alle ein / alle aus" "${FG_CYAN}"
     row=$((row+1)); tput cup $row $col; tui_row "    Q / ESC   Beenden (Speichern/Abbrechen)" "${FG_CYAN}"
@@ -314,6 +301,7 @@ show_quit_dialog() {
     [[ $dlg_row -lt 0 ]] && dlg_row=0
     [[ $dlg_col -lt 0 ]] && dlg_col=0
 
+    # Draw dialog box
     tput cup $dlg_row $dlg_col
     printf "${FG_DBLUE}┌"; for ((j=0; j<dlg_w; j++)); do printf "─"; done; printf "┐${RESET}"
 
@@ -335,6 +323,7 @@ show_quit_dialog() {
     r=$((r + 1)); tput cup $r $dlg_col
     printf "${FG_DBLUE}└"; for ((j=0; j<dlg_w; j++)); do printf "─"; done; printf "┘${RESET}"
 
+    # Wait for choice
     while true; do
         IFS= read -rsn1 dlg_key
         case "$dlg_key" in
@@ -389,10 +378,10 @@ while true; do
                 fi
             done
             ;;
-        'q'|'Q')
+        'q'|'Q') # Quit - ask save or cancel
             show_quit_dialog
             ;;
-        'b'|'B')
+        'b'|'B') # Save + Build & Run
             cleanup
             save_and_apply
             echo ""

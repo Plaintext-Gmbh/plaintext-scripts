@@ -9,20 +9,31 @@
 #  for the expected format.
 # ═══════════════════════════════════════════════════════════════
 
-MODULES_CONF="$SCRIPT_DIR/modules-conf.txt"
+PLAINTEXT_CONFIG_DIR="${PLAINTEXT_CONFIG_DIR:-$HOME/codeplain/plaintext-config}"
+_project_name=$(basename "$SCRIPT_DIR")
 
-if [[ ! -f "$MODULES_CONF" ]]; then
-    echo "ERROR: modules-conf.txt not found in $SCRIPT_DIR" >&2
-    echo "Copy modules-conf.txt.template from ~/codeplain/plaintext-scripts/ and adapt it." >&2
+# Resolve modules-conf.txt: plaintext-config first, then project-local
+if [[ -f "$PLAINTEXT_CONFIG_DIR/$_project_name/modules-conf.txt" ]]; then
+    MODULES_CONF="$PLAINTEXT_CONFIG_DIR/$_project_name/modules-conf.txt"
+elif [[ -f "$SCRIPT_DIR/modules-conf.txt" ]]; then
+    MODULES_CONF="$SCRIPT_DIR/modules-conf.txt"
+else
+    echo "ERROR: modules-conf.txt not found (checked plaintext-config and $SCRIPT_DIR)" >&2
     exit 1
 fi
 
 ROOT_POM="$SCRIPT_DIR/pom.xml"
 STATE_FILE="$SCRIPT_DIR/.modules-state"
 
-# Webapp POM path: read WEBAPP_MODULE from build-conf.txt if available
-if [[ -f "$SCRIPT_DIR/build-conf.txt" ]]; then
-    _WEBAPP_MODULE=""
+# Webapp POM path: read WEBAPP_MODULE from build-conf.txt or plaintext-build.cfg
+_WEBAPP_MODULE=""
+_build_conf=""
+if [[ -f "$PLAINTEXT_CONFIG_DIR/$_project_name/build-conf.txt" ]]; then
+    _build_conf="$PLAINTEXT_CONFIG_DIR/$_project_name/build-conf.txt"
+elif [[ -f "$SCRIPT_DIR/build-conf.txt" ]]; then
+    _build_conf="$SCRIPT_DIR/build-conf.txt"
+fi
+if [[ -n "$_build_conf" ]]; then
     while IFS='=' read -r key value; do
         [[ "$key" =~ ^#.*$ ]] && continue
         [[ -z "$key" ]] && continue
@@ -31,7 +42,7 @@ if [[ -f "$SCRIPT_DIR/build-conf.txt" ]]; then
         if [[ "$key" == "WEBAPP_MODULE" ]]; then
             _WEBAPP_MODULE="$value"
         fi
-    done < "$SCRIPT_DIR/build-conf.txt"
+    done < "$_build_conf"
     WEBAPP_POM="$SCRIPT_DIR/${_WEBAPP_MODULE}/pom.xml"
 else
     # Fallback: try to find from modules-conf.txt WEBAPP_POM setting
