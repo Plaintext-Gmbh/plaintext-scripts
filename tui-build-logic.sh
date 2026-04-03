@@ -455,7 +455,12 @@ setup_blue_green() {
         return 1
     fi
 
-    local DEPLOY_DIR="$SCRIPT_DIR/deploy"
+    local DEPLOY_DIR
+    DEPLOY_DIR=$(get_deploy_dir "$SCRIPT_DIR")
+    if [[ -z "$DEPLOY_DIR" ]]; then
+        echo -e "${RED}✗ Deploy directory not found (checked plaintext-config and $SCRIPT_DIR)${NC}"
+        return 1
+    fi
 
     # Create directories on NAS
     echo -e "${BLUE}Creating directory structure...${NC}"

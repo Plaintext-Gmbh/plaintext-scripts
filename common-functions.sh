@@ -92,5 +92,23 @@ get_compose_file() {
     fi
 }
 
+# Resolve deploy dir from plaintext-config or project dir
+# Usage: get_deploy_dir "/path/to/project"
+# Returns: path to deploy directory
+get_deploy_dir() {
+    local project_dir="${1:-.}"
+    local project_name
+    project_name=$(basename "$project_dir")
+
+    # 1. plaintext-config repo
+    if [[ -d "$PLAINTEXT_CONFIG_DIR/$project_name/deploy" ]]; then
+        echo "$PLAINTEXT_CONFIG_DIR/$project_name/deploy"
+    # 2. Project-local fallback
+    elif [[ -d "$project_dir/deploy" ]]; then
+        echo "$project_dir/deploy"
+    fi
+}
+
 export -f load_build_conf
 export -f get_compose_file
+export -f get_deploy_dir
