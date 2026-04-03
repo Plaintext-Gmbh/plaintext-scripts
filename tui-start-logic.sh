@@ -113,6 +113,12 @@ get_status_line() {
     echo "stopped"
 }
 
+# ── Flyway Version Number ─────────────────────────────────────
+
+do_flywaynr() {
+    exec "$HOME/codeplain/plaintext-scripts/getflywaynr"
+}
+
 # ── Playwright Integration Tests ──────────────────────────────
 
 do_playwright_build() {
