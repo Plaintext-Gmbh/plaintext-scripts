@@ -554,11 +554,23 @@ restart_twingate_if_needed() {
 }
 
 # Ensure NAS is reachable via SSH
+# If NAS is not reachable and Twingate is running, stop Twingate and retry
 ensure_nas_reachable() {
     echo -e "${BLUE}Checking NAS connectivity (${NAS_HOST})...${NC}"
     if ssh -o ConnectTimeout=10 "${DEPLOY_SERVER}" "echo ok" >/dev/null 2>&1; then
         echo -e "${GREEN}✓ NAS reachable${NC}"
         return 0
+    fi
+
+    # NAS not reachable - try stopping Twingate if it might interfere
+    if is_twingate_running; then
+        echo -e "${YELLOW}NAS not reachable, stopping Twingate and retrying...${NC}"
+        stop_twingate
+        sleep 2
+        if ssh -o ConnectTimeout=10 "${DEPLOY_SERVER}" "echo ok" >/dev/null 2>&1; then
+            echo -e "${GREEN}✓ NAS reachable (after stopping Twingate)${NC}"
+            return 0
+        fi
     fi
 
     echo -e "${RED}✗ Cannot reach NAS at ${NAS_HOST}${NC}"
