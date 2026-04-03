@@ -103,8 +103,16 @@ rm -f "$BUSY_FILE"
 rm -rf "$BATCH_DIR"
 mkdir -p "$BATCH_DIR"
 
+get_claude_cpu() {
+    # CPU-Auslastung des Claude Code CLI-Prozesses (nicht Claude Desktop)
+    ps aux | grep 'claude.*--dangerously\|claude.*--skip' | grep -v grep \
+        | awk '{sum += $3} END {printf "%.0f", sum+0}'
+}
+
 monitor_claude_idle() {
-    local saw_busy=false
+    local idle_count=0
+    local CPU_THRESHOLD=3  # Unter 3% = idle
+
     while true; do
         sleep 2
 
@@ -121,36 +129,26 @@ monitor_claude_idle() {
                 paste_clipboard
                 press_enter
                 touch "$BUSY_FILE"
+                idle_count=0
             fi
-            saw_busy=false
             continue
         fi
 
-        local last_lines status_lines
-        last_lines=$(osascript -e '
-tell application "Terminal"
-    repeat with w in windows
-        if name of w contains "claude" then
-            return contents of selected tab of w
-        end if
-    end repeat
-    return ""
-end tell' 2>/dev/null | tail -30) || true
-        status_lines=$(echo "$last_lines" | grep -v '⎿' || true)
+        # CPU-basierte Idle-Erkennung
+        local cpu
+        cpu=$(get_claude_cpu)
 
-        # Busy: Status-Zeile mit "ing…" (Thinking…, Slithering…, Baking…, etc.)
-        if echo "$status_lines" | grep -qE 'ing…'; then
-            saw_busy=true
-        elif $saw_busy; then
-            # Busy-Indikator war da und ist jetzt weg → fertig
-            rm -f "$BUSY_FILE"
-            saw_busy=false
-            afplay /System/Library/Sounds/Glass.aiff 2>/dev/null &
-        elif echo "$status_lines" | grep -v '…' | grep -qE 'for [0-9]+[smh]'; then
-            # Schnelle Antwort: Busy nie gesehen, aber Idle-Marker da → fertig
-            rm -f "$BUSY_FILE"
-            saw_busy=false
-            afplay /System/Library/Sounds/Glass.aiff 2>/dev/null &
+        if [[ "$cpu" -lt "$CPU_THRESHOLD" ]]; then
+            idle_count=$((idle_count + 1))
+            # 2 aufeinanderfolgende Checks unter Threshold = wirklich idle
+            # (verhindert false positives bei kurzen CPU-Pausen)
+            if [[ "$idle_count" -ge 2 ]]; then
+                rm -f "$BUSY_FILE"
+                idle_count=0
+                afplay /System/Library/Sounds/Glass.aiff 2>/dev/null &
+            fi
+        else
+            idle_count=0
         fi
     done
 }

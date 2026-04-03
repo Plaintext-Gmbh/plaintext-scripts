@@ -7,17 +7,13 @@
 #  Expects: SCRIPT_DIR set, cwd = SCRIPT_DIR
 # ═══════════════════════════════════════════════════════════════
 
-# ── Load project configuration from build-conf.txt ───────────
-if [ -f "$SCRIPT_DIR/build-conf.txt" ]; then
-    while IFS='=' read -r key value; do
-        [[ "$key" =~ ^#.*$ ]] && continue
-        [[ -z "$key" ]] && continue
-        value="${value%%#*}"
-        value="${value%"${value##*[![:space:]]}"}"
-        export "$key"="$value"
-    done < "$SCRIPT_DIR/build-conf.txt"
-else
-    echo "ERROR: build-conf.txt not found in $SCRIPT_DIR" >&2
+# ── Load project configuration ───────────────────────────────
+# Source common functions for config loading
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPTS_DIR/common-functions.sh"
+
+if ! load_build_conf "$SCRIPT_DIR"; then
+    echo "ERROR: build-conf.txt not found (checked plaintext-config and $SCRIPT_DIR)" >&2
     exit 1
 fi
 
@@ -63,9 +59,18 @@ else
 fi
 
 REGISTRY="${NAS_HOST}:6666"
-VERSION_FILE="version.txt"
-VERSION_RELEASE_FILE="versionRelease.txt"
 DEPLOY_SERVER="mad@${NAS_HOST}"
+
+# ── Read versions from pom.xml (no more version.txt / versionRelease.txt) ──
+get_pom_version() {
+    mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>/dev/null || \
+        grep -m1 '<version>' pom.xml | sed 's/.*<version>//;s/<\/version>.*//' | tr -d ' '
+}
+
+get_release_version() {
+    # Latest git tag that looks like a version number
+    git describe --tags --abbrev=0 --match '[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || echo "0.0.0"
+}
 DEPLOY_PATH="${DEPLOY_PATH:-/volume1/docker/${IMAGE_NAME}}"
 COMPOSE_FILE="docker-compose.yaml"
 
@@ -683,13 +688,13 @@ deploy_to_prod() {
         return 1
     fi
 
-    if [ ! -f "$VERSION_RELEASE_FILE" ]; then
-        echo -e "${RED}Error: $VERSION_RELEASE_FILE not found!${NC}"
+    local RELEASE_VERSION
+    RELEASE_VERSION=$(get_release_version)
+    if [[ -z "$RELEASE_VERSION" || "$RELEASE_VERSION" == "0.0.0" ]]; then
+        echo -e "${RED}Error: No release tag found in git!${NC}"
         echo -e "${RED}No release version available for production deployment.${NC}"
-        exit 1
+        return 1
     fi
-
-    local RELEASE_VERSION=$(cat "$VERSION_RELEASE_FILE")
     echo -e "${BLUE}Deploying release version: ${GREEN}${RELEASE_VERSION}${NC}"
 
     local ACTIVE_SLOT
@@ -741,87 +746,20 @@ deploy_to_prod() {
 }
 
 # Function to compare versions and auto-increment if needed
-fix_version_mismatch() {
-    local version_txt="$1"
-    local version_release_txt="$2"
-
-    local current_version=$(cat "$version_txt" 2>/dev/null || echo "1.0.0-SNAPSHOT")
-    local release_version=$(cat "$version_release_txt" 2>/dev/null || echo "0.0.0")
-
-    local current_clean="${current_version%-SNAPSHOT}"
-
-    IFS='.' read -r -a current_parts <<< "$current_clean"
-    IFS='.' read -r -a release_parts <<< "$release_version"
-
-    local current_major="${current_parts[0]:-0}"
-    local current_minor="${current_parts[1]:-0}"
-    local current_patch="${current_parts[2]:-0}"
-
-    local release_major="${release_parts[0]:-0}"
-    local release_minor="${release_parts[1]:-0}"
-    local release_patch="${release_parts[2]:-0}"
-
-    local current_num=$((current_major * 10000 + current_minor * 100 + current_patch))
-    local release_num=$((release_major * 10000 + release_minor * 100 + release_patch))
-
-    if [ $release_num -ge $current_num ]; then
-        local new_minor=$((release_minor + 1))
-        local new_version="${release_major}.${new_minor}.0-SNAPSHOT"
-
-        echo -e "${YELLOW}Version mismatch detected!${NC}" >&2
-        echo -e "${YELLOW}  Current version.txt:        ${current_version}${NC}" >&2
-        echo -e "${YELLOW}  Release versionRelease.txt: ${release_version}${NC}" >&2
-        echo -e "${GREEN}  Auto-correcting to:         ${new_version}${NC}" >&2
-
-        echo "$new_version" > "$version_txt"
-        echo "$new_version"
-    else
-        echo "$current_version"
-    fi
-}
-
-# ── Version Initialization ────────────────────────────────────
+# ── Version Initialization (reads from pom.xml + git tags) ────
 
 init_versions() {
-    if [ ! -f "$VERSION_FILE" ]; then
-        echo "1.0.0-SNAPSHOT" > "$VERSION_FILE"
+    CURRENT_VERSION=$(get_pom_version)
+    RELEASE_VERSION=$(get_release_version)
+
+    if [[ -z "$CURRENT_VERSION" || "$CURRENT_VERSION" == "null" ]]; then
+        CURRENT_VERSION="1.0.0-SNAPSHOT"
+        echo -e "${YELLOW}Could not read version from pom.xml, using ${CURRENT_VERSION}${NC}"
     fi
 
-    VERSION_BEFORE=$(cat "$VERSION_FILE" 2>/dev/null || echo "unknown")
-    CURRENT_VERSION=$(fix_version_mismatch "$VERSION_FILE" "$VERSION_RELEASE_FILE")
-    VERSION_AFTER=$(cat "$VERSION_FILE" 2>/dev/null || echo "unknown")
-
-    if [ "$VERSION_BEFORE" != "$VERSION_AFTER" ]; then
-        echo -e "${BLUE}Version was auto-corrected, updating Maven POMs...${NC}"
-
-        if ! mvn versions:set -DnewVersion="${CURRENT_VERSION}" -DgenerateBackupPoms=false -q 2>/dev/null; then
-            echo -e "${YELLOW}Maven versions:set failed, trying with next minor version...${NC}"
-
-            IFS='.' read -r -a ver_parts <<< "${CURRENT_VERSION%-SNAPSHOT}"
-            MAJOR="${ver_parts[0]:-1}"
-            MINOR="${ver_parts[1]:-0}"
-            NEW_MINOR=$((MINOR + 1))
-            FALLBACK_VERSION="${MAJOR}.${NEW_MINOR}.0-SNAPSHOT"
-
-            echo -e "${YELLOW}Fallback version: ${GREEN}${FALLBACK_VERSION}${NC}"
-            echo "$FALLBACK_VERSION" > "$VERSION_FILE"
-            CURRENT_VERSION="$FALLBACK_VERSION"
-
-            if ! mvn versions:set -DnewVersion="${CURRENT_VERSION}" -DgenerateBackupPoms=false -q 2>/dev/null; then
-                echo -e "${RED}Maven versions:set failed even with fallback version!${NC}"
-                echo -e "${YELLOW}Continuing anyway with version in pom.xml...${NC}"
-            fi
-        fi
-
-        echo -e "${BLUE}Committing version correction...${NC}"
-        git add "$VERSION_FILE" pom.xml "*/pom.xml" 2>/dev/null || true
-        git commit -m "Auto-correct version to ${CURRENT_VERSION} [skip-ci]" || true
-    fi
-
-    # Read release version for display
-    RELEASE_VERSION=""
-    if [ -f "$VERSION_RELEASE_FILE" ]; then
-        RELEASE_VERSION=$(cat "$VERSION_RELEASE_FILE")
+    echo -e "${BLUE}Current version: ${GREEN}${CURRENT_VERSION}${NC}"
+    if [[ -n "$RELEASE_VERSION" && "$RELEASE_VERSION" != "0.0.0" ]]; then
+        echo -e "${BLUE}Last release:    ${GREEN}${RELEASE_VERSION}${NC}"
     fi
 }
 
@@ -830,10 +768,6 @@ init_versions() {
 # Build + Run locally (no Docker)
 do_run() {
     echo -e "${YELLOW}=== Build + Run (local) ===${NC}"
-
-    BUILD_TIME=$(date '+%d.%m.%y %H:%M')
-    echo "$BUILD_TIME" > buildTimestamp.txt
-    echo -e "${BLUE}Build timestamp: ${GREEN}${BUILD_TIME}${NC}"
 
     echo -e "${BLUE}Building with Maven...${NC}"
     mvn clean package -DskipTests
@@ -862,10 +796,6 @@ do_run() {
 # Build with Maven (SNAPSHOT), $1=optional "deploy" arg
 do_build_snapshot() {
     echo -e "${YELLOW}=== Maven Build (SNAPSHOT) ===${NC}"
-
-    BUILD_TIME=$(date '+%d.%m.%y %H:%M')
-    echo "$BUILD_TIME" > buildTimestamp.txt
-    echo -e "${BLUE}Build timestamp: ${GREEN}${BUILD_TIME}${NC}"
 
     echo -e "${BLUE}Building with Maven...${NC}"
     if ! mvn clean package -DskipTests; then
@@ -954,14 +884,8 @@ do_release() {
     NEXT_SNAPSHOT_VERSION="${MAJOR}.${NEXT_MINOR}.0-SNAPSHOT"
     echo -e "${BLUE}Next SNAPSHOT version: ${GREEN}${NEXT_SNAPSHOT_VERSION}${NC}"
 
-    echo "$NEW_VERSION" > "$VERSION_RELEASE_FILE"
-
     echo -e "${BLUE}Maven: Setting version to ${GREEN}${NEW_VERSION}${NC}"
     mvn versions:set -DnewVersion="${NEW_VERSION}" -DgenerateBackupPoms=false
-
-    BUILD_TIME=$(date '+%d.%m.%y %H:%M')
-    echo "$BUILD_TIME" > buildTimestamp.txt
-    echo -e "${BLUE}Build timestamp: ${GREEN}${BUILD_TIME}${NC}"
 
     echo -e "${BLUE}Git: Checking for changes to include in release ${NEW_VERSION}...${NC}"
 
@@ -1027,10 +951,8 @@ Includes:
     echo -e "${BLUE}Maven: Preparing next SNAPSHOT version ${GREEN}${NEXT_SNAPSHOT_VERSION}${NC}"
     mvn versions:set -DnewVersion="${NEXT_SNAPSHOT_VERSION}" -DgenerateBackupPoms=false
 
-    echo "$NEXT_SNAPSHOT_VERSION" > "$VERSION_FILE"
-
     echo -e "${BLUE}Git: Committing next SNAPSHOT version...${NC}"
-    git add "$VERSION_FILE" pom.xml "*/pom.xml" || true
+    git add pom.xml "*/pom.xml" || true
     git commit -m "Prepare next development iteration ${NEXT_SNAPSHOT_VERSION} [skip-ci]"
 
     echo -e "${BLUE}Git: Pushing to remote...${NC}"
