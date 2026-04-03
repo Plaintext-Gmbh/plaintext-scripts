@@ -5,7 +5,7 @@
 #  Disabled modules are commented out in pom.xml files.
 #  Pre-push hook re-enables all modules automatically.
 #
-#  Shared via ~/.plaintext-scripts/
+#  Shared via ~/code/plaintext-scripts/
 #  Module definitions are read from modules-conf.txt in the
 #  project root.
 # ═══════════════════════════════════════════════════════════════
@@ -14,8 +14,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-source "$HOME/.plaintext-scripts/tui-common.sh"
-source "$HOME/.plaintext-scripts/tui-modules-logic.sh"
+source "$HOME/code/plaintext-scripts/tui-common.sh"
+source "$HOME/code/plaintext-scripts/tui-modules-logic.sh"
 
 # ── Non-interactive mode ─────────────────────────────────────
 

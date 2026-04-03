@@ -13,7 +13,7 @@ MODULES_CONF="$SCRIPT_DIR/modules-conf.txt"
 
 if [[ ! -f "$MODULES_CONF" ]]; then
     echo "ERROR: modules-conf.txt not found in $SCRIPT_DIR" >&2
-    echo "Copy modules-conf.txt.template from ~/.plaintext-scripts/ and adapt it." >&2
+    echo "Copy modules-conf.txt.template from ~/code/plaintext-scripts/ and adapt it." >&2
     exit 1
 fi
 

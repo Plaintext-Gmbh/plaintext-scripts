@@ -1,0 +1,301 @@
+#!/usr/bin/env bash
+# Voice-to-Claude: Aufnehmen, Transkribieren, in Claude Code einfügen + Enter.
+# Usage: voice [de|en|fr]
+# Features:
+#   - Clipboard-Text wird automatisch als Zitat vorangestellt
+#   - "Screenshot" am Anfang → Screenshot wird gemacht und in Claude eingefügt
+#   - Akustische Benachrichtigung wenn Claude Code fertig ist
+# Steuerung: Enter/Space = Aufnahme starten/stoppen, Esc = Beenden
+
+set -uo pipefail
+
+MODEL="$HOME/.whisper-models/ggml-small.bin"
+TMPFILE="/tmp/voice_recording.wav"
+SCREENSHOT="/tmp/voice_screenshot.png"
+BUSY_FILE="/tmp/voice_claude_busy"
+BATCH_DIR="/tmp/voice_batch"
+LANG_CODE="${1:-de}"
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+RED='\033[0;31m'
+GRAY='\033[0;90m'
+NC='\033[0m'
+
+MY_WINDOW=$(osascript -e 'tell application "Terminal" to get id of front window' 2>/dev/null || echo "")
+
+focus_claude() {
+    osascript \
+        -e 'tell application "Terminal"' \
+        -e '  repeat with w in windows' \
+        -e '    if name of w contains "claude" then' \
+        -e '      set frontmost of w to true' \
+        -e '      set selected tab of w to selected tab of w' \
+        -e '      exit repeat' \
+        -e '    end if' \
+        -e '  end repeat' \
+        -e '  activate' \
+        -e 'end tell' \
+        -e 'delay 0.8' \
+        2>/dev/null
+}
+
+paste_clipboard() {
+    osascript \
+        -e 'tell application "System Events" to keystroke "v" using command down' \
+        2>/dev/null
+}
+
+press_enter() {
+    osascript \
+        -e 'delay 0.4' \
+        -e 'tell application "System Events" to key code 36' \
+        2>/dev/null
+}
+
+paste_to_claude() {
+    echo -n "$1" | pbcopy
+    focus_claude
+    paste_clipboard
+    press_enter
+}
+
+screenshot_and_paste() {
+    local text="$1"
+    rm -f "$SCREENSHOT"
+    screencapture "$SCREENSHOT" 2>/dev/null
+    if [[ ! -f "$SCREENSHOT" ]]; then
+        return 1
+    fi
+    paste_to_claude "${text}
+
+Screenshot: ${SCREENSHOT}"
+}
+
+switch_back() {
+    [ -z "$MY_WINDOW" ] && return
+    osascript \
+        -e "tell application \"Terminal\"" \
+        -e "  repeat with w in windows" \
+        -e "    if id of w is $MY_WINDOW then" \
+        -e "      set frontmost of w to true" \
+        -e "      exit repeat" \
+        -e "    end if" \
+        -e "  end repeat" \
+        -e "  activate" \
+        -e "end tell" \
+        2>/dev/null
+}
+
+read_key() {
+    local key
+    IFS= read -rsn1 key
+    if [[ "$key" == $'\x1b' ]]; then
+        echo "ESC"
+        return
+    fi
+    echo "$key"
+}
+
+# ── Hintergrund: Claude Code idle-Monitor ─────────────────────
+rm -f "$BUSY_FILE"
+rm -rf "$BATCH_DIR"
+mkdir -p "$BATCH_DIR"
+
+monitor_claude_idle() {
+    local saw_busy=false
+    while true; do
+        sleep 2
+
+        # Claude ist idle — nächsten Batch senden falls vorhanden
+        if [[ ! -f "$BUSY_FILE" ]]; then
+            local next_batch
+            next_batch=$(ls "$BATCH_DIR"/*.txt 2>/dev/null | sort | head -1) || true
+            if [[ -n "$next_batch" ]]; then
+                local prompt
+                prompt=$(cat "$next_batch")
+                rm -f "$next_batch"
+                echo -n "$prompt" | pbcopy
+                focus_claude
+                paste_clipboard
+                press_enter
+                touch "$BUSY_FILE"
+            fi
+            saw_busy=false
+            continue
+        fi
+
+        local last_lines status_lines
+        last_lines=$(osascript -e '
+tell application "Terminal"
+    repeat with w in windows
+        if name of w contains "claude" then
+            return contents of selected tab of w
+        end if
+    end repeat
+    return ""
+end tell' 2>/dev/null | tail -30) || true
+        status_lines=$(echo "$last_lines" | grep -v '⎿' || true)
+
+        # Busy: Status-Zeile mit "ing…" (Thinking…, Slithering…, Baking…, etc.)
+        if echo "$status_lines" | grep -qE 'ing…'; then
+            saw_busy=true
+        elif $saw_busy; then
+            # Busy-Indikator war da und ist jetzt weg → fertig
+            rm -f "$BUSY_FILE"
+            saw_busy=false
+            afplay /System/Library/Sounds/Glass.aiff 2>/dev/null &
+        elif echo "$status_lines" | grep -v '…' | grep -qE 'for [0-9]+[smh]'; then
+            # Schnelle Antwort: Busy nie gesehen, aber Idle-Marker da → fertig
+            rm -f "$BUSY_FILE"
+            saw_busy=false
+            afplay /System/Library/Sounds/Glass.aiff 2>/dev/null &
+        fi
+    done
+}
+
+monitor_claude_idle </dev/null >/dev/null 2>&1 &
+MONITOR_PID=$!
+
+cleanup() {
+    kill $MONITOR_PID 2>/dev/null || true
+    rm -f "$BUSY_FILE"
+    rm -rf "$BATCH_DIR"
+}
+trap cleanup EXIT
+
+# ── UI ────────────────────────────────────────────────────────
+clear
+printf '\033]0;Voice Input\007'
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${GREEN}  🎙️  Voice-to-Claude${NC}  ${GRAY}(${LANG_CODE})${NC}"
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "  ${BLUE}Enter/Space${NC} = Aufnahme starten/stoppen"
+echo -e "  ${RED}Esc${NC}         = Beenden"
+echo -e "  ${GRAY}Clipboard-Text wird als Zitat vorangestellt${NC}"
+echo -e "  ${GRAY}\"Screenshot\" am Anfang → Screenshot machen${NC}"
+echo -e "  ${GRAY}🔔 Sound wenn Claude Code fertig ist${NC}"
+echo -e "  ${GRAY}\"Batch\" → Batch-Modus an/aus (Nachrichten sammeln)${NC}"
+echo ""
+
+while true; do
+    BATCH_COUNT=$(ls "$BATCH_DIR"/*.txt 2>/dev/null | wc -l | tr -d ' ')
+    if [[ -f "$BATCH_DIR/.mode" ]]; then
+        echo -e "${BLUE}📦 BATCH MODUS${NC} ${GRAY}(${BATCH_COUNT} gespeichert) — Enter/Space zum Starten${NC}"
+    elif [[ "$BATCH_COUNT" -gt 0 ]]; then
+        echo -e "${GRAY}⏸  Bereit${NC} ${BLUE}(📦 ${BATCH_COUNT} Batches warten)${NC}"
+    else
+        echo -e "${GRAY}⏸  Bereit — Enter/Space zum Starten${NC}"
+    fi
+
+    KEY=$(read_key)
+    [[ "$KEY" == "ESC" ]] && { echo -e "\n${RED}👋 Beendet${NC}"; exit 0; }
+
+    # Clipboard-Inhalt vor Aufnahme sichern
+    CLIP=$(pbpaste 2>/dev/null || echo "")
+
+    echo -e "${GREEN}🎙️  Aufnahme...${NC} (${YELLOW}Enter/Space${NC} zum Stoppen)"
+
+    rec -q -r 48000 -c 1 -b 16 "$TMPFILE" 2>/dev/null &
+    REC_PID=$!
+
+    KEY=$(read_key)
+    kill $REC_PID 2>/dev/null; wait $REC_PID 2>/dev/null || true
+    [[ "$KEY" == "ESC" ]] && { rm -f "$TMPFILE"; echo -e "\n${RED}👋 Beendet${NC}"; exit 0; }
+
+    echo -e "${BLUE}⏳ Transkribiere...${NC}"
+
+    TEXT=$(whisper-cli -m "$MODEL" -l "$LANG_CODE" -nt -f "$TMPFILE" 2>/dev/null \
+        | sed 's/\[.*\]//g; s/^ *//; s/ *$//; /^$/d' \
+        | tr '\n' ' ' \
+        | sed 's/  */ /g; s/^ *//; s/ *$//')
+
+    rm -f "$TMPFILE"
+
+    if [ -z "$TEXT" ]; then
+        echo -e "${YELLOW}⚠️  Nichts erkannt${NC}\n"
+        continue
+    fi
+
+    echo -e "${GREEN}📝 $TEXT${NC}"
+
+    TEXT_LOWER=$(echo "$TEXT" | tr '[:upper:]' '[:lower:]')
+
+    # "Batch" allein → Batch-Modus umschalten
+    if [[ "$TEXT_LOWER" =~ ^(batch|batsch|badge|patsch|putsch)[.,!]?[[:space:]]*$ ]]; then
+        if [[ -f "$BATCH_DIR/.mode" ]]; then
+            rm -f "$BATCH_DIR/.mode"
+            TOTAL=$(ls "$BATCH_DIR"/*.txt 2>/dev/null | wc -l | tr -d ' ')
+            echo -e "${GREEN}📦 Batch-Modus AUS${NC} ${GRAY}(${TOTAL} in Warteschlange)${NC}\n"
+        else
+            touch "$BATCH_DIR/.mode"
+            echo -e "${BLUE}📦 Batch-Modus AN — Nachrichten werden gesammelt${NC}\n"
+        fi
+        continue
+    fi
+
+    # Keyword-Erkennung: Screenshot und/oder Paste (in beliebiger Reihenfolge)
+    HAS_SCREENSHOT=false
+    HAS_PASTE=false
+    REMAINING_LOWER="$TEXT_LOWER"
+
+    for _ in 1 2; do
+        if [[ "$REMAINING_LOWER" =~ ^screenshot[.,!]?[[:space:]]*(.*) ]]; then
+            HAS_SCREENSHOT=true
+            REMAINING_LOWER="${BASH_REMATCH[1]}"
+        elif [[ "$REMAINING_LOWER" =~ ^paste[d]?[.,!]?[[:space:]]*(.*) ]]; then
+            HAS_PASTE=true
+            REMAINING_LOWER="${BASH_REMATCH[1]}"
+        elif [[ "$REMAINING_LOWER" =~ ^paced[.,!]?[[:space:]]*(.*) ]]; then
+            HAS_PASTE=true
+            REMAINING_LOWER="${BASH_REMATCH[1]}"
+        fi
+    done
+
+    REMAINING="$REMAINING_LOWER"
+
+    # Screenshot aufnehmen falls nötig
+    SCREENSHOT_REF=""
+    if $HAS_SCREENSHOT; then
+        echo -e "${BLUE}📸 Screenshot wird aufgenommen...${NC}"
+        rm -f "$SCREENSHOT"
+        screencapture "$SCREENSHOT" 2>/dev/null
+        if [[ -f "$SCREENSHOT" ]]; then
+            SCREENSHOT_REF="
+
+Screenshot: ${SCREENSHOT}"
+        else
+            echo -e "${YELLOW}⚠️  Screenshot fehlgeschlagen${NC}\n"
+            continue
+        fi
+    fi
+
+    # Prompt zusammenbauen
+    if $HAS_PASTE && [[ -n "$CLIP" ]]; then
+        echo -e "${GRAY}📋 Clipboard-Text als Zitat angehängt${NC}"
+        PROMPT="<eingefuegter-text>
+${CLIP}
+</eingefuegter-text>
+
+${REMAINING:-$TEXT}${SCREENSHOT_REF}"
+    elif $HAS_SCREENSHOT; then
+        PROMPT="${REMAINING:-Beschreibe was du auf dem Screenshot siehst.}${SCREENSHOT_REF}"
+    else
+        PROMPT="$TEXT"
+    fi
+
+    # Senden oder in Batch-Queue speichern
+    if [[ -f "$BATCH_DIR/.mode" ]]; then
+        NEXT=$(printf "%03d" $(( $(ls "$BATCH_DIR"/*.txt 2>/dev/null | wc -l | tr -d ' ') + 1 )))
+        printf '%s' "$PROMPT" > "$BATCH_DIR/$NEXT.txt"
+        TOTAL=$(ls "$BATCH_DIR"/*.txt 2>/dev/null | wc -l | tr -d ' ')
+        echo -e "${BLUE}📦 Batch #${TOTAL} gespeichert${NC}\n"
+    else
+        paste_to_claude "$PROMPT"
+        touch "$BUSY_FILE"
+        sleep 0.5
+        switch_back
+        echo -e "${GREEN}✅ Gesendet!${NC}\n"
+    fi
+done
