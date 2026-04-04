@@ -39,7 +39,7 @@ jobs:
           service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
 
       - name: Checkout (with push access)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           token: ${{ secrets.MVN_DEPLOY_TOKEN }}
           fetch-depth: 0
@@ -50,7 +50,7 @@ jobs:
           git config user.name "GithubActions"
 
       - name: Checkout plaintext-scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: daniel-marthaler/plaintext-scripts
           path: plaintext-scripts
