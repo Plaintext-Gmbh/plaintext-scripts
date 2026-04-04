@@ -84,6 +84,13 @@ jobs:
           --health-retries 5
 
     steps:
+      - name: Ensure test database exists
+        env:
+          DB_NAME: ${{ inputs.database-name }}
+        run: |
+          PGPASSWORD=plaintext psql -h localhost -p 5434 -U plaintext -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 || \
+          PGPASSWORD=plaintext psql -h localhost -p 5434 -U plaintext -c "CREATE DATABASE \"$DB_NAME\""
+
       - name: Checkout
         uses: actions/checkout@v6
 
