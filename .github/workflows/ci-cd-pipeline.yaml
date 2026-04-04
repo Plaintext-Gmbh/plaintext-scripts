@@ -183,8 +183,19 @@ jobs:
 
       - name: Install plaintext-scripts
         run: |
-          cp -r plaintext-scripts $HOME/.plaintext-scripts
-          chmod +x $HOME/.plaintext-scripts/*.sh
+          mkdir -p $HOME/codeplain
+          cp -r plaintext-scripts $HOME/codeplain/plaintext-scripts
+          chmod +x $HOME/codeplain/plaintext-scripts/*.sh
+
+      - name: Checkout plaintext-config
+        uses: actions/checkout@v4
+        with:
+          repository: daniel-marthaler/plaintext-config
+          path: plaintext-config
+          token: ${{ secrets.MVN_DEPLOY_TOKEN }}
+
+      - name: Install plaintext-config
+        run: cp -r plaintext-config $HOME/codeplain/plaintext-config
 
       - name: Setup JDK ${{ inputs.java-version }}
         uses: actions/setup-java@v4
