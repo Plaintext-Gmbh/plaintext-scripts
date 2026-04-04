@@ -190,7 +190,7 @@ jobs:
           chmod +x $HOME/codeplain/plaintext-scripts/*.sh
 
       - name: Checkout plaintext-config
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: daniel-marthaler/plaintext-config
           path: plaintext-config
