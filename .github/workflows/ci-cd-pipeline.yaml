@@ -85,7 +85,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup JDK ${{ inputs.java-version }}
         uses: actions/setup-java@v5
@@ -166,7 +166,7 @@ jobs:
           service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           token: ${{ secrets.MVN_DEPLOY_TOKEN }}
           fetch-depth: 0
@@ -177,7 +177,7 @@ jobs:
           git config user.name "GithubActions"
 
       - name: Checkout plaintext-scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: daniel-marthaler/plaintext-scripts
           path: plaintext-scripts
@@ -292,7 +292,7 @@ jobs:
       # ── Java Integration Tests (Maven Failsafe) ──
       - name: Checkout
         if: inputs.integration-tests-enabled || inputs.playwright-enabled
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup JDK ${{ inputs.java-version }}
         if: inputs.integration-tests-enabled
@@ -395,7 +395,7 @@ jobs:
       # ── Java Integration Tests (Maven Failsafe) ──
       - name: Checkout
         if: inputs.integration-tests-enabled || inputs.playwright-enabled
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup JDK ${{ inputs.java-version }}
         if: inputs.integration-tests-enabled
