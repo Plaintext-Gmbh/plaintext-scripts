@@ -113,7 +113,7 @@ jobs:
 
       - name: Upload Test Results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results
           path: '**/target/surefire-reports/*.xml'
@@ -121,7 +121,7 @@ jobs:
 
       - name: Upload Coverage Reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-reports
           path: '**/target/site/jacoco/'
@@ -319,7 +319,7 @@ jobs:
 
       - name: Upload Integration Test Results (DEV)
         if: inputs.integration-tests-enabled && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: integration-test-results-dev
           path: '**/target/failsafe-reports/*.xml'
@@ -327,7 +327,7 @@ jobs:
 
       - name: Upload Screenshots (DEV)
         if: inputs.integration-tests-enabled && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-screenshots-dev
           path: '**/target/screenshots/'
@@ -355,7 +355,7 @@ jobs:
 
       - name: Upload Playwright Report (DEV)
         if: inputs.playwright-enabled && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report-dev
           path: playwright-report/
@@ -422,7 +422,7 @@ jobs:
 
       - name: Upload Integration Test Results (PROD)
         if: inputs.integration-tests-enabled && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: integration-test-results-prod
           path: '**/target/failsafe-reports/*.xml'
@@ -430,7 +430,7 @@ jobs:
 
       - name: Upload Screenshots (PROD)
         if: inputs.integration-tests-enabled && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-screenshots-prod
           path: '**/target/screenshots/'
@@ -458,7 +458,7 @@ jobs:
 
       - name: Upload Playwright Report (PROD)
         if: inputs.playwright-enabled && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report-prod
           path: playwright-report/
