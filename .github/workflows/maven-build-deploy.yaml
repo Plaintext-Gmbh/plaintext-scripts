@@ -92,6 +92,7 @@ jobs:
       - name: Release, Build & Deploy
         env:
           PLAINTEXT_BUILD_CONFIG: ${{ inputs.build-config || secrets.BUILD_CONFIG }}
+          BUILD_COMMAND: ${{ inputs.build-command }}
         run: |
           chmod +x ./build
-          ./build ${{ inputs.build-command }}
+          ./build "$BUILD_COMMAND"
