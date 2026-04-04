@@ -337,7 +337,7 @@ jobs:
       # ── Node.js Playwright Tests ──
       - name: Setup Node.js
         if: inputs.playwright-enabled
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '22'
 
@@ -440,7 +440,7 @@ jobs:
       # ── Node.js Playwright Tests ──
       - name: Setup Node.js
         if: inputs.playwright-enabled
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '22'
 
