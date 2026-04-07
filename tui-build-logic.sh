@@ -392,7 +392,20 @@ deploy_blue_green() {
     local INACTIVE_SLOT
     INACTIVE_SLOT=$(get_inactive_slot "$ENV_NAME")
     local CONTAINER_NAME="${IMAGE_NAME}-${ENV_NAME}-${INACTIVE_SLOT}"
-    local COMPOSE_SERVICE="${ENV_NAME}-${INACTIVE_SLOT}"
+
+    # Detect compose service name: long (IMAGE_NAME-env-slot) or short (env-slot)
+    local LONG_SVC="${IMAGE_NAME}-${ENV_NAME}-${INACTIVE_SLOT}"
+    local SHORT_SVC="${ENV_NAME}-${INACTIVE_SLOT}"
+    local COMPOSE_SERVICE
+    COMPOSE_SERVICE=$(ssh ${DEPLOY_SERVER} "cd ${DEPLOY_PATH} && \
+        if grep -qE '^\s+${LONG_SVC}:' ${COMPOSE_FILE} 2>/dev/null; then echo '${LONG_SVC}'; \
+        elif grep -qE '^\s+${SHORT_SVC}:' ${COMPOSE_FILE} 2>/dev/null; then echo '${SHORT_SVC}'; \
+        else echo ''; fi")
+
+    if [ -z "$COMPOSE_SERVICE" ]; then
+        echo -e "${RED}✗ Service not found in ${COMPOSE_FILE}: tried ${LONG_SVC} and ${SHORT_SVC}${NC}"
+        return 1
+    fi
 
     echo -e "${BLUE}=== Blue-Green Deploy: ${ENV_NAME} ===${NC}"
     echo -e "${BLUE}Active slot:   ${GREEN}${ACTIVE_SLOT}${NC}"
@@ -437,7 +450,11 @@ deploy_blue_green() {
     fi
 
     # Stop the old container to avoid two instances on the same DB (and duplicate crons)
-    local OLD_SERVICE="${ENV_NAME}-${ACTIVE_SLOT}"
+    # Detect old service name (long or short convention)
+    local OLD_SERVICE
+    OLD_SERVICE=$(ssh ${DEPLOY_SERVER} "cd ${DEPLOY_PATH} && \
+        if grep -qE '^\s+${IMAGE_NAME}-${ENV_NAME}-${ACTIVE_SLOT}:' ${COMPOSE_FILE} 2>/dev/null; then echo '${IMAGE_NAME}-${ENV_NAME}-${ACTIVE_SLOT}'; \
+        else echo '${ENV_NAME}-${ACTIVE_SLOT}'; fi")
     echo -e "${BLUE}Stopping old container ${ACTIVE_CONTAINER}...${NC}"
     ssh ${DEPLOY_SERVER} "cd ${DEPLOY_PATH} && sudo docker compose stop ${OLD_SERVICE}" 2>/dev/null || true
     echo -e "${GREEN}✓ Old container ${ACTIVE_CONTAINER} stopped${NC}"
