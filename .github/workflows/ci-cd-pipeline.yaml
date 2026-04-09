@@ -51,12 +51,24 @@ on:
         required: false
         type: boolean
         default: false
+      sonar-enabled:
+        description: 'Run SonarQube analysis after build'
+        required: false
+        type: boolean
+        default: false
+      sonar-url:
+        description: 'SonarQube server URL'
+        required: false
+        type: string
+        default: 'http://192.168.1.224:9000'
     secrets:
       TWINGATE_SERVICE_KEY:
         required: true
       MVN_DEPLOY_TOKEN:
         required: true
       SSH_PRIVATE_KEY:
+        required: false
+      SONAR_TOKEN:
         required: false
 
 jobs:
@@ -155,6 +167,96 @@ jobs:
               fi
             fi
           done
+
+  # ── SonarQube Analysis ──────────────────────────────────────────
+  sonar:
+    name: SonarQube Analysis
+    needs: ci
+    if: inputs.sonar-enabled
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: ${{ inputs.database-name }}
+          POSTGRES_USER: plaintext
+          POSTGRES_PASSWORD: plaintext
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U plaintext"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Ensure test database exists
+        env:
+          DB_NAME: ${{ inputs.database-name }}
+        run: |
+          PGPASSWORD=plaintext psql -h localhost -p 5434 -U plaintext -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 || \
+          PGPASSWORD=plaintext psql -h localhost -p 5434 -U plaintext -d postgres -c "CREATE DATABASE \"$DB_NAME\""
+
+      - name: Connect to Twingate
+        uses: twingate/github-action@v1
+        with:
+          service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v5
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+          cache: maven
+          server-id: plaintext
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+
+      - name: SonarQube Analysis
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5434/${{ inputs.database-name }}
+          SPRING_DATASOURCE_USERNAME: plaintext
+          SPRING_DATASOURCE_PASSWORD: plaintext
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.MVN_DEPLOY_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ inputs.sonar-url }}
+        run: |
+          GROUP_ID=$(mvn help:evaluate -Dexpression=project.groupId -q -DforceStdout)
+          ARTIFACT_ID=$(mvn help:evaluate -Dexpression=project.artifactId -q -DforceStdout)
+          PROJECT_KEY="${GROUP_ID}:${ARTIFACT_ID}"
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+
+          mvn clean verify sonar:sonar -B \
+            -Dsonar.projectKey="$PROJECT_KEY" \
+            -Dsonar.projectName="${{ inputs.project-name }}" \
+            -Dsonar.projectVersion="$VERSION" \
+            -Dsonar.host.url="$SONAR_HOST_URL" \
+            -Dsonar.token="$SONAR_TOKEN" \
+            -Dsonar.java.source=${{ inputs.java-version }} \
+            -Dsonar.java.target=${{ inputs.java-version }} \
+            -Dsonar.scm.provider=git
+
+      - name: SonarQube Summary
+        if: always()
+        env:
+          PROJECT_NAME: ${{ inputs.project-name }}
+          SONAR_HOST_URL: ${{ inputs.sonar-url }}
+        run: |
+          GROUP_ID=$(mvn help:evaluate -Dexpression=project.groupId -q -DforceStdout 2>/dev/null || echo "unknown")
+          ARTIFACT_ID=$(mvn help:evaluate -Dexpression=project.artifactId -q -DforceStdout 2>/dev/null || echo "unknown")
+          echo "## SonarQube Analysis – $PROJECT_NAME" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Dashboard: [$PROJECT_NAME]($SONAR_HOST_URL/dashboard?id=${GROUP_ID}:${ARTIFACT_ID})" >> $GITHUB_STEP_SUMMARY
 
   # ── Deploy ─────────────────────────────────────────────────────
   deploy:

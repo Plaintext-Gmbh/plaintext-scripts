@@ -96,8 +96,11 @@ show_usage() {
     echo -e "  ${GREEN}./build 5${NC}                  - Minor release + deploy to DEV (with health check)"
     echo -e "  ${GREEN}./build 6${NC}                  - Deploy last release to PROD (with health check)"
     echo ""
+    echo -e "  ${GREEN}./build s${NC}                  - Run SonarQube analysis"
+    echo ""
     echo -e "${BLUE}Multi-command execution:${NC}"
     echo -e "  ${GREEN}./build 56${NC}                 - Execute 5, then 6 (stops on first failure)"
+    echo -e "  ${GREEN}./build 56s${NC}                - Release + Deploy DEV + PROD + SonarQube"
     echo -e "  ${GREEN}./build 356${NC}                - Execute 3, then 5, then 6"
     echo ""
     echo -e "${BLUE}Legacy commands (still supported):${NC}"
@@ -997,4 +1000,76 @@ Includes:
             exit 1
         fi
     fi
+}
+
+# ── SonarQube Analysis ──────────────────────────────────────
+do_sonar() {
+    echo -e "${YELLOW}=== SonarQube Analysis ===${NC}"
+
+    local SONAR_HOST_URL="${SONAR_HOST_URL:-http://192.168.1.224:9000}"
+
+    # Derive project key from Maven coordinates
+    local GROUP_ID
+    GROUP_ID=$(mvn help:evaluate -Dexpression=project.groupId -q -DforceStdout 2>/dev/null)
+    local ARTIFACT_ID
+    ARTIFACT_ID=$(mvn help:evaluate -Dexpression=project.artifactId -q -DforceStdout 2>/dev/null)
+    local PROJECT_KEY="${GROUP_ID}:${ARTIFACT_ID}"
+    local PROJECT_NAME="${IMAGE_NAME}"
+    local PROJECT_VERSION
+    PROJECT_VERSION=$(get_pom_version)
+
+    # Check SonarQube server
+    echo -e "${BLUE}Checking SonarQube at ${SONAR_HOST_URL}...${NC}"
+    if ! curl -s -o /dev/null -w "%{http_code}" "$SONAR_HOST_URL/api/system/status" | grep -q "200"; then
+        echo -e "${RED}✗ SonarQube server not reachable at ${SONAR_HOST_URL}${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}✓ SonarQube server is running${NC}"
+
+    # Load token from project config, env var, or plaintext-config
+    local SONAR_TOKEN="${SONAR_TOKEN:-}"
+    if [ -z "$SONAR_TOKEN" ]; then
+        local TOKEN_LOCATIONS=(
+            "${SCRIPT_DIR}/config/sonarqube/token.txt"
+            "${PLAINTEXT_CONFIG_DIR:-$HOME/codeplain/plaintext-config}/${IMAGE_NAME}/sonar-token.txt"
+        )
+        for TOKEN_FILE in "${TOKEN_LOCATIONS[@]}"; do
+            if [ -f "$TOKEN_FILE" ]; then
+                SONAR_TOKEN=$(cat "$TOKEN_FILE" | tr -d '\r\n')
+                echo -e "${GREEN}✓ Token loaded from ${TOKEN_FILE}${NC}"
+                break
+            fi
+        done
+    fi
+
+    local AUTH_PARAMS=""
+    if [ -n "$SONAR_TOKEN" ]; then
+        AUTH_PARAMS="-Dsonar.token=$SONAR_TOKEN"
+        echo -e "${GREEN}✓ Using token authentication${NC}"
+    else
+        echo -e "${YELLOW}⚠ No SonarQube token found, trying without auth${NC}"
+    fi
+
+    echo -e "${BLUE}Project: ${PROJECT_KEY} (${PROJECT_VERSION})${NC}"
+    echo -e "${BLUE}Running SonarQube analysis...${NC}"
+
+    mvn clean verify sonar:sonar \
+        -Dsonar.projectKey="$PROJECT_KEY" \
+        -Dsonar.projectName="$PROJECT_NAME" \
+        -Dsonar.projectVersion="$PROJECT_VERSION" \
+        -Dsonar.host.url="$SONAR_HOST_URL" \
+        -Dsonar.java.source=25 \
+        -Dsonar.java.target=25 \
+        -Dsonar.scm.provider=git \
+        $AUTH_PARAMS \
+        -B
+
+    local EXIT_CODE=$?
+    if [ $EXIT_CODE -eq 0 ]; then
+        echo -e "${GREEN}✓ SonarQube analysis completed!${NC}"
+        echo -e "${GREEN}Dashboard: ${SONAR_HOST_URL}/dashboard?id=${PROJECT_KEY}${NC}"
+    else
+        echo -e "${RED}✗ SonarQube analysis failed${NC}"
+    fi
+    return $EXIT_CODE
 }
