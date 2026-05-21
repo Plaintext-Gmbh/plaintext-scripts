@@ -61,6 +61,11 @@ on:
         required: false
         type: string
         default: 'http://192.168.1.224:9000'
+      runner:
+        description: 'Runner labels as JSON array (e.g. ["self-hosted","nas"] for self-hosted, ["ubuntu-latest"] for GitHub-hosted)'
+        required: false
+        type: string
+        default: '["ubuntu-latest"]'
     secrets:
       TWINGATE_SERVICE_KEY:
         required: true
@@ -75,7 +80,7 @@ jobs:
   # ── Build + Test + Coverage ────────────────────────────────────
   ci:
     name: Build & Test
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runner) }}
     permissions:
       contents: read
       packages: read
@@ -173,7 +178,7 @@ jobs:
     name: SonarQube Analysis
     needs: ci
     if: inputs.sonar-enabled
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runner) }}
     permissions:
       contents: read
       packages: read
@@ -263,7 +268,7 @@ jobs:
     name: "Deploy (${{ inputs.deploy-target }})"
     needs: ci
     if: inputs.deploy-target != 'ci-only'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(inputs.runner) }}
     permissions:
       contents: write
       packages: write
@@ -383,7 +388,7 @@ jobs:
     name: Verify DEV
     needs: deploy
     if: inputs.deploy-target != 'ci-only' && inputs.dev-url != ''
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runner) }}
 
     steps:
       - name: Connect to Twingate
@@ -486,7 +491,7 @@ jobs:
     name: Verify PROD
     needs: verify-dev
     if: inputs.deploy-target == 'release-all' && inputs.prod-url != ''
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runner) }}
 
     steps:
       - name: Connect to Twingate
