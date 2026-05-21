@@ -207,6 +207,7 @@ jobs:
           PGPASSWORD=plaintext psql -h localhost -p 5434 -U plaintext -d postgres -c "CREATE DATABASE \"$DB_NAME\""
 
       - name: Connect to Twingate
+        if: runner.environment != 'self-hosted'
         uses: twingate/github-action@v1
         with:
           service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
@@ -275,6 +276,7 @@ jobs:
 
     steps:
       - name: Connect to Twingate
+        if: runner.environment != 'self-hosted'
         uses: twingate/github-action@v1
         with:
           service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
@@ -392,6 +394,7 @@ jobs:
 
     steps:
       - name: Connect to Twingate
+        if: runner.environment != 'self-hosted'
         uses: twingate/github-action@v1
         with:
           service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
@@ -495,6 +498,7 @@ jobs:
 
     steps:
       - name: Connect to Twingate
+        if: runner.environment != 'self-hosted'
         uses: twingate/github-action@v1
         with:
           service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
