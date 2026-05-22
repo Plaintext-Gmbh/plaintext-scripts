@@ -66,6 +66,11 @@ on:
         required: false
         type: string
         default: '["ubuntu-latest"]'
+      postgres-port:
+        description: 'Host-Port für Postgres-Service-Container. Bei mehreren self-hosted Callern auf demselben Docker-Daemon: unique Port pro Caller (5434, 5435, ...)'
+        required: false
+        type: string
+        default: '5434'
     secrets:
       TWINGATE_SERVICE_KEY:
         required: true
@@ -93,7 +98,7 @@ jobs:
           POSTGRES_USER: plaintext
           POSTGRES_PASSWORD: plaintext
         ports:
-          - 5434:5432
+          - ${{ inputs.postgres-port }}:5432
         options: >-
           --health-cmd "pg_isready -U plaintext"
           --health-interval 10s
@@ -105,8 +110,8 @@ jobs:
         env:
           DB_NAME: ${{ inputs.database-name }}
         run: |
-          PGPASSWORD=plaintext psql -h localhost -p 5434 -U plaintext -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 || \
-          PGPASSWORD=plaintext psql -h localhost -p 5434 -U plaintext -d postgres -c "CREATE DATABASE \"$DB_NAME\""
+          PGPASSWORD=plaintext psql -h localhost -p ${{ inputs.postgres-port }} -U plaintext -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 || \
+          PGPASSWORD=plaintext psql -h localhost -p ${{ inputs.postgres-port }} -U plaintext -d postgres -c "CREATE DATABASE \"$DB_NAME\""
 
       - name: Checkout
         uses: actions/checkout@v6
@@ -124,7 +129,7 @@ jobs:
       - name: Build & Test
         run: mvn clean install -B -DskipITs
         env:
-          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5434/${{ inputs.database-name }}
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:${{ inputs.postgres-port }}/${{ inputs.database-name }}
           SPRING_DATASOURCE_USERNAME: plaintext
           SPRING_DATASOURCE_PASSWORD: plaintext
           GITHUB_ACTOR: ${{ github.actor }}
@@ -191,7 +196,7 @@ jobs:
           POSTGRES_USER: plaintext
           POSTGRES_PASSWORD: plaintext
         ports:
-          - 5434:5432
+          - ${{ inputs.postgres-port }}:5432
         options: >-
           --health-cmd "pg_isready -U plaintext"
           --health-interval 10s
@@ -203,8 +208,8 @@ jobs:
         env:
           DB_NAME: ${{ inputs.database-name }}
         run: |
-          PGPASSWORD=plaintext psql -h localhost -p 5434 -U plaintext -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 || \
-          PGPASSWORD=plaintext psql -h localhost -p 5434 -U plaintext -d postgres -c "CREATE DATABASE \"$DB_NAME\""
+          PGPASSWORD=plaintext psql -h localhost -p ${{ inputs.postgres-port }} -U plaintext -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 || \
+          PGPASSWORD=plaintext psql -h localhost -p ${{ inputs.postgres-port }} -U plaintext -d postgres -c "CREATE DATABASE \"$DB_NAME\""
 
       - name: Connect to Twingate
         if: runner.environment != 'self-hosted'
@@ -229,7 +234,7 @@ jobs:
 
       - name: SonarQube Analysis
         env:
-          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5434/${{ inputs.database-name }}
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:${{ inputs.postgres-port }}/${{ inputs.database-name }}
           SPRING_DATASOURCE_USERNAME: plaintext
           SPRING_DATASOURCE_PASSWORD: plaintext
           GITHUB_ACTOR: ${{ github.actor }}
