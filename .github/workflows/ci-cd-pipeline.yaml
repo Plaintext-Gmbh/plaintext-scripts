@@ -109,9 +109,20 @@ jobs:
       - name: Ensure test database exists
         env:
           DB_NAME: ${{ inputs.database-name }}
+          PGPORT: ${{ inputs.postgres-port }}
         run: |
-          PGPASSWORD=plaintext psql -h localhost -p ${{ inputs.postgres-port }} -U plaintext -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 || \
-          PGPASSWORD=plaintext psql -h localhost -p ${{ inputs.postgres-port }} -U plaintext -d postgres -c "CREATE DATABASE \"$DB_NAME\""
+          # Service-Container ist laut docker "healthy", aber bei self-hosted Runner
+          # mit network_mode: host gibt es eine Race-Condition zwischen healthcheck
+          # und Port-Publish. Retry-Loop bis psql connect.
+          for i in $(seq 1 20); do
+            if PGPASSWORD=plaintext psql -h localhost -p "$PGPORT" -U plaintext -d postgres -c "SELECT 1" >/dev/null 2>&1; then
+              break
+            fi
+            echo "Waiting for postgres on localhost:$PGPORT... ($i/20)"
+            sleep 2
+          done
+          PGPASSWORD=plaintext psql -h localhost -p "$PGPORT" -U plaintext -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 || \
+          PGPASSWORD=plaintext psql -h localhost -p "$PGPORT" -U plaintext -d postgres -c "CREATE DATABASE \"$DB_NAME\""
 
       - name: Checkout
         uses: actions/checkout@v6
@@ -207,9 +218,20 @@ jobs:
       - name: Ensure test database exists
         env:
           DB_NAME: ${{ inputs.database-name }}
+          PGPORT: ${{ inputs.postgres-port }}
         run: |
-          PGPASSWORD=plaintext psql -h localhost -p ${{ inputs.postgres-port }} -U plaintext -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 || \
-          PGPASSWORD=plaintext psql -h localhost -p ${{ inputs.postgres-port }} -U plaintext -d postgres -c "CREATE DATABASE \"$DB_NAME\""
+          # Service-Container ist laut docker "healthy", aber bei self-hosted Runner
+          # mit network_mode: host gibt es eine Race-Condition zwischen healthcheck
+          # und Port-Publish. Retry-Loop bis psql connect.
+          for i in $(seq 1 20); do
+            if PGPASSWORD=plaintext psql -h localhost -p "$PGPORT" -U plaintext -d postgres -c "SELECT 1" >/dev/null 2>&1; then
+              break
+            fi
+            echo "Waiting for postgres on localhost:$PGPORT... ($i/20)"
+            sleep 2
+          done
+          PGPASSWORD=plaintext psql -h localhost -p "$PGPORT" -U plaintext -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 || \
+          PGPASSWORD=plaintext psql -h localhost -p "$PGPORT" -U plaintext -d postgres -c "CREATE DATABASE \"$DB_NAME\""
 
       - name: Connect to Twingate
         if: runner.environment != 'self-hosted'
