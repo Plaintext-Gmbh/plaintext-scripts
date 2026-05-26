@@ -22,8 +22,14 @@ fi
 : "${WEBAPP_MODULE:?WEBAPP_MODULE must be set in build-conf.txt}"
 : "${TUI_TITLE:?TUI_TITLE must be set in build-conf.txt}"
 
-# Auto-detect container runtime (podman on macOS, docker on Linux)
-if [ -f "/opt/homebrew/bin/podman" ]; then
+# Auto-detect container runtime.
+# - In CI (self-hosted runner): docker bevorzugt — der Runner-Container hat
+#   /var/run/docker.sock vom Host gemountet, podman hätte keine machine.
+# - macOS dev: /opt/homebrew/bin/podman (typische Setup).
+# - Sonstige Linux: podman falls da, sonst docker.
+if [ "${CI:-}" = "true" ] && command -v docker &>/dev/null; then
+    CONTAINER_CLI="docker"
+elif [ -f "/opt/homebrew/bin/podman" ]; then
     CONTAINER_CLI="/opt/homebrew/bin/podman"
 elif command -v podman &>/dev/null; then
     CONTAINER_CLI="podman"
