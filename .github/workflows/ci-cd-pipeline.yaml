@@ -109,12 +109,11 @@ jobs:
             -e POSTGRES_DB="$DB_NAME" \
             -e POSTGRES_USER=plaintext \
             -e POSTGRES_PASSWORD=plaintext \
-            -e PGPORT="$PGPORT" \
             --health-cmd "pg_isready -U plaintext -p $PGPORT" \
             --health-interval 5s \
             --health-timeout 3s \
             --health-retries 12 \
-            postgres:18-alpine
+            postgres:18-alpine -p "$PGPORT"
           # Warte bis postgres listened
           for i in $(seq 1 60); do
             if PGPASSWORD=plaintext psql -h localhost -p "$PGPORT" -U plaintext -d postgres -c "SELECT 1" >/dev/null 2>&1; then
@@ -220,12 +219,11 @@ jobs:
             -e POSTGRES_DB="$DB_NAME" \
             -e POSTGRES_USER=plaintext \
             -e POSTGRES_PASSWORD=plaintext \
-            -e PGPORT="$PGPORT" \
             --health-cmd "pg_isready -U plaintext -p $PGPORT" \
             --health-interval 5s \
             --health-timeout 3s \
             --health-retries 12 \
-            postgres:18-alpine
+            postgres:18-alpine -p "$PGPORT"
           # Warte bis postgres listened
           for i in $(seq 1 60); do
             if PGPASSWORD=plaintext psql -h localhost -p "$PGPORT" -U plaintext -d postgres -c "SELECT 1" >/dev/null 2>&1; then
