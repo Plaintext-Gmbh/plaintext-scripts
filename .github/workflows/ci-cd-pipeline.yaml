@@ -440,17 +440,20 @@ jobs:
           DEV_URL: ${{ inputs.dev-url }}
         run: |
           echo "Verifying DEV at $DEV_URL/nosec/version ..."
-          for i in $(seq 1 24); do
+          # Grosse Apps (z.B. plaintext-app, 21 Module, Spring Boot 4 + JSF) brauchen zum
+          # vollstaendigen Hochfahren teils >2 min. Frueher waren es nur 24x5s=2min -> Verify-DEV
+          # schlug fehl, obwohl der Deploy selbst erfolgreich war. Daher grosszuegig 90x5s = 7.5 min.
+          for i in $(seq 1 90); do
             RESPONSE=$(curl -sf "$DEV_URL/nosec/version" 2>/dev/null) && {
               echo "DEV running: $RESPONSE"
               echo "## Verify DEV" >> $GITHUB_STEP_SUMMARY
               echo "Version: \`$RESPONSE\`" >> $GITHUB_STEP_SUMMARY
               exit 0
             }
-            echo "Waiting for DEV... ($i/24)"
+            echo "Waiting for DEV... ($i/90)"
             sleep 5
           done
-          echo "DEV version check failed after 2 minutes"
+          echo "DEV version check failed after 7.5 minutes"
           exit 1
 
       # ── Java Integration Tests (Maven Failsafe) ──
@@ -544,17 +547,19 @@ jobs:
           PROD_URL: ${{ inputs.prod-url }}
         run: |
           echo "Verifying PROD at $PROD_URL/nosec/version ..."
-          for i in $(seq 1 24); do
+          # Wie Verify DEV: grosszuegiges Timeout (90x5s = 7.5 min), da grosse Apps zum Hochfahren
+          # laenger als 2 min brauchen koennen.
+          for i in $(seq 1 90); do
             RESPONSE=$(curl -sf "$PROD_URL/nosec/version" 2>/dev/null) && {
               echo "PROD running: $RESPONSE"
               echo "## Verify PROD" >> $GITHUB_STEP_SUMMARY
               echo "Version: \`$RESPONSE\`" >> $GITHUB_STEP_SUMMARY
               exit 0
             }
-            echo "Waiting for PROD... ($i/24)"
+            echo "Waiting for PROD... ($i/90)"
             sleep 5
           done
-          echo "PROD version check failed after 2 minutes"
+          echo "PROD version check failed after 7.5 minutes"
           exit 1
 
       # ── Java Integration Tests (Maven Failsafe) ──
