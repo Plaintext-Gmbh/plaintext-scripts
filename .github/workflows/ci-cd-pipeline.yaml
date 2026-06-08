@@ -278,7 +278,8 @@ jobs:
           PROJECT_KEY="${GROUP_ID}:${ARTIFACT_ID}"
           VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
 
-          mvn clean verify sonar:sonar -B \
+          # -DskipITs: ITs benoetigen laufende App (kein Deploy in SonarQube-Job)
+          mvn clean verify sonar:sonar -B -DskipITs \
             -Dsonar.projectKey="$PROJECT_KEY" \
             -Dsonar.projectName="${{ inputs.project-name }}" \
             -Dsonar.projectVersion="$VERSION" \
