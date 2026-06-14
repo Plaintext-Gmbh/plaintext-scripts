@@ -242,10 +242,23 @@ switch_active() {
 
     echo -e "${BLUE}Switching ${ENV_NAME} to ${NEW_COLOR}...${NC}"
 
+    # Defensiv: vorherige upstream-Config sichern, neue einspielen und mit `nginx -t` PRÜFEN, BEVOR
+    # Marker gesetzt + reloaded wird. Zeigt der neue Upstream auf einen nicht (mehr) existierenden
+    # Container (z. B. Rollback auf einen bereits gestoppten Slot), schlägt `nginx -t` fehl ->
+    # wir stellen die vorherige Config wieder her und ändern weder Marker noch laufende nginx-Config.
+    # So bleibt nie eine kaputte conf liegen (die sonst den nächsten Reload/Reboot des GESAMTEN
+    # nginx inkl. PROD verhindern würde).
     ssh ${DEPLOY_SERVER} "
-        cp ${BG_NGINX_TEMPLATES_DIR}/${ENV_NAME}-${NEW_COLOR}.conf ${BG_NGINX_CONF_DIR}/${ENV_NAME}-upstream.conf && \
-        echo '${NEW_COLOR}' > ${DEPLOY_PATH}/active-${ENV_NAME} && \
-        sudo docker exec ${BG_NGINX_CONTAINER} nginx -s reload
+        cp ${BG_NGINX_CONF_DIR}/${ENV_NAME}-upstream.conf /tmp/${ENV_NAME}-upstream.conf.bak 2>/dev/null || true
+        cp ${BG_NGINX_TEMPLATES_DIR}/${ENV_NAME}-${NEW_COLOR}.conf ${BG_NGINX_CONF_DIR}/${ENV_NAME}-upstream.conf || exit 1
+        if sudo docker exec ${BG_NGINX_CONTAINER} nginx -t; then
+            echo '${NEW_COLOR}' > ${DEPLOY_PATH}/active-${ENV_NAME}
+            sudo docker exec ${BG_NGINX_CONTAINER} nginx -s reload
+        else
+            echo 'nginx -t fehlgeschlagen - stelle vorherige upstream-Config wieder her, Marker unveraendert'
+            cp /tmp/${ENV_NAME}-upstream.conf.bak ${BG_NGINX_CONF_DIR}/${ENV_NAME}-upstream.conf 2>/dev/null || true
+            exit 1
+        fi
     "
 
     if [ $? -eq 0 ]; then
@@ -458,18 +471,29 @@ deploy_blue_green() {
         return 1
     fi
 
-    # Stop the old container to avoid two instances on the same DB (and duplicate crons)
-    # Detect old service name (long or short convention)
-    local OLD_SERVICE
-    OLD_SERVICE=$(ssh ${DEPLOY_SERVER} "cd ${DEPLOY_PATH} && \
-        if grep -qE '^\s+${IMAGE_NAME}-${ENV_NAME}-${ACTIVE_SLOT}:' ${COMPOSE_FILE} 2>/dev/null; then echo '${IMAGE_NAME}-${ENV_NAME}-${ACTIVE_SLOT}'; \
-        else echo '${ENV_NAME}-${ACTIVE_SLOT}'; fi")
-    echo -e "${BLUE}Stopping old container ${ACTIVE_CONTAINER}...${NC}"
-    ssh ${DEPLOY_SERVER} "cd ${DEPLOY_PATH} && sudo docker compose stop ${OLD_SERVICE}" 2>/dev/null || true
-    echo -e "${GREEN}✓ Old container ${ACTIVE_CONTAINER} stopped${NC}"
+    # WICHTIG: Der alte Slot wird hier BEWUSST NICHT gestoppt. Er bleibt am Leben, bis der EXTERNE
+    # Healthcheck (check_version in deploy_to_dev/deploy_to_prod) erfolgreich war. Schlägt dieser fehl,
+    # kann der Rollback (switch_active zurück) auf einen noch laufenden Slot zeigen -> keine kaputte
+    # nginx-Config. Das Stoppen des alten Slots übernimmt der Aufrufer via stop_slot(), entweder nach
+    # erfolgreichem externem Check oder (ohne externen Check) direkt danach.
+    echo -e "${BLUE}Old slot (${ACTIVE_SLOT}) stays alive until external health check confirms ${INACTIVE_SLOT}.${NC}"
 
-    echo -e "${GREEN}=== Blue-Green deploy complete: ${ENV_NAME} now on ${INACTIVE_SLOT} (${IMAGE_TAG}) ===${NC}"
+    echo -e "${GREEN}=== Blue-Green switch complete: ${ENV_NAME} now on ${INACTIVE_SLOT} (${IMAGE_TAG}) ===${NC}"
     return 0
+}
+
+# Stoppt einen Slot (alten Container) eines Environments. Erkennt Lang-/Kurz-Service-Namen wie
+# deploy_blue_green. Wird vom Aufrufer NACH erfolgreichem externem Healthcheck genutzt (s. o.).
+stop_slot() {
+    local ENV_NAME="$1"
+    local SLOT="$2"
+    local SVC
+    SVC=$(ssh ${DEPLOY_SERVER} "cd ${DEPLOY_PATH} && \
+        if grep -qE '^\s+${IMAGE_NAME}-${ENV_NAME}-${SLOT}:' ${COMPOSE_FILE} 2>/dev/null; then echo '${IMAGE_NAME}-${ENV_NAME}-${SLOT}'; \
+        else echo '${ENV_NAME}-${SLOT}'; fi")
+    echo -e "${BLUE}Stopping ${ENV_NAME}-${SLOT} slot (${SVC})...${NC}"
+    ssh ${DEPLOY_SERVER} "cd ${DEPLOY_PATH} && sudo docker compose stop ${SVC}" 2>/dev/null || true
+    echo -e "${GREEN}✓ Stopped ${ENV_NAME}-${SLOT}${NC}"
 }
 
 # One-time setup: deploy blue-green infrastructure to NAS
@@ -681,6 +705,12 @@ deploy_to_dev() {
         return 1
     fi
 
+    # Aktiven (alten) Slot VOR dem Deploy merken - er bleibt am Leben, bis der externe Check ok ist.
+    local OLD_SLOT
+    OLD_SLOT=$(get_active_slot "int")
+    local NEW_SLOT
+    if [ "$OLD_SLOT" == "blue" ]; then NEW_SLOT="green"; else NEW_SLOT="blue"; fi
+
     # Deploy to the inactive INT slot
     if ! deploy_blue_green "int" "$IMAGE_TAG"; then
         echo -e "${RED}=== DEV Blue-Green Deployment FAILED ===${NC}"
@@ -692,16 +722,17 @@ deploy_to_dev() {
         echo ""
         if ! check_version "$IMAGE_TAG"; then
             echo -e "${RED}=== DEV external health check FAILED ===${NC}"
-            echo -e "${YELLOW}Rolling back: switching to previous slot...${NC}"
-            local CURRENT
-            CURRENT=$(get_active_slot "int")
-            local PREV
-            if [ "$CURRENT" == "blue" ]; then PREV="green"; else PREV="blue"; fi
-            switch_active "int" "$PREV"
-            echo -e "${YELLOW}Rolled back INT to ${PREV}${NC}"
+            echo -e "${YELLOW}Rolling back: nginx zurück auf ${OLD_SLOT} (läuft noch)...${NC}"
+            switch_active "int" "$OLD_SLOT"
+            # Den fehlgeschlagenen neuen Slot stoppen (keine zwei Instanzen auf derselben DB).
+            stop_slot "int" "$NEW_SLOT"
+            echo -e "${YELLOW}Rolled back INT to ${OLD_SLOT}${NC}"
             return 1
         fi
     fi
+
+    # Externer Check ok (oder nicht gefordert): JETZT erst den alten Slot stoppen.
+    stop_slot "int" "$OLD_SLOT"
 
     echo -e "${GREEN}=== DEV Deployment completed! ===${NC}"
     return 0
@@ -758,17 +789,25 @@ deploy_to_prod() {
         echo ""
         if ! check_version "$RELEASE_VERSION" "http://${NAS_HOST}:${PROD_PORT:-1122}/nosec/version"; then
             echo -e "${RED}=== PROD external health check FAILED ===${NC}"
-            echo -e "${YELLOW}=== Instant rollback: switching nginx back to ${ACTIVE_SLOT} ===${NC}"
+            echo -e "${YELLOW}=== Instant rollback: nginx zurück auf ${ACTIVE_SLOT} (läuft noch) ===${NC}"
 
             switch_active "prod" "$ACTIVE_SLOT"
 
-            echo -e "${YELLOW}=== ROLLBACK COMPLETED (nginx switch only) ===${NC}"
+            # Fehlgeschlagenen neuen Slot stoppen (keine zwei Instanzen auf derselben DB).
+            local NEW_SLOT
+            if [ "$ACTIVE_SLOT" == "blue" ]; then NEW_SLOT="green"; else NEW_SLOT="blue"; fi
+            stop_slot "prod" "$NEW_SLOT"
+
+            echo -e "${YELLOW}=== ROLLBACK COMPLETED ===${NC}"
             echo -e "${YELLOW}PROD back on ${ACTIVE_SLOT}${NC}"
             echo -e "${YELLOW}DB backup available at: $(basename $BACKUP_PATH)${NC}"
             echo -e "${YELLOW}For DB restore: restore_prod_db '${BACKUP_PATH}'${NC}"
             return 1
         fi
     fi
+
+    # Externer Check ok (oder nicht gefordert): JETZT erst den alten Slot stoppen.
+    stop_slot "prod" "$ACTIVE_SLOT"
 
     echo -e "${GREEN}=== PROD Deployment completed! ===${NC}"
     echo -e "${GREEN}Deployed version: ${RELEASE_VERSION}${NC}"
