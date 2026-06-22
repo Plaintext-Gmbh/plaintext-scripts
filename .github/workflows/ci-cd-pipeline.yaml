@@ -126,7 +126,7 @@ jobs:
           PGPASSWORD=plaintext psql -h localhost -p "$PGPORT" -U plaintext -d postgres -c "CREATE DATABASE \"$DB_NAME\""
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup JDK ${{ inputs.java-version }}
         uses: actions/setup-java@v5
@@ -249,7 +249,7 @@ jobs:
           service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -319,7 +319,7 @@ jobs:
           service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           token: ${{ secrets.MVN_DEPLOY_TOKEN }}
           fetch-depth: 0
@@ -330,7 +330,7 @@ jobs:
           git config user.name "GithubActions"
 
       - name: Checkout plaintext-scripts
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: daniel-marthaler/plaintext-scripts
           path: plaintext-scripts
@@ -343,7 +343,7 @@ jobs:
           chmod +x $HOME/codeplain/plaintext-scripts/*.sh
 
       - name: Checkout plaintext-config
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: daniel-marthaler/plaintext-config
           path: plaintext-config
@@ -468,7 +468,7 @@ jobs:
       # ── Java Integration Tests (Maven Failsafe) ──
       - name: Checkout
         if: inputs.integration-tests-enabled || inputs.playwright-enabled
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup JDK ${{ inputs.java-version }}
         if: inputs.integration-tests-enabled
@@ -588,7 +588,7 @@ jobs:
       # ── Java Integration Tests (Maven Failsafe) ──
       - name: Checkout
         if: inputs.integration-tests-enabled || inputs.playwright-enabled
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup JDK ${{ inputs.java-version }}
         if: inputs.integration-tests-enabled
