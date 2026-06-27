@@ -80,6 +80,17 @@ get_release_version() {
 DEPLOY_PATH="${DEPLOY_PATH:-/volume1/docker/${IMAGE_NAME}}"
 COMPOSE_FILE="docker-compose.yaml"
 
+# ── M3: Jar im Volume (statt Image pro Version) ──────────────
+# Opt-in pro App via Marker-Datei `.m3-jar-volume` im App-Repo. Ist sie vorhanden, wird beim
+# Deploy NICHT mehr ein per-Version-Image gebaut + per save/load transferiert, sondern nur das
+# Spring-Boot-Exec-Jar in ein gemountetes Volume kopiert (gemeinsames `plaintext-runtime:jre25`-
+# Image). Spart docker build + save/load + den Image-Tag-Bump pro Release. cwd ist beim Sourcen
+# das App-Repo-Root (build-Wrapper macht `cd` davor).
+JAR_VOLUME_DEPLOY="${JAR_VOLUME_DEPLOY:-false}"
+if [ -f ".m3-jar-volume" ]; then
+    JAR_VOLUME_DEPLOY=true
+fi
+
 # ── Legacy color aliases (used by business logic echo statements) ─
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -157,6 +168,30 @@ push_to_registry() {
     rm -f "${TEMP_FILE}"
 
     echo -e "${GREEN}Image loaded on NAS successfully${NC}"
+}
+
+# M3 (Jar im Volume): überträgt das gebaute Spring-Boot-Exec-Jar in den Staging-Pfad auf dem NAS
+# (Ersatz für docker build + push_to_registry). deploy_blue_green kopiert es von dort pro Slot in
+# das slot-eigene Volume. Übertragung atomar via .tmp + mv; chmod 644 für Container-User (UID 1000).
+stage_jar_to_nas() {
+    local JAR
+    JAR=$(find "$PWD" -path '*/target/*-exec.jar' -type f 2>/dev/null | head -1)
+    if [ -z "$JAR" ] || [ ! -f "$JAR" ]; then
+        echo -e "${RED}✗ M3: Kein *-exec.jar gefunden (Maven-Build gelaufen?)${NC}"
+        return 1
+    fi
+    echo -e "${BLUE}M3: Staging Jar → NAS: $(basename "$JAR") ($(du -h "$JAR" | cut -f1))${NC}"
+    if ! ensure_nas_reachable; then
+        echo -e "${RED}✗ M3: NAS nicht erreichbar${NC}"
+        return 1
+    fi
+    local STAGING="${DEPLOY_PATH}/jars/staging"
+    ssh "${DEPLOY_SERVER}" "mkdir -p ${STAGING}"
+    if ! cat "${JAR}" | ssh "${DEPLOY_SERVER}" "cat > ${STAGING}/app.jar.tmp && chmod 644 ${STAGING}/app.jar.tmp && mv -f ${STAGING}/app.jar.tmp ${STAGING}/app.jar"; then
+        echo -e "${RED}✗ M3: Jar-Transfer auf NAS fehlgeschlagen${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}✓ M3: Jar im Staging (${STAGING}/app.jar)${NC}"
 }
 
 # Function to create backup of prod database (PostgreSQL via SSH on NAS)
@@ -434,16 +469,33 @@ deploy_blue_green() {
     echo -e "${BLUE}Deploying to:  ${GREEN}${INACTIVE_SLOT}${NC} (${CONTAINER_NAME})"
     echo -e "${BLUE}Image tag:     ${GREEN}${IMAGE_TAG}${NC}"
 
-    # Update image tag for the inactive slot
-    echo -e "${BLUE}Updating image for ${COMPOSE_SERVICE}...${NC}"
-    ssh ${DEPLOY_SERVER} "cd ${DEPLOY_PATH} && \
-        sed -i.backup '/${COMPOSE_SERVICE}:/,/image:/ s|image: ${IMAGE_NAME}:.*|image: ${IMAGE_NAME}:${IMAGE_TAG}|' ${COMPOSE_FILE} && \
-        mkdir -p backups && mv ${COMPOSE_FILE}.backup backups/docker-compose-\$(date +%y-%m-%d_%H-%M).yaml"
+    if [ "${JAR_VOLUME_DEPLOY}" == "true" ]; then
+        # M3: Jar aus dem Staging in das slot-eigene Volume kopieren, dann Container neu erzeugen
+        # (lädt das neue Jar). Image bleibt das stabile plaintext-runtime:jre25 (in der Compose).
+        local SLOT_JAR_DIR="${DEPLOY_PATH}/jars/${ENV_NAME}-${INACTIVE_SLOT}"
+        echo -e "${BLUE}M3: Jar → Slot ${ENV_NAME}-${INACTIVE_SLOT} (${SLOT_JAR_DIR}/app.jar)...${NC}"
+        if ! ssh ${DEPLOY_SERVER} "test -f ${DEPLOY_PATH}/jars/staging/app.jar"; then
+            echo -e "${RED}✗ M3: Kein Staging-Jar gefunden (stage_jar_to_nas gelaufen?)${NC}"
+            return 1
+        fi
+        ssh ${DEPLOY_SERVER} "mkdir -p ${SLOT_JAR_DIR} && \
+            cp -f ${DEPLOY_PATH}/jars/staging/app.jar ${SLOT_JAR_DIR}/app.jar && \
+            chmod 644 ${SLOT_JAR_DIR}/app.jar"
+        echo -e "${BLUE}Recreating ${COMPOSE_SERVICE} (force) to load new jar...${NC}"
+        ssh ${DEPLOY_SERVER} "cd ${DEPLOY_PATH} && \
+            sudo docker compose up -d --no-deps --force-recreate ${COMPOSE_SERVICE}"
+    else
+        # Klassisch: Image-Tag des inaktiven Slots in der Compose umbiegen + Container neu erzeugen
+        echo -e "${BLUE}Updating image for ${COMPOSE_SERVICE}...${NC}"
+        ssh ${DEPLOY_SERVER} "cd ${DEPLOY_PATH} && \
+            sed -i.backup '/${COMPOSE_SERVICE}:/,/image:/ s|image: ${IMAGE_NAME}:.*|image: ${IMAGE_NAME}:${IMAGE_TAG}|' ${COMPOSE_FILE} && \
+            mkdir -p backups && mv ${COMPOSE_FILE}.backup backups/docker-compose-\$(date +%y-%m-%d_%H-%M).yaml"
 
-    # Recreate only the inactive container
-    echo -e "${BLUE}Restarting ${COMPOSE_SERVICE} with new image...${NC}"
-    ssh ${DEPLOY_SERVER} "cd ${DEPLOY_PATH} && \
-        sudo docker compose up -d --no-deps --pull never ${COMPOSE_SERVICE}"
+        # Recreate only the inactive container
+        echo -e "${BLUE}Restarting ${COMPOSE_SERVICE} with new image...${NC}"
+        ssh ${DEPLOY_SERVER} "cd ${DEPLOY_PATH} && \
+            sudo docker compose up -d --no-deps --pull never ${COMPOSE_SERVICE}"
+    fi
 
     echo -e "${BLUE}Container status:${NC}"
     ssh ${DEPLOY_SERVER} "sudo docker ps | grep ${CONTAINER_NAME} || echo 'Container not running!'"
@@ -877,16 +929,22 @@ do_build_snapshot() {
         return 1
     fi
 
-    ensure_podman_running || return 1
-
-    echo -e "${BLUE}Building Docker image with tag: ${GREEN}latest${NC}"
-    if [[ "$CONTAINER_CLI" == *"podman"* ]]; then
-        $CONTAINER_CLI build --platform linux/amd64 --format docker -t "${IMAGE_NAME}:latest" .
+    if [ "${JAR_VOLUME_DEPLOY}" == "true" ]; then
+        # M3: kein Image-Bau/Transfer — nur das Jar ins NAS-Staging (deploy_blue_green verteilt es)
+        echo -e "${BLUE}M3 (Jar im Volume): überspringe docker build/push, stage Jar...${NC}"
+        stage_jar_to_nas || return 1
     else
-        $CONTAINER_CLI build --platform linux/amd64 -t "${IMAGE_NAME}:latest" .
-    fi
+        ensure_podman_running || return 1
 
-    push_to_registry "latest"
+        echo -e "${BLUE}Building Docker image with tag: ${GREEN}latest${NC}"
+        if [[ "$CONTAINER_CLI" == *"podman"* ]]; then
+            $CONTAINER_CLI build --platform linux/amd64 --format docker -t "${IMAGE_NAME}:latest" .
+        else
+            $CONTAINER_CLI build --platform linux/amd64 -t "${IMAGE_NAME}:latest" .
+        fi
+
+        push_to_registry "latest"
+    fi
 
     echo -e "${GREEN}=== Build completed successfully! ===${NC}"
 
@@ -1040,24 +1098,33 @@ Includes:
         fi
     fi
 
-    ensure_podman_running || return 1
-
-    echo -e "${BLUE}Building Docker image with tags: ${GREEN}${NEW_VERSION}${BLUE} and ${GREEN}latest${NC}"
-    if [[ "$CONTAINER_CLI" == *"podman"* ]]; then
-        if ! $CONTAINER_CLI build --platform linux/amd64 --format docker -t "${IMAGE_NAME}:${NEW_VERSION}" -t "${IMAGE_NAME}:latest" .; then
-            echo -e "${RED}✗ Docker image build failed!${NC}"
+    if [ "${JAR_VOLUME_DEPLOY}" == "true" ]; then
+        # M3: kein per-Version-Image — nur das Jar ins NAS-Staging (deploy_blue_green verteilt es)
+        echo -e "${BLUE}M3 (Jar im Volume): überspringe docker build/push, stage Jar ${NEW_VERSION}...${NC}"
+        if ! stage_jar_to_nas; then
+            echo -e "${RED}✗ M3: Jar-Staging fehlgeschlagen!${NC}"
             return 1
         fi
     else
-        if ! $CONTAINER_CLI build --platform linux/amd64 -t "${IMAGE_NAME}:${NEW_VERSION}" -t "${IMAGE_NAME}:latest" .; then
-            echo -e "${RED}✗ Docker image build failed!${NC}"
+        ensure_podman_running || return 1
+
+        echo -e "${BLUE}Building Docker image with tags: ${GREEN}${NEW_VERSION}${BLUE} and ${GREEN}latest${NC}"
+        if [[ "$CONTAINER_CLI" == *"podman"* ]]; then
+            if ! $CONTAINER_CLI build --platform linux/amd64 --format docker -t "${IMAGE_NAME}:${NEW_VERSION}" -t "${IMAGE_NAME}:latest" .; then
+                echo -e "${RED}✗ Docker image build failed!${NC}"
+                return 1
+            fi
+        else
+            if ! $CONTAINER_CLI build --platform linux/amd64 -t "${IMAGE_NAME}:${NEW_VERSION}" -t "${IMAGE_NAME}:latest" .; then
+                echo -e "${RED}✗ Docker image build failed!${NC}"
+                return 1
+            fi
+        fi
+
+        if ! push_to_registry "${NEW_VERSION}"; then
+            echo -e "${RED}✗ Image push to NAS failed!${NC}"
             return 1
         fi
-    fi
-
-    if ! push_to_registry "${NEW_VERSION}"; then
-        echo -e "${RED}✗ Image push to NAS failed!${NC}"
-        return 1
     fi
 
     echo -e "${BLUE}Maven: Preparing next SNAPSHOT version ${GREEN}${NEXT_SNAPSHOT_VERSION}${NC}"
