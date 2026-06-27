@@ -373,7 +373,10 @@ jobs:
       - name: Install plaintext-scripts
         run: |
           mkdir -p $HOME/codeplain
-          cp -r plaintext-scripts $HOME/codeplain/plaintext-scripts
+          # Ziel vorher leeren: auf wiederverwendeten Runner-Workspaces würde `cp -r` sonst INS
+          # bestehende Verzeichnis kopieren und die alten Skripte stehen lassen (Änderungen wirkungslos).
+          rm -rf "$HOME/codeplain/plaintext-scripts"
+          cp -r plaintext-scripts "$HOME/codeplain/plaintext-scripts"
           chmod +x $HOME/codeplain/plaintext-scripts/*.sh
 
       - name: Checkout plaintext-config
@@ -384,7 +387,9 @@ jobs:
           token: ${{ secrets.MVN_DEPLOY_TOKEN }}
 
       - name: Install plaintext-config
-        run: cp -r plaintext-config $HOME/codeplain/plaintext-config
+        run: |
+          rm -rf "$HOME/codeplain/plaintext-config"
+          cp -r plaintext-config "$HOME/codeplain/plaintext-config"
 
       - name: Setup JDK ${{ inputs.java-version }}
         uses: actions/setup-java@v5
