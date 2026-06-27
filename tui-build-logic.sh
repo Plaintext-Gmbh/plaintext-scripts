@@ -973,7 +973,19 @@ deploy_prod_single() {
         echo -e "${YELLOW}Compose ${DEPLOY_PATH}/docker-compose.yaml fehlt — Image geladen, aber Stack noch nicht via gitops angelegt (./build deploy tri/${IMAGE_NAME}). Container-Recreate übersprungen.${NC}"
         return 0
     fi
-    echo -e "${BLUE}Recreate ${CONTAINER} mit frischem ${IMAGE_NAME}:latest...${NC}"
+    if [ "${JAR_VOLUME_DEPLOY}" == "true" ]; then
+        # M3: Staging-Jar in den prod-Slot kopieren (Compose mountet jars/prod/app.jar als Volume).
+        if ! ssh "${DEPLOY_SERVER}" "test -f ${DEPLOY_PATH}/jars/staging/app.jar"; then
+            echo -e "${RED}✗ M3: Kein Staging-Jar gefunden (stage_jar_to_nas gelaufen?)${NC}"
+            return 1
+        fi
+        ssh "${DEPLOY_SERVER}" "mkdir -p ${DEPLOY_PATH}/jars/prod && \
+            cp -f ${DEPLOY_PATH}/jars/staging/app.jar ${DEPLOY_PATH}/jars/prod/app.jar && \
+            chmod 644 ${DEPLOY_PATH}/jars/prod/app.jar"
+        echo -e "${BLUE}M3: Jar im prod-Slot — recreate ${CONTAINER} (stabiles runtime-Image)...${NC}"
+    else
+        echo -e "${BLUE}Recreate ${CONTAINER} mit frischem ${IMAGE_NAME}:latest...${NC}"
+    fi
     # KEIN --no-deps: stellt sicher, dass die DB-Dependency läuft (depends_on), bevor die App startet.
     if ! ssh "${DEPLOY_SERVER}" "cd ${DEPLOY_PATH} && sudo docker compose up -d --force-recreate ${CONTAINER}"; then
         echo -e "${RED}✗ docker compose up fehlgeschlagen${NC}"
