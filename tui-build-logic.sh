@@ -868,7 +868,11 @@ do_build_snapshot() {
     echo -e "${YELLOW}=== Maven Build (SNAPSHOT) ===${NC}"
 
     echo -e "${BLUE}Building with Maven...${NC}"
-    if ! mvn clean package -DskipTests; then
+    # M1 (build once): die CI gibt MVN_TEST_FLAG (-DskipITs) explizit per Env vor → Unit-Tests im
+    # EINZIGEN Build; lokal (ohne diese Vorgabe) ohne Tests (Dev-Rechner/Nacht-Runner ohne Test-DB).
+    local TEST_FLAG="${MVN_TEST_FLAG:--DskipTests}"
+    echo -e "${BLUE}Maven-Test-Flag: ${TEST_FLAG} (CI=${CI:-unset})${NC}"
+    if ! mvn clean package ${TEST_FLAG} -B; then
         echo -e "${RED}✗ Maven build failed!${NC}"
         return 1
     fi
@@ -984,15 +988,19 @@ Includes:
     echo -e "${BLUE}Git: Creating tag ${NEW_VERSION}...${NC}"
     git tag -a "${NEW_VERSION}" -m "Release version ${NEW_VERSION}"
 
+    # M1 (build once): die CI gibt MVN_TEST_FLAG (-DskipITs) explizit per Env vor → Unit-Tests im
+    # EINZIGEN Build; lokal (ohne diese Vorgabe) ohne Tests (Dev-Rechner/Nacht-Runner ohne Test-DB).
+    local TEST_FLAG="${MVN_TEST_FLAG:--DskipTests}"
+    echo -e "${BLUE}Maven-Test-Flag: ${TEST_FLAG} (CI=${CI:-unset})${NC}"
     if [ "${MVN_RELEASE_DEPLOY}" == "true" ]; then
-        echo -e "${BLUE}Maven: Building + deploying version ${GREEN}${NEW_VERSION}${NC}"
-        if ! mvn clean deploy -DskipTests -B; then
+        echo -e "${BLUE}Maven: Building + deploying version ${GREEN}${NEW_VERSION}${NC} (${TEST_FLAG})"
+        if ! mvn clean deploy ${TEST_FLAG} -B; then
             echo -e "${RED}✗ Maven build failed!${NC}"
             return 1
         fi
     else
-        echo -e "${BLUE}Maven: Building version ${GREEN}${NEW_VERSION}${NC}"
-        if ! mvn clean package -DskipTests; then
+        echo -e "${BLUE}Maven: Building version ${GREEN}${NEW_VERSION}${NC} (${TEST_FLAG})"
+        if ! mvn clean package ${TEST_FLAG} -B; then
             echo -e "${RED}✗ Maven build failed!${NC}"
             return 1
         fi
