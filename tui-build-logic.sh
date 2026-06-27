@@ -175,9 +175,17 @@ push_to_registry() {
 # das slot-eigene Volume. Übertragung atomar via .tmp + mv; chmod 644 für Container-User (UID 1000).
 stage_jar_to_nas() {
     local JAR
+    # Spring-Boot-Exec-Jar finden: entweder per -exec-Classifier (app/root/iot/schuetu) ODER
+    # in-place repackaged (fwtool: Haupt-Jar mit <name>.jar.original-Geschwister).
     JAR=$(find "$PWD" -path '*/target/*-exec.jar' -type f 2>/dev/null | head -1)
+    if [ -z "$JAR" ]; then
+        local c
+        for c in $(find "$PWD" -path '*/target/*.jar' -type f ! -name '*.original' ! -name '*-sources.jar' ! -name '*-javadoc.jar' 2>/dev/null); do
+            if [ -f "${c}.original" ]; then JAR="$c"; break; fi
+        done
+    fi
     if [ -z "$JAR" ] || [ ! -f "$JAR" ]; then
-        echo -e "${RED}✗ M3: Kein *-exec.jar gefunden (Maven-Build gelaufen?)${NC}"
+        echo -e "${RED}✗ M3: Kein Spring-Boot-Exec-Jar gefunden (Maven-Build gelaufen?)${NC}"
         return 1
     fi
     echo -e "${BLUE}M3: Staging Jar → NAS: $(basename "$JAR") ($(du -h "$JAR" | cut -f1))${NC}"
