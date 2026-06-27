@@ -447,6 +447,10 @@ jobs:
               echo "=== Release + Deploy DEV + PROD ==="
               ./build 56
               ;;
+            prod-single)
+              echo "=== Single PROD instance (kein blue-green, kein DEV) ==="
+              ./build build prod-single
+              ;;
             *)
               echo "Unknown deploy target: $DEPLOY_TARGET"
               exit 1
