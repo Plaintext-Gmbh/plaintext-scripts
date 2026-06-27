@@ -71,6 +71,11 @@ on:
         required: false
         type: string
         default: '5434'
+      scripts-ref:
+        description: 'Branch/Ref von plaintext-scripts für die ./build-Skripte (Default master; zum Testen von Pipeline-Änderungen vorübergehend auf einen Branch zeigen).'
+        required: false
+        type: string
+        default: 'master'
     secrets:
       TWINGATE_SERVICE_KEY:
         required: true
@@ -85,6 +90,9 @@ jobs:
   # ── Build + Test + Coverage ────────────────────────────────────
   ci:
     name: Build & Test
+    # M1 (build once): der Deliverable-Build läuft jetzt im deploy-Job (inkl. Unit-Tests).
+    # Der separate ci-Build ist nur noch für PRs (ci-only) und den Sonar-Schedule nötig.
+    if: inputs.deploy-target == 'ci-only' || inputs.sonar-enabled
     runs-on: ${{ fromJSON(inputs.runner) }}
     permissions:
       contents: read
@@ -304,7 +312,8 @@ jobs:
   # ── Deploy ─────────────────────────────────────────────────────
   deploy:
     name: "Deploy (${{ inputs.deploy-target }})"
-    needs: ci
+    # M1 (build once): kein separater ci-Build mehr — dieser Job ist der EINZIGE Build
+    # (Compile + Unit-Tests + Package) und deployt anschliessend.
     if: inputs.deploy-target != 'ci-only'
     runs-on: ${{ fromJSON(inputs.runner) }}
     permissions:
@@ -312,6 +321,30 @@ jobs:
       packages: write
 
     steps:
+      - name: Start postgres for build tests
+        # Eigener Container/Port (PGPORT+100) — kollidiert nicht mit dem ci-Job (Sonar-Schedule).
+        env:
+          PGPORT: ${{ inputs.postgres-port }}
+          DB_NAME: ${{ inputs.database-name }}
+        run: |
+          DEPLOY_PGPORT=$((PGPORT + 100))
+          echo "DEPLOY_PGPORT=$DEPLOY_PGPORT" >> "$GITHUB_ENV"
+          CTR="ci-postgres-deploy-${DEPLOY_PGPORT}"
+          docker rm -f "$CTR" 2>/dev/null || true
+          docker run -d --name "$CTR" --network host \
+            -e POSTGRES_DB="$DB_NAME" -e POSTGRES_USER=plaintext -e POSTGRES_PASSWORD=plaintext \
+            --health-cmd "pg_isready -U plaintext -p $DEPLOY_PGPORT" \
+            --health-interval 5s --health-timeout 3s --health-retries 12 \
+            postgres:18-alpine postgres -p "$DEPLOY_PGPORT"
+          for i in $(seq 1 60); do
+            if PGPASSWORD=plaintext psql -h localhost -p "$DEPLOY_PGPORT" -U plaintext -d postgres -c "SELECT 1" >/dev/null 2>&1; then
+              echo "postgres on host:$DEPLOY_PGPORT ready after ${i} tries"; break
+            fi
+            sleep 3
+          done
+          PGPASSWORD=plaintext psql -h localhost -p "$DEPLOY_PGPORT" -U plaintext -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 || \
+          PGPASSWORD=plaintext psql -h localhost -p "$DEPLOY_PGPORT" -U plaintext -d postgres -c "CREATE DATABASE \"$DB_NAME\""
+
       - name: Connect to Twingate
         if: runner.environment != 'self-hosted'
         uses: twingate/github-action@v1
@@ -333,13 +366,17 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: daniel-marthaler/plaintext-scripts
+          ref: ${{ inputs.scripts-ref }}
           path: plaintext-scripts
           token: ${{ secrets.MVN_DEPLOY_TOKEN }}
 
       - name: Install plaintext-scripts
         run: |
           mkdir -p $HOME/codeplain
-          cp -r plaintext-scripts $HOME/codeplain/plaintext-scripts
+          # Ziel vorher leeren: auf wiederverwendeten Runner-Workspaces würde `cp -r` sonst INS
+          # bestehende Verzeichnis kopieren und die alten Skripte stehen lassen (Änderungen wirkungslos).
+          rm -rf "$HOME/codeplain/plaintext-scripts"
+          cp -r plaintext-scripts "$HOME/codeplain/plaintext-scripts"
           chmod +x $HOME/codeplain/plaintext-scripts/*.sh
 
       - name: Checkout plaintext-config
@@ -350,7 +387,9 @@ jobs:
           token: ${{ secrets.MVN_DEPLOY_TOKEN }}
 
       - name: Install plaintext-config
-        run: cp -r plaintext-config $HOME/codeplain/plaintext-config
+        run: |
+          rm -rf "$HOME/codeplain/plaintext-config"
+          cp -r plaintext-config "$HOME/codeplain/plaintext-config"
 
       - name: Setup JDK ${{ inputs.java-version }}
         uses: actions/setup-java@v5
@@ -387,6 +426,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.MVN_DEPLOY_TOKEN }}
           CI: 'true'
           DEPLOY_TARGET: ${{ inputs.deploy-target }}
+          # M1: Unit-Tests laufen im einzigen Build mit (ITs separat) -> Test-DB nötig
+          MVN_TEST_FLAG: '-DskipITs'
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:${{ env.DEPLOY_PGPORT }}/${{ inputs.database-name }}
+          SPRING_DATASOURCE_USERNAME: plaintext
+          SPRING_DATASOURCE_PASSWORD: plaintext
         run: |
           chmod +x ./build
           case "$DEPLOY_TARGET" in
@@ -407,6 +451,10 @@ jobs:
               exit 1
               ;;
           esac
+
+      - name: Stop postgres (deploy cleanup)
+        if: always()
+        run: docker rm -f "ci-postgres-deploy-${DEPLOY_PGPORT}" 2>/dev/null || true
 
       - name: Deploy Summary
         if: always()
