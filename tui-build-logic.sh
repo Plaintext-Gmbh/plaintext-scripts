@@ -1106,7 +1106,8 @@ do_sonar() {
     echo -e "${BLUE}Project: ${PROJECT_KEY} (${PROJECT_VERSION})${NC}"
     echo -e "${BLUE}Running SonarQube analysis...${NC}"
 
-    mvn clean verify sonar:sonar \
+    # -Pcoverage erzeugt Jacoco-Coverage für Sonar; -DskipITs überspringt die ITs (brauchen laufende App).
+    mvn clean verify sonar:sonar -Pcoverage -DskipITs \
         -Dsonar.projectKey="$PROJECT_KEY" \
         -Dsonar.projectName="$PROJECT_NAME" \
         -Dsonar.projectVersion="$PROJECT_VERSION" \
