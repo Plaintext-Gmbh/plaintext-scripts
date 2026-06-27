@@ -426,8 +426,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.MVN_DEPLOY_TOKEN }}
           CI: 'true'
           DEPLOY_TARGET: ${{ inputs.deploy-target }}
-          # M1: Unit-Tests laufen im einzigen Build mit (ITs separat) -> Test-DB nötig
-          MVN_TEST_FLAG: '-DskipITs'
+          # M1: Unit-Tests laufen im einzigen Build mit (ITs separat) -> Test-DB nötig.
+          # Fast-Mode: Commit-Marker [fast] in der Message überspringt ALLE Tests (-DskipTests).
+          MVN_TEST_FLAG: ${{ contains(github.event.head_commit.message, '[fast]') && '-DskipTests' || '-DskipITs' }}
           SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:${{ env.DEPLOY_PGPORT }}/${{ inputs.database-name }}
           SPRING_DATASOURCE_USERNAME: plaintext
           SPRING_DATASOURCE_PASSWORD: plaintext
