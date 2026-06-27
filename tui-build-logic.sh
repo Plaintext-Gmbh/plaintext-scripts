@@ -892,7 +892,40 @@ do_build_snapshot() {
 
     if [ "$1" == "deploy" ]; then
         deploy_to_dev "latest"
+    elif [ "$1" == "prod-single" ]; then
+        if ! deploy_prod_single; then
+            echo -e "${RED}=== Single-PROD-Deployment FEHLGESCHLAGEN ===${NC}"
+            return 1
+        fi
     fi
+}
+
+# Single-PROD-Deploy (kein blue-green, kein DEV): recreate den EINEN PROD-Container mit dem frisch
+# geladenen :latest-Image. Der Stack (Container + DB) wird einmalig per gitops angelegt
+# (./build deploy tri/${IMAGE_NAME} im plaintext-dockercompose-Repo); danach aktualisiert dies nur
+# den App-Container. ${DEPLOY_PATH}=NAS-Compose-Verzeichnis, ${IMAGE_NAME}-prod=Container, ${PROD_PORT}.
+deploy_prod_single() {
+    echo -e "${BLUE}=== Single-PROD-Deploy (kein blue-green) ===${NC}"
+    if ! ensure_nas_reachable; then
+        echo -e "${RED}✗ NAS nicht erreichbar${NC}"
+        return 1
+    fi
+    local CONTAINER="${IMAGE_NAME}-prod"
+    if ! ssh "${DEPLOY_SERVER}" "test -f ${DEPLOY_PATH}/docker-compose.yaml"; then
+        echo -e "${YELLOW}Compose ${DEPLOY_PATH}/docker-compose.yaml fehlt — Image geladen, aber Stack noch nicht via gitops angelegt (./build deploy tri/${IMAGE_NAME}). Container-Recreate übersprungen.${NC}"
+        return 0
+    fi
+    echo -e "${BLUE}Recreate ${CONTAINER} mit frischem ${IMAGE_NAME}:latest...${NC}"
+    if ! ssh "${DEPLOY_SERVER}" "cd ${DEPLOY_PATH} && sudo docker compose up -d --force-recreate --no-deps ${CONTAINER}"; then
+        echo -e "${RED}✗ docker compose up fehlgeschlagen${NC}"
+        return 1
+    fi
+    if ! check_version "latest" "http://${NAS_HOST}:${PROD_PORT:-1142}/nosec/version"; then
+        echo -e "${RED}=== Single-PROD-Healthcheck FEHLGESCHLAGEN ===${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}=== Single-PROD-Deploy abgeschlossen ===${NC}"
+    return 0
 }
 
 # Release build, $1=increment type or deploy flag, $2=optional deploy flag
