@@ -868,10 +868,11 @@ do_build_snapshot() {
     echo -e "${YELLOW}=== Maven Build (SNAPSHOT) ===${NC}"
 
     echo -e "${BLUE}Building with Maven...${NC}"
-    # M1 (build once): in der CI mit Unit-Tests (kein separater ci-Job); lokal ohne Tests.
-    local MVN_TEST_FLAG
-    if [ "${CI}" = "true" ]; then MVN_TEST_FLAG="-DskipITs"; else MVN_TEST_FLAG="-DskipTests"; fi
-    if ! mvn clean package ${MVN_TEST_FLAG} -B; then
+    # M1 (build once): die CI gibt MVN_TEST_FLAG (-DskipITs) explizit per Env vor → Unit-Tests im
+    # EINZIGEN Build; lokal (ohne diese Vorgabe) ohne Tests (Dev-Rechner/Nacht-Runner ohne Test-DB).
+    local TEST_FLAG="${MVN_TEST_FLAG:--DskipTests}"
+    echo -e "${BLUE}Maven-Test-Flag: ${TEST_FLAG} (CI=${CI:-unset})${NC}"
+    if ! mvn clean package ${TEST_FLAG} -B; then
         echo -e "${RED}✗ Maven build failed!${NC}"
         return 1
     fi
@@ -987,19 +988,19 @@ Includes:
     echo -e "${BLUE}Git: Creating tag ${NEW_VERSION}...${NC}"
     git tag -a "${NEW_VERSION}" -m "Release version ${NEW_VERSION}"
 
-    # M1 (build once): in der CI laufen die Unit-Tests im EINZIGEN Build mit (kein separater ci-Job);
-    # lokal weiterhin ohne Tests (Dev-Rechner/Nacht-Runner haben keine Test-DB).
-    local MVN_TEST_FLAG
-    if [ "${CI}" = "true" ]; then MVN_TEST_FLAG="-DskipITs"; else MVN_TEST_FLAG="-DskipTests"; fi
+    # M1 (build once): die CI gibt MVN_TEST_FLAG (-DskipITs) explizit per Env vor → Unit-Tests im
+    # EINZIGEN Build; lokal (ohne diese Vorgabe) ohne Tests (Dev-Rechner/Nacht-Runner ohne Test-DB).
+    local TEST_FLAG="${MVN_TEST_FLAG:--DskipTests}"
+    echo -e "${BLUE}Maven-Test-Flag: ${TEST_FLAG} (CI=${CI:-unset})${NC}"
     if [ "${MVN_RELEASE_DEPLOY}" == "true" ]; then
-        echo -e "${BLUE}Maven: Building + deploying version ${GREEN}${NEW_VERSION}${NC} (${MVN_TEST_FLAG})"
-        if ! mvn clean deploy ${MVN_TEST_FLAG} -B; then
+        echo -e "${BLUE}Maven: Building + deploying version ${GREEN}${NEW_VERSION}${NC} (${TEST_FLAG})"
+        if ! mvn clean deploy ${TEST_FLAG} -B; then
             echo -e "${RED}✗ Maven build failed!${NC}"
             return 1
         fi
     else
-        echo -e "${BLUE}Maven: Building version ${GREEN}${NEW_VERSION}${NC} (${MVN_TEST_FLAG})"
-        if ! mvn clean package ${MVN_TEST_FLAG} -B; then
+        echo -e "${BLUE}Maven: Building version ${GREEN}${NEW_VERSION}${NC} (${TEST_FLAG})"
+        if ! mvn clean package ${TEST_FLAG} -B; then
             echo -e "${RED}✗ Maven build failed!${NC}"
             return 1
         fi
