@@ -916,7 +916,8 @@ deploy_prod_single() {
         return 0
     fi
     echo -e "${BLUE}Recreate ${CONTAINER} mit frischem ${IMAGE_NAME}:latest...${NC}"
-    if ! ssh "${DEPLOY_SERVER}" "cd ${DEPLOY_PATH} && sudo docker compose up -d --force-recreate --no-deps ${CONTAINER}"; then
+    # KEIN --no-deps: stellt sicher, dass die DB-Dependency läuft (depends_on), bevor die App startet.
+    if ! ssh "${DEPLOY_SERVER}" "cd ${DEPLOY_PATH} && sudo docker compose up -d --force-recreate ${CONTAINER}"; then
         echo -e "${RED}✗ docker compose up fehlgeschlagen${NC}"
         return 1
     fi
