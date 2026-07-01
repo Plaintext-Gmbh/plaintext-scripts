@@ -317,7 +317,9 @@ switch_active() {
 check_container_health() {
     local CONTAINER_NAME="$1"
     local EXPECTED_VERSION="$2"
-    local MAX_WAIT="${3:-120}"
+    # 300s (statt 120s), damit ein langsamer, aber gesunder Startup den Deploy nicht fälschlich abbricht;
+    # via HEALTHCHECK_MAX_WAIT überschreibbar. Ein echter Crash wird unten früh erkannt (kein sinnloses Warten).
+    local MAX_WAIT="${3:-${HEALTHCHECK_MAX_WAIT:-300}}"
     local INTERVAL=5
     local ELAPSED=0
 
@@ -339,6 +341,18 @@ check_container_health() {
 
     while [ $ELAPSED -lt $MAX_WAIT ]; do
         echo -e "${YELLOW}Checking... (${ELAPSED}s / ${MAX_WAIT}s)${NC}"
+
+        # Früh-Abbruch bei abgestürztem/crash-loopendem Container: nicht das ganze Fenster verwarten und
+        # die Ursache (Logs) sofort zeigen, statt eines undurchsichtigen Healthcheck-Timeouts. Ein gesunder
+        # Startup geht created->running (RestartCount 0); exited/dead oder RestartCount>=2 = Crash.
+        local CSTATE
+        CSTATE=$(ssh ${DEPLOY_SERVER} "sudo docker inspect -f '{{.State.Status}}:{{.RestartCount}}' ${CONTAINER_NAME} 2>/dev/null || echo 'unknown:0'")
+        case "$CSTATE" in
+            exited:*|dead:*|*:[2-9]|*:[1-9][0-9]*)
+                echo -e "${RED}✗ Container ${CONTAINER_NAME} startet nicht (State ${CSTATE}) – Abbruch. Letzte Logs:${NC}"
+                ssh ${DEPLOY_SERVER} "sudo docker logs --tail 60 ${CONTAINER_NAME} 2>&1 | tail -60"
+                return 1 ;;
+        esac
 
         local VERSION_RESPONSE
         VERSION_RESPONSE=$(ssh ${DEPLOY_SERVER} \
