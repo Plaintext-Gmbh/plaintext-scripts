@@ -317,9 +317,12 @@ switch_active() {
 check_container_health() {
     local CONTAINER_NAME="$1"
     local EXPECTED_VERSION="$2"
-    # 300s (statt 120s), damit ein langsamer, aber gesunder Startup den Deploy nicht fälschlich abbricht;
-    # via HEALTHCHECK_MAX_WAIT überschreibbar. Ein echter Crash wird unten früh erkannt (kein sinnloses Warten).
-    local MAX_WAIT="${3:-${HEALTHCHECK_MAX_WAIT:-300}}"
+    # 600s (statt 300s): der app-PROD-Kaltstart auf dem NAS braucht unter Last >300s bis Actuator UP
+    # (2026-07-02 zweimal in Folge: Container wurde Sekunden NACH dem 300s-Abbruch healthy, green blieb
+    # aktiv und der neue Slot lief verwaist weiter). DEV bootet in <60s und ist davon unberührt; ein
+    # echter Crash wird unten via RestartCount früh erkannt (kein sinnloses Auswarten des Timeouts).
+    # Via HEALTHCHECK_MAX_WAIT überschreibbar.
+    local MAX_WAIT="${3:-${HEALTHCHECK_MAX_WAIT:-600}}"
     local INTERVAL=5
     local ELAPSED=0
 
