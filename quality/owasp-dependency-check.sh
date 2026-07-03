@@ -32,18 +32,26 @@ if [ -x "./mvnw" ]; then MVN="./mvnw"; elif command -v mvn >/dev/null 2>&1; then
   exit 2
 fi
 
-NVD_ARGS=()
+EXTRA_ARGS=()
 if [ -n "${NVD_API_KEY:-}" ]; then
-  NVD_ARGS+=("-DnvdApiKey=${NVD_API_KEY}")
+  EXTRA_ARGS+=("-DnvdApiKey=${NVD_API_KEY}")
 else
   echo "WARNUNG: kein NVD_API_KEY gesetzt — Scan ist langsam und ggf. rate-limited." >&2
+fi
+# Persistenter NVD-Cache (self-hosted Runner): Erst-Lauf lädt die NVD, danach inkrementell/schnell.
+if [ -n "${OWASP_DATA_DIR:-}" ]; then
+  mkdir -p "$OWASP_DATA_DIR"
+  EXTRA_ARGS+=("-DdataDirectory=${OWASP_DATA_DIR}")
+fi
+# Suppression-Datei nur mitgeben, wenn gesetzt (leerer Wert würde DC stören).
+if [ -n "${OWASP_SUPPRESSION:-}" ]; then
+  EXTRA_ARGS+=("-DsuppressionFile=${OWASP_SUPPRESSION}")
 fi
 
 echo "== OWASP Dependency-Check ${DC_VERSION} für $(basename "$PROJECT_DIR") =="
 "$MVN" -B org.owasp:dependency-check-maven:${DC_VERSION}:aggregate \
   -DfailBuildOnCVSS="${FAIL_CVSS}" \
   -Dformats=HTML,JSON \
-  -DsuppressionFile="${OWASP_SUPPRESSION:-}" \
-  "${NVD_ARGS[@]}"
+  "${EXTRA_ARGS[@]}"
 
 echo "Report: $PROJECT_DIR/target/dependency-check-report.html"
