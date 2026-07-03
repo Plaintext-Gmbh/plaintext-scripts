@@ -56,11 +56,16 @@ on:
         required: false
         type: boolean
         default: false
+      quality-analysis:
+        description: 'Wöchentliche Voll-Analyse: nach Sonar zusätzlich OWASP-CVE + SpotBugs, Quality-Gate bewerten, bei Breach quality/quality-gate.properties committen + Pushover. Erfordert sonar-enabled.'
+        required: false
+        type: boolean
+        default: false
       sonar-url:
-        description: 'SonarQube server URL'
+        description: 'SonarQube server URL (vom self-hosted NAS-Runner erreichbar)'
         required: false
         type: string
-        default: 'http://192.168.1.224:9000'
+        default: 'https://sonar.plaintext.ch'
       runner:
         description: 'Runner labels as JSON array (e.g. ["self-hosted","nas"] for self-hosted, ["ubuntu-latest"] for GitHub-hosted)'
         required: false
@@ -84,6 +89,10 @@ on:
       SSH_PRIVATE_KEY:
         required: false
       SONAR_TOKEN:
+        required: false
+      PUSHOVER_APP_TOKEN:
+        required: false
+      PUSHOVER_USER_KEY:
         required: false
 
 jobs:
@@ -205,7 +214,8 @@ jobs:
     if: inputs.sonar-enabled
     runs-on: ${{ fromJSON(inputs.runner) }}
     permissions:
-      contents: read
+      # write: die wöchentliche Voll-Analyse committet quality/quality-gate.properties zurück.
+      contents: write
       packages: read
 
     steps:
@@ -259,7 +269,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
+          # Token mit Push-Recht: der Quality-Gate-Schritt committet das Statusfile zurück.
+          token: ${{ secrets.MVN_DEPLOY_TOKEN }}
           fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.email "github@plaintext.ch"
+          git config user.name "GithubActions"
+
+      - name: Checkout plaintext-scripts (Quality-Tools)
+        if: inputs.quality-analysis
+        uses: actions/checkout@v7
+        with:
+          repository: daniel-marthaler/plaintext-scripts
+          ref: ${{ inputs.scripts-ref }}
+          path: .plaintext-scripts
+          token: ${{ secrets.MVN_DEPLOY_TOKEN }}
 
       - name: Setup JDK ${{ inputs.java-version }}
         uses: actions/setup-java@v5
@@ -308,6 +334,83 @@ jobs:
           echo "## SonarQube Analysis – $PROJECT_NAME" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Dashboard: [$PROJECT_NAME]($SONAR_HOST_URL/dashboard?id=${GROUP_ID}:${ARTIFACT_ID})" >> $GITHUB_STEP_SUMMARY
+
+      # ── Wöchentliche Voll-Analyse: OWASP-CVE + SpotBugs (best-effort) ──────
+      - name: OWASP-CVE + SpotBugs
+        if: inputs.quality-analysis
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          export OWASP_DATA_DIR="$HOME/.cache/owasp-dc-data"   # persistenter NVD-Cache auf dem Runner
+          bash .plaintext-scripts/quality/owasp-dependency-check.sh "$PWD" 0 \
+            || echo "::warning::OWASP best-effort fehlgeschlagen (Gate fällt auf Sonar-only zurück)"
+          bash .plaintext-scripts/quality/spotbugs.sh "$PWD" Medium \
+            || echo "::warning::SpotBugs best-effort fehlgeschlagen"
+
+      # ── Quality-Gate bewerten: Sonar-Gate ERROR ODER High-CVE (CVSS>=7) ────
+      - name: Quality-Gate bewerten
+        if: inputs.quality-analysis
+        id: gate
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ inputs.sonar-url }}
+        run: |
+          GROUP_ID=$(mvn help:evaluate -Dexpression=project.groupId -q -DforceStdout)
+          ARTIFACT_ID=$(mvn help:evaluate -Dexpression=project.artifactId -q -DforceStdout)
+          PROJECT_KEY="${GROUP_ID}:${ARTIFACT_ID}"
+          REPORT_TASK=$(find . -path "*/target/sonar/report-task.txt" 2>/dev/null | head -1)
+          OWASP_JSON=$(find . -path "*/target/dependency-check-report.json" 2>/dev/null | head -1)
+          set +e
+          python3 .plaintext-scripts/quality/quality-gate.py \
+            --repo "$PWD" \
+            --project-key "$PROJECT_KEY" \
+            --sonar-url "$SONAR_HOST_URL" \
+            --sonar-token "$SONAR_TOKEN" \
+            --report-task "$REPORT_TASK" \
+            --owasp-json "$OWASP_JSON" \
+            --dashboard-url "https://plaintext-gmbh.github.io/plaintext-scripts/" | tee /tmp/gate.out
+          GATE_EXIT=${PIPESTATUS[0]}
+          set -e
+          [ "$GATE_EXIT" = "10" ] && echo "breached=true" >> "$GITHUB_OUTPUT" || echo "breached=false" >> "$GITHUB_OUTPUT"
+          grep '^  ! ' /tmp/gate.out | sed 's/^  ! //' > /tmp/breaches.txt || true
+          {
+            echo "## Quality-Gate – ${{ inputs.project-name }}"
+            echo ""
+            [ "$GATE_EXIT" = "10" ] && echo ":red_circle: **BREACHED**" || echo ":green_circle: **OK**"
+            echo ""; sed 's/^/- /' /tmp/breaches.txt 2>/dev/null || true
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Quality-Gate-Statusfile committen
+        if: inputs.quality-analysis
+        run: |
+          if git status --porcelain quality/quality-gate.properties | grep -q .; then
+            git add quality/quality-gate.properties
+            git commit -m "chore(quality): Quality-Gate-Status ${{ steps.gate.outputs.breached == 'true' && 'BREACHED' || 'OK' }} [skip-ci]"
+            git push origin HEAD:${{ github.ref_name }} || {
+              echo "push rejected – rebase & retry"; git pull --rebase --autostash origin ${{ github.ref_name }}; git push origin HEAD:${{ github.ref_name }};
+            }
+          else
+            echo "Quality-Gate-Status unverändert — kein Commit."
+          fi
+
+      - name: Pushover bei Quality-Gate-Breach
+        if: inputs.quality-analysis && steps.gate.outputs.breached == 'true'
+        env:
+          PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
+          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+        run: |
+          BODY="$(cat /tmp/breaches.txt)"
+          bash .plaintext-scripts/quality/pushover.sh \
+            "Quality-Gate rot: ${{ inputs.project-name }}" \
+            "Schwelle überschritten:
+          ${BODY}
+
+          Das Statusfile ist eingecheckt, nightly/PR-Builds sind rot bis zum Fix." \
+            1 \
+            "${{ inputs.sonar-url }}/dashboard?id=$(mvn help:evaluate -Dexpression=project.groupId -q -DforceStdout):$(mvn help:evaluate -Dexpression=project.artifactId -q -DforceStdout)" \
+            "SonarQube"
 
   # ── Deploy ─────────────────────────────────────────────────────
   deploy:
@@ -428,7 +531,10 @@ jobs:
           DEPLOY_TARGET: ${{ inputs.deploy-target }}
           # M1: Unit-Tests laufen im einzigen Build mit (ITs separat) -> Test-DB nötig.
           # Fast-Mode: Commit-Marker [fast] in der Message überspringt ALLE Tests (-DskipTests).
-          MVN_TEST_FLAG: ${{ contains(github.event.head_commit.message, '[fast]') && '-DskipTests' || '-DskipITs' }}
+          # -DexcludedGroups=quality-gate: der Quality-Gate-Wächter (QualityGateTest) darf den DEPLOY
+          # NICHT blockieren (Hotfix muss trotz aktivem Alert-File rausgehen können). Er läuft dafür in
+          # nightly/PR/lokal voll mit und färbt dort rot -> Handlungsbedarf bleibt sichtbar.
+          MVN_TEST_FLAG: ${{ contains(github.event.head_commit.message, '[fast]') && '-DskipTests' || '-DskipITs -DexcludedGroups=quality-gate' }}
           SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:${{ env.DEPLOY_PGPORT }}/${{ inputs.database-name }}
           SPRING_DATASOURCE_USERNAME: plaintext
           SPRING_DATASOURCE_PASSWORD: plaintext
