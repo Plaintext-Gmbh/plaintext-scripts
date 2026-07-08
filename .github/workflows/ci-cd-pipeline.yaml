@@ -348,10 +348,14 @@ jobs:
       - name: OWASP-CVE + SpotBugs
         if: inputs.quality-analysis
         continue-on-error: true
-        timeout-minutes: 30
+        timeout-minutes: 45
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
+          # STALE-SCHUTZ: alte Reports aus dem wiederverwendeten Runner-Workspace löschen.
+          # Sonst bewertet das Gate nach einem DC-Timeout einen veralteten Report
+          # (z.B. von VOR einer Suppression-Änderung) statt gar keinen (= Sonar-only).
+          find . -path "*/target/dependency-check-report.*" -delete 2>/dev/null || true
           export OWASP_DATA_DIR="$HOME/.cache/owasp-dc-data"   # persistenter NVD-Cache auf dem Runner
           # Projekt-lokale Suppression-Datei (dokumentierte False-Positives) automatisch verwenden.
           if [ -f "$PWD/quality/owasp-suppressions.xml" ]; then
@@ -362,6 +366,18 @@ jobs:
             || echo "::warning::OWASP best-effort fehlgeschlagen (Gate fällt auf Sonar-only zurück)"
           bash .plaintext-scripts/quality/spotbugs.sh "$PWD" Medium \
             || echo "::warning::SpotBugs best-effort fehlgeschlagen"
+
+      # Report als Artifact sichern (Runner-Workspace ist ephemer; ohne Artifact ist
+      # eine Nachanalyse der gemeldeten CVEs unmöglich).
+      - name: OWASP-Report als Artifact
+        if: always() && inputs.quality-analysis
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: owasp-dependency-check-${{ inputs.project-name }}
+          path: '**/target/dependency-check-report.json'
+          if-no-files-found: ignore
+          retention-days: 14
 
       # ── Quality-Gate bewerten: Sonar-Gate ERROR ODER High-CVE (CVSS>=7) ────
       - name: Quality-Gate bewerten
