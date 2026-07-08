@@ -211,7 +211,10 @@ jobs:
   sonar:
     name: SonarQube Analysis
     needs: ci
-    if: inputs.sonar-enabled
+    # !cancelled(): auch bei rotem Build & Test laufen — sonst Catch-22: Gate BREACHED/ERROR
+    # → QualityGateTest lässt Build & Test scheitern → die Analyse (die das Gate wieder
+    # zurücksetzen würde) wird geskippt → Gate bleibt für immer rot.
+    if: inputs.sonar-enabled && !cancelled()
     runs-on: ${{ fromJSON(inputs.runner) }}
     permissions:
       # write: die wöchentliche Voll-Analyse committet quality/quality-gate.properties zurück.
@@ -313,7 +316,9 @@ jobs:
           VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
 
           # -DskipITs: ITs benoetigen laufende App (kein Deploy in SonarQube-Job)
-          mvn clean verify sonar:sonar -B -DskipITs \
+          # -DexcludedGroups=quality-gate: der Gate-Wächter darf die ANALYSE nicht blocken
+          # (sie ist es, die das Gate wieder auf OK bringen kann) — analog zum Deploy-Build.
+          mvn clean verify sonar:sonar -B -DskipITs -DexcludedGroups=quality-gate \
             -Dsonar.projectKey="$PROJECT_KEY" \
             -Dsonar.projectName="${{ inputs.project-name }}" \
             -Dsonar.projectVersion="$VERSION" \
