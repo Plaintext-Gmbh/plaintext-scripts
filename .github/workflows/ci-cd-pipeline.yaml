@@ -318,7 +318,11 @@ jobs:
           # -DskipITs: ITs benoetigen laufende App (kein Deploy in SonarQube-Job)
           # -DexcludedGroups=quality-gate: der Gate-Wächter darf die ANALYSE nicht blocken
           # (sie ist es, die das Gate wieder auf OK bringen kann) — analog zum Deploy-Build.
-          mvn clean verify sonar:sonar -B -DskipITs -DexcludedGroups=quality-gate \
+          # -Pcoverage,fast: der JaCoCo-Agent + report@verify stecken im (default-inaktiven)
+          # coverage-Profil. Ohne das lief die Analyse OHNE Coverage → Sonar sah 0% new_coverage
+          # → Gate dauerhaft ERROR. 'fast' explizit mitaktivieren (sonst deaktiviert -P das
+          # activeByDefault-fast). jacoco.xml wird an sonar.coverage.jacoco.xmlReportPaths erwartet.
+          mvn clean verify sonar:sonar -B -DskipITs -DexcludedGroups=quality-gate -Pcoverage,fast \
             -Dsonar.projectKey="$PROJECT_KEY" \
             -Dsonar.projectName="${{ inputs.project-name }}" \
             -Dsonar.projectVersion="$VERSION" \
