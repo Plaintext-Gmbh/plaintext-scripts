@@ -38,7 +38,7 @@ jobs:
           cp public/index.html public/quality.html   # zusätzlicher sprechender Name
 
       - name: Pages-Artefakt hochladen
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: public
 
