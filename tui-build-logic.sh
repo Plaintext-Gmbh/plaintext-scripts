@@ -398,72 +398,6 @@ check_container_health() {
     return 1
 }
 
-# ── Session Transfer (Blue-Green) ─────────────────────────────
-
-# Export sessions from a running container (non-blocking: returns 0 even on failure)
-export_sessions() {
-    local CONTAINER="$1"
-    local OUTPUT_FILE="$2"
-
-    echo -e "${BLUE}Exporting sessions from ${CONTAINER}...${NC}"
-
-    local RESULT
-    RESULT=$(ssh ${DEPLOY_SERVER} "sudo docker exec ${CONTAINER} \
-        wget -qO- --header='Authorization: Bearer ${SESSION_TRANSFER_TOKEN}' \
-        http://localhost:8080/nosec/root/sessions/export 2>/dev/null" 2>/dev/null) || true
-
-    if [ -z "$RESULT" ] || ! echo "$RESULT" | grep -q '"sessionCount"'; then
-        echo -e "${YELLOW}⚠ Session export failed or empty (non-critical, continuing)${NC}"
-        echo "" > "$OUTPUT_FILE"
-        return 1
-    fi
-
-    echo "$RESULT" > "$OUTPUT_FILE"
-    local COUNT
-    COUNT=$(echo "$RESULT" | grep -o '"sessionCount":[0-9]*' | grep -o '[0-9]*')
-    echo -e "${GREEN}✓ Exported ${COUNT:-0} sessions${NC}"
-    return 0
-}
-
-# Import sessions into a running container (non-blocking: returns 0 even on failure)
-import_sessions() {
-    local CONTAINER="$1"
-    local INPUT_FILE="$2"
-
-    # Skip if export file is empty or missing
-    if [ ! -s "$INPUT_FILE" ]; then
-        echo -e "${YELLOW}⚠ No session data to import (skipping)${NC}"
-        return 0
-    fi
-
-    echo -e "${BLUE}Importing sessions to ${CONTAINER}...${NC}"
-
-    # Transfer session data to NAS, copy into container, POST it
-    cat "${INPUT_FILE}" | ssh ${DEPLOY_SERVER} "cat > /tmp/sessions-import.json" 2>/dev/null || true
-
-    local RESULT
-    RESULT=$(ssh ${DEPLOY_SERVER} "
-        sudo docker cp /tmp/sessions-import.json ${CONTAINER}:/tmp/sessions-import.json 2>/dev/null && \
-        sudo docker exec ${CONTAINER} wget -qO- \
-            --post-file=/tmp/sessions-import.json \
-            --header='Authorization: Bearer ${SESSION_TRANSFER_TOKEN}' \
-            --header='Content-Type: application/json' \
-            http://localhost:8080/nosec/root/sessions/import 2>/dev/null
-        sudo docker exec ${CONTAINER} rm -f /tmp/sessions-import.json 2>/dev/null
-        rm -f /tmp/sessions-import.json
-    " 2>/dev/null) || true
-
-    if echo "$RESULT" | grep -q '"imported"'; then
-        local IMPORTED
-        IMPORTED=$(echo "$RESULT" | grep -o '"imported":[0-9]*' | grep -o '[0-9]*')
-        echo -e "${GREEN}✓ Imported ${IMPORTED:-0} sessions${NC}"
-    else
-        echo -e "${YELLOW}⚠ Session import failed (non-critical, users may need to re-login)${NC}"
-    fi
-
-    return 0
-}
-
 # Deploy image to the inactive slot using blue-green strategy
 deploy_blue_green() {
     local ENV_NAME="$1"
@@ -532,16 +466,7 @@ deploy_blue_green() {
         return 1
     fi
 
-    # Session transfer: export from active, import to new, THEN switch
-    local ACTIVE_CONTAINER="${IMAGE_NAME}-${ENV_NAME}-${ACTIVE_SLOT}"
-    if [ -n "${SESSION_TRANSFER_TOKEN}" ]; then
-        local SESSION_DUMP="/tmp/session-dump-${IMAGE_NAME}-${ENV_NAME}.json"
-        export_sessions "${ACTIVE_CONTAINER}" "${SESSION_DUMP}"
-        import_sessions "${CONTAINER_NAME}" "${SESSION_DUMP}"
-        rm -f "${SESSION_DUMP}"
-    fi
-
-    # Switch nginx to the new slot (sessions are already imported)
+    # Switch nginx to the new slot
     echo -e "${BLUE}Health check passed - switching traffic...${NC}"
     if ! switch_active "$ENV_NAME" "$INACTIVE_SLOT"; then
         echo -e "${RED}✗ Nginx switch failed! Traffic still on ${ACTIVE_SLOT}.${NC}"
