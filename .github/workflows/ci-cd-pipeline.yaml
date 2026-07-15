@@ -541,6 +541,14 @@ jobs:
                 <username>daniel-marthaler</username>
                 <password>${{ secrets.MVN_DEPLOY_TOKEN }}</password>
               </server>
+              <!-- Privates NAS-Maven-Repo (Reposilite, maven.plaintext.ch, LAN-only).
+                   root deployt dual (GH Packages + NAS), app/iot/schuetu/fwtool nur NAS.
+                   Token: Org-Secret MAVEN_NAS_TOKEN (Vault: "Reposilite CI-Token"). -->
+              <server>
+                <id>plaintext-nas</id>
+                <username>ci</username>
+                <password>${{ secrets.MAVEN_NAS_TOKEN }}</password>
+              </server>
             </servers>
           </settings>
           EOF
