@@ -10,7 +10,7 @@
 
 PID_FILE="$SCRIPT_DIR/.app.pid"
 LOG_FILE="$SCRIPT_DIR/app.log"
-AUTOLOGIN_URL="${AUTOLOGIN_URL:-http://localhost:8080/autologin?key=fHySOUPZo1N1zLOpviHmBukjSQUL1ivLkeM}"
+AUTOLOGIN_URL="${AUTOLOGIN_URL:-http://localhost:8080/autologin?key=jox3QYAiWYGb5Od7wcK7MnW4cpcFKNKaj37}"
 
 # ── Action functions ─────────────────────────────────────────
 
