@@ -184,6 +184,17 @@ stage_jar_to_nas() {
             if [ -f "${c}.original" ]; then JAR="$c"; break; fi
         done
     fi
+    if [ -z "$JAR" ]; then
+        # Build-Cache-Restore-Fall: das Fat-Jar liegt OHNE -exec-Suffix und OHNE .original-
+        # Geschwister im target/ (Restore materialisiert es unter dem Haupt-Artefakt-Namen).
+        # Groesstes Jar nehmen, aber NUR wenn es nachweislich ein Boot-Jar ist (BOOT-INF im
+        # Zip-Verzeichnis; grep -a liest den unkomprimierten Eintragsnamen aus dem Archiv).
+        local c
+        for c in $(find "$PWD" -path '*/target/*.jar' -type f ! -name '*-sources.jar' ! -name '*-javadoc.jar' 2>/dev/null | xargs -r ls -S 2>/dev/null); do
+            if grep -aq 'BOOT-INF/' "$c" 2>/dev/null; then JAR="$c"; break; fi
+        done
+        [ -n "$JAR" ] && echo -e "${BLUE}M3: Boot-Jar ohne -exec-Suffix erkannt (Cache-Restore): $(basename "$JAR")${NC}"
+    fi
     if [ -z "$JAR" ] || [ ! -f "$JAR" ]; then
         echo -e "${RED}✗ M3: Kein Spring-Boot-Exec-Jar gefunden (Maven-Build gelaufen?)${NC}"
         return 1
