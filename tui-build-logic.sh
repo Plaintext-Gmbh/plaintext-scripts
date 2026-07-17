@@ -1057,15 +1057,21 @@ Includes:
     # EINZIGEN Build; lokal (ohne diese Vorgabe) ohne Tests (Dev-Rechner/Nacht-Runner ohne Test-DB).
     local TEST_FLAG="${MVN_TEST_FLAG:--DskipTests}"
     echo -e "${BLUE}Maven-Test-Flag: ${TEST_FLAG} (CI=${CI:-unset})${NC}"
+    # Release-Builds IMMER cache-frei: Der Build-Cache restauriert die Webapp sonst mit dem
+    # Inhalt des PR-/Branch-Builds — das Jar wird zwar auf die Release-Version umbenannt
+    # (projectVersioning), traegt im Inhalt aber die SNAPSHOT-Version. Der /nosec/version-Gate
+    # des Blue-Green-Deploys lehnt das (korrekterweise) ab (schuetu 1.371.0, 17.07.2026).
+    # Der Cache-Gewinn bleibt fuer ci/PR/snapshot-Builds erhalten.
+    local RELEASE_MVN_FLAGS="-Dmaven.build.cache.enabled=false"
     if [ "${MVN_RELEASE_DEPLOY}" == "true" ]; then
-        echo -e "${BLUE}Maven: Building + deploying version ${GREEN}${NEW_VERSION}${NC} (${TEST_FLAG})"
-        if ! mvn clean deploy ${TEST_FLAG} -B; then
+        echo -e "${BLUE}Maven: Building + deploying version ${GREEN}${NEW_VERSION}${NC} (${TEST_FLAG}, cache-frei)"
+        if ! mvn clean deploy ${TEST_FLAG} ${RELEASE_MVN_FLAGS} -B; then
             echo -e "${RED}✗ Maven build failed!${NC}"
             return 1
         fi
     else
-        echo -e "${BLUE}Maven: Building version ${GREEN}${NEW_VERSION}${NC} (${TEST_FLAG})"
-        if ! mvn clean package ${TEST_FLAG} -B; then
+        echo -e "${BLUE}Maven: Building version ${GREEN}${NEW_VERSION}${NC} (${TEST_FLAG}, cache-frei)"
+        if ! mvn clean package ${TEST_FLAG} ${RELEASE_MVN_FLAGS} -B; then
             echo -e "${RED}✗ Maven build failed!${NC}"
             return 1
         fi
