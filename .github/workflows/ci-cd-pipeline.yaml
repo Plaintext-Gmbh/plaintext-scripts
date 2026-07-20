@@ -375,7 +375,6 @@ jobs:
         if: always() && inputs.quality-analysis
         continue-on-error: true
         uses: actions/upload-artifact@v7
-        continue-on-error: true  # Artefakt-Upload ist nur Convenience/Reporting; darf die Pipeline nicht wegen Storage-Quota o.ae. scheitern lassen
         with:
           name: owasp-dependency-check-${{ inputs.project-name }}
           path: '**/target/dependency-check-report.json'
