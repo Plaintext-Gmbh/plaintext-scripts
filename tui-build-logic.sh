@@ -77,6 +77,38 @@ get_release_version() {
     # Latest git tag that looks like a version number
     git describe --tags --abbrev=0 --match '[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || echo "0.0.0"
 }
+
+# ── Staging-Jar-Race-Haerte (Defense-in-Depth, #16/fleetd) ────
+# jars/staging/app.jar ist eine GETEILTE Datei pro App (kein Lock, keine PID/Run-Eindeutigkeit) --
+# ueberlappende stage_jar_to_nas()-Laeufe koennten sie theoretisch mit dem Jar eines ANDEREN Laufs
+# ueberschreiben, bevor der Slot-Copy passiert. Verifiziert die Implementation-Version im Manifest
+# des Staging-Jars gegen die erwartete Version, UNMITTELBAR VOR dem Slot-Copy -- faengt genau dieses
+# Fenster ab. Fail-open bei fehlendem `unzip`/leerem Manifest-Eintrag (kein Primaerschutz, soll
+# Deploys nicht blockieren, wenn das Tool fehlt); faengt aber einen klaren Mismatch hart ab.
+verify_staging_jar_version() {
+    local EXPECTED_VERSION="$1"
+    if [ "${EXPECTED_VERSION}" == "latest" ] || [ -z "${EXPECTED_VERSION}" ]; then
+        # SNAPSHOT-Builds: Docker-Tag/Aufrufkontext liefert kein festes Ziel zum Vergleichen
+        # (analog SKIP_VERSION_MATCH in check_container_health) -- nichts zu verifizieren.
+        return 0
+    fi
+    local STAGED_VERSION
+    STAGED_VERSION=$(ssh "${DEPLOY_SERVER}" \
+        "unzip -p ${DEPLOY_PATH}/jars/staging/app.jar META-INF/MANIFEST.MF 2>/dev/null" \
+        | grep '^Implementation-Version:' | sed 's/^Implementation-Version: *//' | tr -d '\r\n')
+    if [ -z "${STAGED_VERSION}" ]; then
+        echo -e "${YELLOW}⚠ Staging-Jar-Versionscheck übersprungen (unzip fehlt oder Manifest ohne Implementation-Version) — kein Primärschutz, fahre fort.${NC}"
+        return 0
+    fi
+    if [ "${STAGED_VERSION}" != "${EXPECTED_VERSION}" ]; then
+        echo -e "${RED}✗ Staging-Jar-Version stimmt nicht überein: erwartet '${EXPECTED_VERSION}', gefunden '${STAGED_VERSION}'.${NC}"
+        echo -e "${RED}  Vermutlich hat ein ANDERER, überlappender Deploy-Lauf jars/staging/app.jar überschrieben (Race Condition).${NC}"
+        echo -e "${RED}  Abbruch vor dem Slot-Copy -- bitte stage_jar_to_nas für diesen Lauf erneut ausführen, sobald der andere Lauf fertig ist.${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}✓ Staging-Jar-Version verifiziert (${STAGED_VERSION})${NC}"
+    return 0
+}
 DEPLOY_PATH="${DEPLOY_PATH:-/volume1/docker/${IMAGE_NAME}}"
 COMPOSE_FILE="docker-compose.yaml"
 
@@ -205,8 +237,13 @@ stage_jar_to_nas() {
         return 1
     fi
     local STAGING="${DEPLOY_PATH}/jars/staging"
+    # Tmp-Name PID+Zeitstempel-eindeutig (statt einem fixen "app.jar.tmp"): zwei ueberlappende
+    # stage_jar_to_nas()-Laeufe fuer dieselbe App wuerden sich sonst denselben Tmp-Pfad teilen und
+    # sich gegenseitig ueberschreiben/verstuemmeln (Race Condition, #16/fleetd Haertung).
+    local TMP_NAME="app.jar.tmp.$$.$(date +%s 2>/dev/null || echo 0)"
     ssh "${DEPLOY_SERVER}" "mkdir -p ${STAGING}"
-    if ! cat "${JAR}" | ssh "${DEPLOY_SERVER}" "cat > ${STAGING}/app.jar.tmp && chmod 644 ${STAGING}/app.jar.tmp && mv -f ${STAGING}/app.jar.tmp ${STAGING}/app.jar"; then
+    if ! cat "${JAR}" | ssh "${DEPLOY_SERVER}" "cat > ${STAGING}/${TMP_NAME} && chmod 644 ${STAGING}/${TMP_NAME} && mv -f ${STAGING}/${TMP_NAME} ${STAGING}/app.jar"; then
+        ssh "${DEPLOY_SERVER}" "rm -f ${STAGING}/${TMP_NAME}" 2>/dev/null
         echo -e "${RED}✗ M3: Jar-Transfer auf NAS fehlgeschlagen${NC}"
         return 1
     fi
@@ -446,6 +483,9 @@ deploy_blue_green() {
         echo -e "${BLUE}M3: Jar → Slot ${ENV_NAME}-${INACTIVE_SLOT} (${SLOT_JAR_DIR}/app.jar)...${NC}"
         if ! ssh ${DEPLOY_SERVER} "test -f ${DEPLOY_PATH}/jars/staging/app.jar"; then
             echo -e "${RED}✗ M3: Kein Staging-Jar gefunden (stage_jar_to_nas gelaufen?)${NC}"
+            return 1
+        fi
+        if ! verify_staging_jar_version "${IMAGE_TAG}"; then
             return 1
         fi
         ssh ${DEPLOY_SERVER} "mkdir -p ${SLOT_JAR_DIR} && \
@@ -938,6 +978,12 @@ deploy_prod_single() {
         # M3: Staging-Jar in den prod-Slot kopieren (Compose mountet jars/prod/app.jar als Volume).
         if ! ssh "${DEPLOY_SERVER}" "test -f ${DEPLOY_PATH}/jars/staging/app.jar"; then
             echo -e "${RED}✗ M3: Kein Staging-Jar gefunden (stage_jar_to_nas gelaufen?)${NC}"
+            return 1
+        fi
+        # Kein IMAGE_TAG-Parameter hier (dieser Pfad prueft sonst nur "latest"/SKIP_VERSION_MATCH,
+        # s. check_version-Aufruf unten) -- frisch aus dem lokalen pom.xml gelesene Version nutzen,
+        # da cwd hier das gerade gebaute App-Repo-Root ist.
+        if ! verify_staging_jar_version "$(get_pom_version)"; then
             return 1
         fi
         ssh "${DEPLOY_SERVER}" "mkdir -p ${DEPLOY_PATH}/jars/prod && \
