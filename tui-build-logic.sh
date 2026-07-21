@@ -326,6 +326,71 @@ get_inactive_slot() {
     fi
 }
 
+# ── Migrations-Guard (Blue-Green-Rollback vs. bereits migrierte geteilte DB) ──────────────────
+# Problem: deploy_blue_green fährt beim Boot des neuen Slots die Flyway-Migrationen gegen die GETEILTE
+# Prod-DB, BEVOR der externe Healthcheck läuft. Schlägt dieser fehl, würde ein blinder "Instant
+# Rollback" auf den ALTEN Container laufen, dessen Code das NEUE Schema evtl. nicht versteht.
+# Lösung: höchsten flyway installed_rank als Marker beim ERFOLGREICHEN Deploy-Abschluss festhalten
+# (NICHT in switch_active — der schaltet den Traffic bereits vor dem externen Check auf den neuen Slot;
+# ein Marker dort wäre beim Rollback schon = aktueller Rank und der Guard wirkungslos). Vor einem
+# automatischen Rollback aktuellen Rank gegen den Marker prüfen. Fail-open by default.
+
+# Höchster flyway installed_rank der Ziel-DB (leer bei jedem Fehler; kurzer SSH-Timeout, der
+# Rollback-Pfad muss schnell bleiben). Nur Ziffern.
+get_db_migration_rank() {
+    local ENV_NAME="$1"
+    local _DB_CONTAINER="${DB_CONTAINER_PREFIX:-${IMAGE_NAME}}-db-${ENV_NAME}"
+    local _DB_NAME="${DB_NAME:-${IMAGE_NAME}}"
+    ssh -o ConnectTimeout=8 ${DEPLOY_SERVER} \
+        "sudo docker exec ${_DB_CONTAINER} psql -U plaintext -d ${_DB_NAME} -tAc 'SELECT COALESCE(MAX(installed_rank),0) FROM flyway_schema_history' 2>/dev/null" \
+        2>/dev/null | tr -dc '0-9'
+}
+
+# Marker (letzter bekannt-guter Rank) neben active-<env> auf der NAS lesen. Nur Ziffern.
+get_migration_marker() {
+    local ENV_NAME="$1"
+    ssh -o ConnectTimeout=8 ${DEPLOY_SERVER} "cat ${DEPLOY_PATH}/migver-${ENV_NAME} 2>/dev/null" 2>/dev/null | tr -dc '0-9'
+}
+
+# Marker = aktueller DB-Rank festschreiben. Best effort: darf einen erfolgreichen Deploy NIE failen.
+write_migration_marker() {
+    local ENV_NAME="$1"
+    local RANK
+    RANK=$(get_db_migration_rank "$ENV_NAME")
+    if [ -n "$RANK" ]; then
+        ssh ${DEPLOY_SERVER} "echo '${RANK}' > ${DEPLOY_PATH}/migver-${ENV_NAME}" 2>/dev/null \
+            && echo -e "${BLUE}Migration marker (${ENV_NAME}) = rank ${RANK}${NC}" >&2 \
+            || echo -e "${YELLOW}⚠ Migration marker (${ENV_NAME}) konnte nicht geschrieben werden (ignoriert).${NC}" >&2
+    fi
+}
+
+# Rückgabe: 0 = Rollback sicher, 1 = UNSICHER (seit letztem Deploy sind Migrationen gelaufen).
+# Fail-open: Marker/DB nicht ermittelbar -> 0 (Warnung), ausser MIGRATION_GUARD_STRICT=true -> 1.
+assert_rollback_safe() {
+    local ENV_NAME="$1"
+    # Ops-Kill-Switch: altes Blind-Rollback-Verhalten erzwingen, falls der Guard je stört.
+    if [ "${MIGRATION_GUARD_DISABLE:-false}" == "true" ]; then
+        echo -e "${YELLOW}⚠ Migrations-Guard deaktiviert (MIGRATION_GUARD_DISABLE=true).${NC}" >&2
+        return 0
+    fi
+    local MARKER CURRENT
+    MARKER=$(get_migration_marker "$ENV_NAME")
+    CURRENT=$(get_db_migration_rank "$ENV_NAME")
+    if [ -z "$MARKER" ] || [ -z "$CURRENT" ]; then
+        echo -e "${YELLOW}⚠ Migrations-Guard (${ENV_NAME}): Marker/DB-Stand nicht ermittelbar (Marker='${MARKER}', DB='${CURRENT}').${NC}" >&2
+        if [ "${MIGRATION_GUARD_STRICT:-false}" == "true" ]; then
+            echo -e "${RED}   MIGRATION_GUARD_STRICT=true -> Rollback wird blockiert.${NC}" >&2
+            return 1
+        fi
+        echo -e "${YELLOW}   Fail-open: Rollback läuft wie bisher.${NC}" >&2
+        return 0
+    fi
+    if [ "$CURRENT" -gt "$MARKER" ]; then
+        return 1
+    fi
+    return 0
+}
+
 # Switch nginx upstream to the specified slot
 switch_active() {
     local ENV_NAME="$1"
@@ -775,6 +840,13 @@ deploy_to_dev() {
         echo ""
         if ! check_version "$IMAGE_TAG"; then
             echo -e "${RED}=== DEV external health check FAILED ===${NC}"
+            # Migrations-Guard (INT): kein blinder Rollback, wenn seit letztem Deploy migriert wurde.
+            if ! assert_rollback_safe "int"; then
+                echo -e "${RED}=== ⚠ ROLLBACK BLOCKIERT (INT): seit dem letzten Deploy sind DB-Migrationen gelaufen ===${NC}"
+                echo -e "${YELLOW}Der neue (migrierte) Slot bleibt aktiv. Forward-Fix deployen oder INT-DB manuell richten,${NC}"
+                echo -e "${YELLOW}danach ggf. 'switch_active int ${OLD_SLOT}'.${NC}"
+                return 1
+            fi
             echo -e "${YELLOW}Rolling back: nginx zurück auf ${OLD_SLOT} (läuft noch)...${NC}"
             switch_active "int" "$OLD_SLOT"
             # Den fehlgeschlagenen neuen Slot stoppen (keine zwei Instanzen auf derselben DB).
@@ -786,6 +858,9 @@ deploy_to_dev() {
 
     # Externer Check ok (oder nicht gefordert): JETZT erst den alten Slot stoppen.
     stop_slot "int" "$OLD_SLOT"
+
+    # Erfolgreicher, extern bestätigter INT-Deploy: Migrationsstand-Marker aktualisieren (best effort).
+    write_migration_marker "int"
 
     echo -e "${GREEN}=== DEV Deployment completed! ===${NC}"
     return 0
@@ -832,7 +907,19 @@ deploy_to_prod() {
     # Deploy to inactive PROD slot
     if ! deploy_blue_green "prod" "$RELEASE_VERSION"; then
         echo -e "${RED}=== PROD Blue-Green Deployment FAILED ===${NC}"
-        echo -e "${YELLOW}Active slot (${ACTIVE_SLOT}) unchanged. No rollback needed.${NC}"
+        echo -e "${YELLOW}Active slot (${ACTIVE_SLOT}) unchanged (Traffic).${NC}"
+        # Der neue Slot bootete VOR seinem internen Healthcheck und kann dabei bereits Migrationen gegen
+        # die geteilte DB gefahren haben, obwohl kein Traffic umgeschaltet wurde -> nicht falsch entwarnen.
+        local _MARKER _CUR
+        _MARKER=$(get_migration_marker "prod")
+        _CUR=$(get_db_migration_rank "prod")
+        if [ -n "$_MARKER" ] && [ -n "$_CUR" ] && [ "$_CUR" -gt "$_MARKER" ]; then
+            echo -e "${RED}⚠ ACHTUNG: Traffic blieb auf ${ACTIVE_SLOT}, ABER die DB wurde bereits migriert (rank ${_MARKER} -> ${_CUR}).${NC}"
+            echo -e "${YELLOW}   Der alte Code läuft nun gegen ein neueres Schema. Forward-Fix deployen oder DB restoren:${NC}"
+            echo -e "${YELLOW}   restore_prod_db '${BACKUP_PATH}'${NC}"
+        else
+            echo -e "${YELLOW}Keine neue Migration erkannt. No rollback needed.${NC}"
+        fi
         echo -e "${GREEN}Backup available at: $(basename $BACKUP_PATH)${NC}"
         return 1
     fi
@@ -842,6 +929,21 @@ deploy_to_prod() {
         echo ""
         if ! check_version "$RELEASE_VERSION" "http://${NAS_HOST}:${PROD_PORT:-1122}/nosec/version"; then
             echo -e "${RED}=== PROD external health check FAILED ===${NC}"
+
+            # Migrations-Guard: liefen seit dem letzten Deploy Migrationen gegen die geteilte DB, würde
+            # ein blindes Zurückschalten den ALTEN Code gegen das NEUE Schema laufen lassen.
+            if ! assert_rollback_safe "prod"; then
+                echo -e "${RED}=== ⚠ ROLLBACK BLOCKIERT: seit dem letzten Deploy sind DB-Migrationen gelaufen ===${NC}"
+                echo -e "${RED}Ein blindes Zurückschalten auf ${ACTIVE_SLOT} würde ALTEN Code gegen das NEUE DB-Schema laufen lassen.${NC}"
+                echo -e "${YELLOW}Der neue (migrierte) Slot bleibt bewusst AKTIV (Code passt zum Schema). Optionen:${NC}"
+                echo -e "${YELLOW}  1) Forward-Fix als neuen Release deployen (empfohlen), ODER${NC}"
+                echo -e "${YELLOW}  2) DB restore + manueller Rollback:${NC}"
+                echo -e "${YELLOW}       restore_prod_db '${BACKUP_PATH}'  &&  switch_active prod ${ACTIVE_SLOT}${NC}"
+                echo -e "${YELLOW}DB backup available at: $(basename $BACKUP_PATH)${NC}"
+                echo -e "${YELLOW}(Guard umgehen: MIGRATION_GUARD_STRICT=false ändert nichts hier; für erzwungenen Blind-Rollback manuell switch_active nutzen.)${NC}"
+                return 1
+            fi
+
             echo -e "${YELLOW}=== Instant rollback: nginx zurück auf ${ACTIVE_SLOT} (läuft noch) ===${NC}"
 
             switch_active "prod" "$ACTIVE_SLOT"
@@ -861,6 +963,10 @@ deploy_to_prod() {
 
     # Externer Check ok (oder nicht gefordert): JETZT erst den alten Slot stoppen.
     stop_slot "prod" "$ACTIVE_SLOT"
+
+    # Erfolgreicher, extern bestätigter Deploy: aktuellen DB-Migrationsstand als "letzter guter" Marker
+    # festhalten (dient dem Rollback-Guard des NÄCHSTEN Deploys). Best effort.
+    write_migration_marker "prod"
 
     echo -e "${GREEN}=== PROD Deployment completed! ===${NC}"
     echo -e "${GREEN}Deployed version: ${RELEASE_VERSION}${NC}"

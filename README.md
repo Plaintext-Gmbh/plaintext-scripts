@@ -95,6 +95,28 @@ Configuration is loaded with the following priority (highest wins):
 | `DEV_PORT` | `1121` | DEV environment port |
 | `PROD_PORT` | `1122` | PROD environment port |
 | `MVN_RELEASE_DEPLOY` | `false` | Run `mvn deploy` instead of `mvn package` on release |
+| `MIGRATION_GUARD_STRICT` | `false` | If `true`, block an automatic Blue-Green rollback even when the DB migration state can't be read (fail-closed). Default fails open (warn + proceed). |
+| `MIGRATION_GUARD_DISABLE` | `false` | If `true`, disable the migration rollback guard entirely (old blind-rollback behaviour). Ops kill-switch. |
+
+## Blue-Green rollback & DB migrations (Migration Guard)
+
+A new (inactive) slot runs its Flyway migrations against the **shared** prod DB while booting —
+**before** the external health check. If that check then fails, the automatic "instant rollback"
+switches traffic back to the **old** container. Without a guard, the old code would then run against
+the already-migrated (newer) schema.
+
+The deploy logic therefore keeps a marker `${DEPLOY_PATH}/migver-<env>` (highest Flyway
+`installed_rank`) written at the end of every **externally-confirmed** successful deploy. Before an
+automatic rollback it compares the current DB rank against the marker:
+
+- rank unchanged → rollback proceeds as before;
+- rank increased (a migration ran this deploy) → **rollback is blocked**; the new (migrated) slot
+  stays active (its code matches the schema) and the operator is told to either forward-fix or
+  `restore_prod_db '<backup>'` + `switch_active <env> <old-slot>` manually.
+
+Fail-open: if the marker is missing (first deploy after this change) or the DB is unreachable, the
+old behaviour is kept (unless `MIGRATION_GUARD_STRICT=true`). `MIGRATION_GUARD_DISABLE=true` turns
+the guard off entirely.
 
 ## Build Commands
 
