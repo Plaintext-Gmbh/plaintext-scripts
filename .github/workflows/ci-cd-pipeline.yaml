@@ -156,7 +156,11 @@ jobs:
           server-password: GITHUB_TOKEN
 
       - name: Build & Test
-        run: mvn clean install -B -DskipITs
+        # -DexcludedGroups=quality-gate: der Quality-Gate-Wächter (QualityGateTest) liest den STATISCHEN
+        # wöchentlichen Sonar-/CVE-Gate-Stand (quality/quality-gate.properties) und färbt sonst JEDEN Code-PR
+        # rot, obwohl der PR-Code sauber baut/testet. Der Gate-Stand wird separat im wöchentlichen
+        # quality-analysis-Lauf (Cron) bewertet + committet + per Pushover gemeldet — nicht hier bei jedem PR.
+        run: mvn clean install -B -DskipITs -DexcludedGroups=quality-gate
         env:
           SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:${{ inputs.postgres-port }}/${{ inputs.database-name }}
           SPRING_DATASOURCE_USERNAME: plaintext
