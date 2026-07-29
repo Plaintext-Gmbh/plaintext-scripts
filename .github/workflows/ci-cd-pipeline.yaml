@@ -108,14 +108,18 @@ on:
 # Die Env-Vars hier sind das ZWEITE Netz: sie greifen auch dann, wenn ein Runner
 # ohne cgroup-Limit laeuft (z. B. frisch per `compose up` neu erzeugt).
 #
-# -XX:MaxRAM=4g  -> die JVM rechnet ihre Ergonomie gegen 4 GB statt gegen 62 GB
-#                   => ~1 GB Default-Heap. Kein hartes -Xmx, damit ein explizit
-#                   gesetztes -Xmx (z. B. im Sonar-Job) weiterhin gewinnt.
-# JAVA_TOOL_OPTIONS wird – anders als MAVEN_OPTS – auch von den Surefire-Forks
-# geerbt; genau die sind die eigentlichen Speicherfresser.
-# ActiveProcessorCount=2 haelt GC-/JIT-Threadpools klein (sonst 6 pro JVM).
+# JAVA_TOOL_OPTIONS wird - anders als MAVEN_OPTS - auch von den SUREFIRE-FORKS
+# geerbt; genau die sind die eigentlichen Speicherfresser (Spring-Kontexte).
+#   -XX:MaxRAM=4g          -> die JVM rechnet ihre Ergonomie gegen 4 GB statt
+#                             gegen 62 GB Host-RAM => ~1 GB Default-Heap.
+#   -XX:ActiveProcessorCount=2 -> haelt GC-/JIT-Threadpools klein (sonst 6 pro JVM).
+# MAVEN_OPTS bekommt bewusst ein hoeheres, EXPLIZITES -Xmx: in der Maven-JVM
+# laeuft auch der Sonar-Scanner, der mehr Heap braucht als ein Testlauf. Ein
+# explizites -Xmx auf der Kommandozeile gewinnt gegen die MaxRAM-Ergonomie.
+# Summe im Worst Case (Maven 2 GB + ein Fork 1 GB + Native) bleibt unter dem
+# 4-GB-cgroup-Limit des Runner-Containers; -Xmx reserviert nichts, es deckelt nur.
 env:
-  MAVEN_OPTS: "-XX:MaxRAM=4g -XX:MaxMetaspaceSize=512m"
+  MAVEN_OPTS: "-Xmx2g -XX:MaxMetaspaceSize=512m"
   JAVA_TOOL_OPTIONS: "-XX:MaxRAM=4g -XX:ActiveProcessorCount=2"
 
 jobs:
