@@ -95,6 +95,29 @@ on:
       PUSHOVER_USER_KEY:
         required: false
 
+# ── Ressourcen-Leitplanke fuer die self-hosted NAS-Runner (Karte 351) ──────────
+# Die NAS-Box hat 6 Kerne / 62 GB, davon im Leerlauf nur ~16 GB frei (qemu-VMs +
+# ~14 App-Container). Ohne Cap dimensioniert jede JVM ihren Heap nach HOST-RAM:
+# MaxRAMPercentage=25 % von 62 GB = ~15.5 GB max. Heap – pro Maven-JVM UND pro
+# Surefire-Fork. Bei mehreren parallelen Repo-Builds (root-Release bumpt app/iot/
+# schuetu/guild/fwtool gleichzeitig) lief die Box damit ins Swapping: Load 24,
+# sshd kam nicht mehr durch, Blue/Green-Healthchecks liefen in Timeouts.
+#
+# Primaer wird das ueber cgroup-Limits auf den Runner-Containern begrenzt
+# (docker update --cpus/--memory, siehe plaintext-dockercompose tri/github-runners).
+# Die Env-Vars hier sind das ZWEITE Netz: sie greifen auch dann, wenn ein Runner
+# ohne cgroup-Limit laeuft (z. B. frisch per `compose up` neu erzeugt).
+#
+# -XX:MaxRAM=4g  -> die JVM rechnet ihre Ergonomie gegen 4 GB statt gegen 62 GB
+#                   => ~1 GB Default-Heap. Kein hartes -Xmx, damit ein explizit
+#                   gesetztes -Xmx (z. B. im Sonar-Job) weiterhin gewinnt.
+# JAVA_TOOL_OPTIONS wird – anders als MAVEN_OPTS – auch von den Surefire-Forks
+# geerbt; genau die sind die eigentlichen Speicherfresser.
+# ActiveProcessorCount=2 haelt GC-/JIT-Threadpools klein (sonst 6 pro JVM).
+env:
+  MAVEN_OPTS: "-XX:MaxRAM=4g -XX:MaxMetaspaceSize=512m"
+  JAVA_TOOL_OPTIONS: "-XX:MaxRAM=4g -XX:ActiveProcessorCount=2"
+
 jobs:
   # ── Build + Test + Coverage ────────────────────────────────────
   ci:
