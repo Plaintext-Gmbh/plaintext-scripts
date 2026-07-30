@@ -576,9 +576,20 @@ jobs:
           #
           # $RUNNER_TEMP (/_work/_temp) liegt dagegen im Writable Layer des
           # jeweiligen Runner-Containers - kein Mount, laut /proc/mounts - und wird
-          # vom Runner pro Job neu angelegt. MAVEN_ARGS wird ab Maven 3.9.0 von
-          # mvn ausgewertet (Runner-Image: 3.9.11), damit ziehen auch die mvn-Aufrufe
-          # in ./build bzw. tui-build-logic.sh das -s mit, ohne jede Call-Site anzufassen.
+          # vom Runner pro Job neu angelegt.
+          #
+          # WICHTIG (Messung 30.07.2026): MAVEN_ARGS allein traegt hier NICHT.
+          # Der deploy-Job laeuft auf [self-hosted, nas, twingate], und die
+          # twingate-Runner haben /usr/bin/mvn = Apache Maven 3.6.3 (Debian-Paket);
+          # MAVEN_ARGS wird erst ab Maven 3.9.0 ausgewertet:
+          #   gh-runner-org-twingate-1  grep -c MAVEN_ARGS /usr/bin/mvn        -> 0
+          #   gh-runner-org-1           grep -c MAVEN_ARGS .../3.9.11/bin/mvn  -> 2
+          # Nur MAVEN_ARGS zu setzen und ~/.m2/settings.xml zu loeschen haette
+          # jeden Deploy ohne Repo-Credentials laufen lassen.
+          # Darum ein mvn-Shim in $RUNNER_TEMP/bin, das per $GITHUB_PATH vorne in
+          # den PATH kommt und "-s <settings>" versionsunabhaengig erzwingt - auch
+          # fuer die mvn-Aufrufe in ./build bzw. tui-build-logic.sh, ohne eine
+          # einzige Call-Site anzufassen.
           umask 077
           cat > "$RUNNER_TEMP/settings.xml" << EOF
           <settings>
@@ -600,7 +611,29 @@ jobs:
           </settings>
           EOF
           chmod 600 "$RUNNER_TEMP/settings.xml"
+
+          # Echtes mvn-Binary AUFLOESEN, solange das Shim noch nicht im PATH ist
+          # ($GITHUB_PATH wirkt erst ab dem naechsten Step) -> keine Rekursion.
+          REAL_MVN="$(command -v mvn || true)"
+          if [ -z "$REAL_MVN" ]; then
+            echo "::error::kein mvn im PATH gefunden - Shim kann nicht gebaut werden"
+            exit 1
+          fi
+          echo "mvn-Binary: $REAL_MVN ($("$REAL_MVN" -v 2>/dev/null | head -1))"
+
+          mkdir -p "$RUNNER_TEMP/bin"
+          cat > "$RUNNER_TEMP/bin/mvn" << SHIM
+          #!/usr/bin/env bash
+          # Karte 313: erzwingt die job-lokale settings.xml unabhaengig von der
+          # Maven-Version (twingate-Runner: 3.6.3, kennt MAVEN_ARGS nicht).
+          exec "$REAL_MVN" -s "$RUNNER_TEMP/settings.xml" "\$@"
+          SHIM
+          chmod 755 "$RUNNER_TEMP/bin/mvn"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+          # Fuer Maven >= 3.9 zusaetzlich (harmlos, doppeltes -s: letztes gewinnt).
           echo "MAVEN_ARGS=-s $RUNNER_TEMP/settings.xml" >> "$GITHUB_ENV"
+
           # Die bereits im geteilten Volume liegende Alt-Datei mitnehmen.
           rm -f ~/.m2/settings.xml
 
