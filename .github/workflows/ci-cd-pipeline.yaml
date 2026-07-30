@@ -565,8 +565,33 @@ jobs:
 
       - name: Configure Maven
         run: |
-          mkdir -p ~/.m2
-          cat > ~/.m2/settings.xml << EOF
+          # ── Karte 313 / Befund A2 ────────────────────────────────────────
+          # settings.xml darf NICHT nach ~/.m2 geschrieben werden: /root/.m2 ist
+          # das named volume "m2-cache", das ALLE Org-Runner gleichzeitig mounten
+          # (plaintext-dockercompose tri/github-runners/docker-compose.yaml).
+          # Nachgewiesen am 29.07.2026: identische Inode 282283678 in
+          # gh-runner-org-1 UND gh-runner-org-2, Modus 0644 -> jeder parallele Job
+          # JEDES Plaintext-Repos konnte MVN_DEPLOY_TOKEN und MAVEN_NAS_TOKEN im
+          # Klartext mitlesen, auch Repos die diese Secrets nie bekommen sollen.
+          #
+          # $RUNNER_TEMP (/_work/_temp) liegt dagegen im Writable Layer des
+          # jeweiligen Runner-Containers - kein Mount, laut /proc/mounts - und wird
+          # vom Runner pro Job neu angelegt.
+          #
+          # WICHTIG (Messung 30.07.2026): MAVEN_ARGS allein traegt hier NICHT.
+          # Der deploy-Job laeuft auf [self-hosted, nas, twingate], und die
+          # twingate-Runner haben /usr/bin/mvn = Apache Maven 3.6.3 (Debian-Paket);
+          # MAVEN_ARGS wird erst ab Maven 3.9.0 ausgewertet:
+          #   gh-runner-org-twingate-1  grep -c MAVEN_ARGS /usr/bin/mvn        -> 0
+          #   gh-runner-org-1           grep -c MAVEN_ARGS .../3.9.11/bin/mvn  -> 2
+          # Nur MAVEN_ARGS zu setzen und ~/.m2/settings.xml zu loeschen haette
+          # jeden Deploy ohne Repo-Credentials laufen lassen.
+          # Darum ein mvn-Shim in $RUNNER_TEMP/bin, das per $GITHUB_PATH vorne in
+          # den PATH kommt und "-s <settings>" versionsunabhaengig erzwingt - auch
+          # fuer die mvn-Aufrufe in ./build bzw. tui-build-logic.sh, ohne eine
+          # einzige Call-Site anzufassen.
+          umask 077
+          cat > "$RUNNER_TEMP/settings.xml" << EOF
           <settings>
             <servers>
               <server>
@@ -585,10 +610,37 @@ jobs:
             </servers>
           </settings>
           EOF
+          chmod 600 "$RUNNER_TEMP/settings.xml"
+
+          # Echtes mvn-Binary AUFLOESEN, solange das Shim noch nicht im PATH ist
+          # ($GITHUB_PATH wirkt erst ab dem naechsten Step) -> keine Rekursion.
+          REAL_MVN="$(command -v mvn || true)"
+          if [ -z "$REAL_MVN" ]; then
+            echo "::error::kein mvn im PATH gefunden - Shim kann nicht gebaut werden"
+            exit 1
+          fi
+          echo "mvn-Binary: $REAL_MVN ($("$REAL_MVN" -v 2>/dev/null | head -1))"
+
+          mkdir -p "$RUNNER_TEMP/bin"
+          cat > "$RUNNER_TEMP/bin/mvn" << SHIM
+          #!/usr/bin/env bash
+          # Karte 313: erzwingt die job-lokale settings.xml unabhaengig von der
+          # Maven-Version (twingate-Runner: 3.6.3, kennt MAVEN_ARGS nicht).
+          exec "$REAL_MVN" -s "$RUNNER_TEMP/settings.xml" "\$@"
+          SHIM
+          chmod 755 "$RUNNER_TEMP/bin/mvn"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+          # Fuer Maven >= 3.9 zusaetzlich (harmlos, doppeltes -s: letztes gewinnt).
+          echo "MAVEN_ARGS=-s $RUNNER_TEMP/settings.xml" >> "$GITHUB_ENV"
+
+          # Die bereits im geteilten Volume liegende Alt-Datei mitnehmen.
+          rm -f ~/.m2/settings.xml
 
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
+          umask 077
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H 192.168.1.224 >> ~/.ssh/known_hosts 2>/dev/null || true
@@ -637,6 +689,27 @@ jobs:
       - name: Stop postgres (deploy cleanup)
         if: always()
         run: docker rm -f "ci-postgres-deploy-${DEPLOY_PGPORT}" 2>/dev/null || true
+
+      - name: Secrets vom Runner entfernen (cleanup on job-end)
+        if: always()
+        run: |
+          # ── Karte 313 / Befund A3 ────────────────────────────────────────
+          # EPHEMERAL=true beendet nur den Runner-PROZESS; "restart: unless-stopped"
+          # startet denselben Container mit unveraendertem Writable Layer neu.
+          # /root/.ssh/id_rsa blieb dadurch fuer den naechsten Job eines FREMDEN
+          # Repos lesbar. Nachgewiesen am 29.07.2026: in allen drei laufenden
+          # Runnern lagen Keys aus alten Jobs (gh-runner-org-twingate-1 sogar ein
+          # id_deploy samt ~/.ssh/config vom 23.07., also sechs Tage alt).
+          # Dieser Schritt laeuft mit if: always() und darf den Job nie roetfaerben.
+          shred -u ~/.ssh/id_rsa ~/.ssh/id_deploy 2>/dev/null || \
+            rm -f ~/.ssh/id_rsa ~/.ssh/id_deploy 2>/dev/null || true
+          # ~/.ssh/config wird von der deploy-Action per ">>" ANGEHAENGT und wuchs
+          # dadurch ueber Jobs hinweg an.
+          rm -f ~/.ssh/config 2>/dev/null || true
+          shred -u "$RUNNER_TEMP/settings.xml" 2>/dev/null || \
+            rm -f "$RUNNER_TEMP/settings.xml" 2>/dev/null || true
+          rm -f ~/.m2/settings.xml 2>/dev/null || true
+          exit 0
 
       - name: Deploy Summary
         if: always()
