@@ -130,6 +130,16 @@ jobs:
     # Der separate ci-Build ist nur noch für PRs (ci-only) und den Sonar-Schedule nötig.
     if: inputs.deploy-target == 'ci-only' || inputs.sonar-enabled
     runs-on: ${{ fromJSON(inputs.runner) }}
+    # Der Test-Postgres heisst `ci-postgres-<port>` und der Port ist je Projekt FEST — der Name ist
+    # also nicht lauf-eindeutig, obwohl der Kommentar unten das behauptet. Jeder Lauf beginnt mit
+    # `docker rm -f`, weshalb zwei gleichzeitige Laeufe desselben Projekts einander die Datenbank
+    # wegraeumen. Belegt an plaintext-schuetu PR #104: push (15:57:22) und pull_request (15:57:25)
+    # starteten 3 Sekunden auseinander, der push-Lauf starb an `role "plaintext" does not exist`.
+    # Ein dynamischer Port scheidet aus (--network host), deshalb hier serialisiert.
+    # cancel-in-progress bewusst false: ein laufender master-Build darf nicht abgebrochen werden.
+    concurrency:
+      group: testdb-${{ inputs.project-name }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: read
@@ -249,6 +259,11 @@ jobs:
     # zurücksetzen würde) wird geskippt → Gate bleibt für immer rot.
     if: inputs.sonar-enabled && !cancelled()
     runs-on: ${{ fromJSON(inputs.runner) }}
+    # Gleiche Gruppe wie `ci`: dieser Job startet denselben Container `ci-postgres-<port>`.
+    # Innerhalb eines Laufs ist das unkritisch (needs: ci), zwischen zwei Laeufen nicht.
+    concurrency:
+      group: testdb-${{ inputs.project-name }}
+      cancel-in-progress: false
     permissions:
       # write: die wöchentliche Voll-Analyse committet quality/quality-gate.properties zurück.
       contents: write
@@ -478,6 +493,13 @@ jobs:
   # ── Deploy ─────────────────────────────────────────────────────
   deploy:
     name: "Deploy (${{ inputs.deploy-target }})"
+    # Zwei gleichzeitige Deploys desselben Projekts kollidieren doppelt: am Test-Postgres
+    # `ci-postgres-deploy-<port>` (fester Port je Projekt) und an den Blue-Green-Slots. Letzteres
+    # ist real passiert — ein PR-Branch-Push waehrend eines laufenden release-all belegte denselben
+    # DEV-Slot, und der Deploy scheiterte mit einer irrefuehrenden Spring-Exception.
+    concurrency:
+      group: deploy-${{ inputs.project-name }}
+      cancel-in-progress: false
     # M1 (build once): kein separater ci-Build mehr — dieser Job ist der EINZIGE Build
     # (Compile + Unit-Tests + Package) und deployt anschliessend.
     if: inputs.deploy-target != 'ci-only'
