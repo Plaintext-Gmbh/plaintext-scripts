@@ -308,6 +308,37 @@ BG_NGINX_CONF_DIR="${DEPLOY_PATH}/nginx/conf.d"
 BG_NGINX_TEMPLATES_DIR="${DEPLOY_PATH}/nginx/templates"
 BG_NGINX_CONTAINER="${IMAGE_NAME}-nginx"
 
+# Karte 379 (PROD-Ausfall 31.07.2026, 45 Min 502): nginx loest Upstream-Namen NUR beim Start bzw.
+# beim Reload auf und haelt die IP danach fest. Ein `docker compose up -d --force-recreate` gibt dem
+# Container eine NEUE IP -- nginx verbindet weiter zur alten und liefert 502, obwohl der Container
+# gesund ist und der DNS korrekt aufloest. `switch_active` reloadet nur beim SLOT-WECHSEL; wird
+# derselbe Slot neu erstellt, bleibt die upstream.conf gleich und der Reload unterblieb bisher.
+#
+# Daher: nach JEDEM Recreate reloaden, unabhaengig davon ob der Slot wechselt.
+# Bewusst tolerant (return 0): ein fehlender/abwesender Stack-nginx darf kein Deploy abbrechen.
+# `nginx -t` vorweg, damit ein Reload nicht auf einer kaputten Config ausgefuehrt wird.
+nginx_reload_after_recreate() {
+    local REASON="${1:-recreate}"
+    if [ -z "${BG_NGINX_CONTAINER}" ]; then
+        return 0
+    fi
+    echo -e "${BLUE}nginx-Reload nach ${REASON} (${BG_NGINX_CONTAINER}) - Upstream-IPs neu aufloesen...${NC}"
+    if ! ssh ${DEPLOY_SERVER} "sudo docker ps --format '{{.Names}}' | grep -qx '${BG_NGINX_CONTAINER}'"; then
+        echo -e "${YELLOW}  ${BG_NGINX_CONTAINER} laeuft nicht - Reload uebersprungen${NC}"
+        return 0
+    fi
+    if ! ssh ${DEPLOY_SERVER} "sudo docker exec ${BG_NGINX_CONTAINER} nginx -t"; then
+        echo -e "${YELLOW}  nginx -t fehlgeschlagen - KEIN Reload (Config waere kaputt)${NC}"
+        return 0
+    fi
+    if ssh ${DEPLOY_SERVER} "sudo docker exec ${BG_NGINX_CONTAINER} nginx -s reload"; then
+        echo -e "${GREEN}✓ nginx-Reload ok${NC}"
+    else
+        echo -e "${YELLOW}  nginx -s reload fehlgeschlagen - bitte pruefen${NC}"
+    fi
+    return 0
+}
+
 # Get the currently active slot for an environment ("blue" or "green")
 get_active_slot() {
     local ENV_NAME="$1"
@@ -559,6 +590,8 @@ deploy_blue_green() {
         echo -e "${BLUE}Recreating ${COMPOSE_SERVICE} (force) to load new jar...${NC}"
         ssh ${DEPLOY_SERVER} "cd ${DEPLOY_PATH} && \
             sudo docker compose up -d --no-deps --force-recreate ${COMPOSE_SERVICE}"
+        # Karte 379: neuer Container == potenziell neue IP -> nginx muss neu aufloesen.
+        nginx_reload_after_recreate "Recreate ${COMPOSE_SERVICE}"
     else
         # Klassisch: Image-Tag des inaktiven Slots in der Compose umbiegen + Container neu erzeugen
         echo -e "${BLUE}Updating image for ${COMPOSE_SERVICE}...${NC}"
@@ -570,6 +603,8 @@ deploy_blue_green() {
         echo -e "${BLUE}Restarting ${COMPOSE_SERVICE} with new image...${NC}"
         ssh ${DEPLOY_SERVER} "cd ${DEPLOY_PATH} && \
             sudo docker compose up -d --no-deps --pull never ${COMPOSE_SERVICE}"
+        # Karte 379: neuer Container == potenziell neue IP -> nginx muss neu aufloesen.
+        nginx_reload_after_recreate "Recreate ${COMPOSE_SERVICE}"
     fi
 
     echo -e "${BLUE}Container status:${NC}"
@@ -674,6 +709,9 @@ setup_blue_green() {
 
     echo -e "${BLUE}Waiting for containers to start (30s)...${NC}"
     sleep 30
+
+    # Karte 379: der komplette Stack wurde neu erzeugt -> nginx-Reload erzwingen.
+    nginx_reload_after_recreate "Stack-Setup"
 
     # Verify
     echo -e "${BLUE}Container status:${NC}"
@@ -1104,6 +1142,8 @@ deploy_prod_single() {
         echo -e "${RED}✗ docker compose up fehlgeschlagen${NC}"
         return 1
     fi
+    # Karte 379: neuer Container == potenziell neue IP -> nginx muss neu aufloesen.
+    nginx_reload_after_recreate "Single-PROD-Recreate ${CONTAINER}"
     if ! check_version "latest" "http://${NAS_HOST}:${PROD_PORT:-1142}/nosec/version"; then
         echo -e "${RED}=== Single-PROD-Healthcheck FEHLGESCHLAGEN ===${NC}"
         return 1
