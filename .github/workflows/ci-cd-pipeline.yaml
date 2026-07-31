@@ -349,6 +349,7 @@ jobs:
           server-password: GITHUB_TOKEN
 
       - name: SonarQube Analysis
+        id: sonar
         env:
           SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:${{ inputs.postgres-port }}/${{ inputs.database-name }}
           SPRING_DATASOURCE_USERNAME: plaintext
@@ -483,6 +484,30 @@ jobs:
           else
             echo "Quality-Gate-Status unverändert — kein Commit."
           fi
+
+      # Ohne diese Meldung bleibt ein Analyse-Ausfall unsichtbar: Das Quality-Gate behält seinen
+      # letzten Stand, und ein altes "OK" ist von einem aktuellen nicht zu unterscheiden. Genau so
+      # standen die Gates von root/schuetu/iot/fwtool wochenlang auf OK, obwohl seit dem 20.07.2026
+      # keine Analyse mehr durchlief (Karte 365). Ein rotes Gate meldet sich — ein ausbleibendes
+      # Ergebnis bisher nicht.
+      #
+      # Bewusst an den Schritt-Ausgang gebunden statt an job-level failure(): Der Job läuft
+      # absichtlich auch bei rotem Build & Test (!cancelled()), und ein dort fehlgeschlagener Test
+      # ist etwas anderes als eine Analyse, die nicht stattgefunden hat.
+      - name: Pushover bei Analyse-Ausfall
+        if: always() && inputs.sonar-enabled && steps.sonar.outcome == 'failure'
+        env:
+          PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
+          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+        run: |
+          bash .plaintext-scripts/quality/pushover.sh \
+            "Sonar-Analyse fehlgeschlagen: ${{ inputs.project-name }}" \
+            "Die Analyse lief NICHT durch — das Quality-Gate zeigt weiterhin seinen alten Stand.
+          Ein dort sichtbares OK ist damit nicht aussagekräftig." \
+            1 \
+            "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            "Lauf ansehen" \
+            || echo "::warning::Pushover-Meldung zum Analyse-Ausfall konnte nicht gesendet werden."
 
       - name: Pushover bei Quality-Gate-Breach
         if: inputs.quality-analysis && steps.gate.outputs.breached == 'true'
