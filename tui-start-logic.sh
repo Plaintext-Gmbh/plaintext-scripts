@@ -10,7 +10,14 @@
 
 PID_FILE="$SCRIPT_DIR/.app.pid"
 LOG_FILE="$SCRIPT_DIR/app.log"
-AUTOLOGIN_URL="${AUTOLOGIN_URL:-http://localhost:8080/autologin?key=AUTOLOGIN_KEY_ENTFERNT_KARTE_468}"
+# Karte 30: der statische /autologin?key= ist entfernt. Ohne Token oeffnet der Browser
+# schlicht die Loginseite; mit PLAINTEXT_KIOSK_TOKEN (ApiToken-JWT, Scope SESSION) den
+# Token-Login — letzteres funktioniert nur gegen Instanzen mit stabilem JWT-Schluessel.
+if [ -n "${PLAINTEXT_KIOSK_TOKEN:-}" ]; then
+    LOGIN_URL="http://localhost:8080/token-login?token=$PLAINTEXT_KIOSK_TOKEN"
+else
+    LOGIN_URL="http://localhost:8080/login.html"
+fi
 
 # ── Action functions ─────────────────────────────────────────
 
@@ -35,7 +42,7 @@ do_start() {
     local PID=$!
     echo "$PID" > "$PID_FILE"
 
-    (while ! curl -s -o /dev/null http://localhost:8080 2>/dev/null; do sleep 1; done; open "$AUTOLOGIN_URL") &
+    (while ! curl -s -o /dev/null http://localhost:8080 2>/dev/null; do sleep 1; done; open "$LOGIN_URL") &
 
     echo -e "${FG_GREEN}Application started (PID: ${PID})${RESET}"
     echo -e "${FG_DIM}Logs: ${LOG_FILE}${RESET}"
