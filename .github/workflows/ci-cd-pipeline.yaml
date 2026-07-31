@@ -366,11 +366,22 @@ jobs:
           # -DskipITs: ITs benoetigen laufende App (kein Deploy in SonarQube-Job)
           # -DexcludedGroups=quality-gate: der Gate-Wächter darf die ANALYSE nicht blocken
           # (sie ist es, die das Gate wieder auf OK bringen kann) — analog zum Deploy-Build.
-          # -Pcoverage,fast: der JaCoCo-Agent + report@verify stecken im (default-inaktiven)
-          # coverage-Profil. Ohne das lief die Analyse OHNE Coverage → Sonar sah 0% new_coverage
-          # → Gate dauerhaft ERROR. 'fast' explizit mitaktivieren (sonst deaktiviert -P das
-          # activeByDefault-fast). jacoco.xml wird an sonar.coverage.jacoco.xmlReportPaths erwartet.
+          # -Pcoverage,fast: historisch — der JaCoCo-Agent steckte einmal in einem default-inaktiven
+          # coverage-Profil. Beide Profile existieren heute in KEINEM der Projekte mehr (JaCoCo läuft
+          # im root-POM direkt im <build>), Maven quittiert das nur mit einer WARNING. Bleibt vorerst
+          # stehen: '-P' ohne die Namen könnte ein activeByDefault-Profil abschalten, und das gehört
+          # in eine eigene Änderung mit eigener Beobachtung.
+          #
+          # -Dmaven.build.cache.enabled=false: ZWINGEND für Sonar. Mit aktivem Build-Cache
+          # restauriert Maven die Module aus dem Cache ("Found cached build, restoring …"), statt sie
+          # zu übersetzen — dann liegen keine target/classes auf der Platte und der Scanner bricht ab
+          # mit "Your project contains .java files, please provide compiled classes with
+          # sonar.java.binaries property". Genau daran scheiterte die Voll-Analyse in plaintext-root
+          # am 31.07.2026 nach 20 Sekunden (Karte 365); der Cache hatte mit dem Partial-Restore-Bug
+          # aus Karte 26 bereits ein verwandtes Problem. Der Lauf wird dadurch deutlich länger — das
+          # ist der Preis dafür, dass er überhaupt etwas misst.
           mvn clean verify sonar:sonar -B -DskipITs -DexcludedGroups=quality-gate -Pcoverage,fast \
+            -Dmaven.build.cache.enabled=false \
             -Dsonar.projectKey="$PROJECT_KEY" \
             -Dsonar.projectName="${{ inputs.project-name }}" \
             -Dsonar.projectVersion="$VERSION" \
