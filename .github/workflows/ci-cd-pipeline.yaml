@@ -259,6 +259,13 @@ jobs:
     # zurücksetzen würde) wird geskippt → Gate bleibt für immer rot.
     if: inputs.sonar-enabled && !cancelled()
     runs-on: ${{ fromJSON(inputs.runner) }}
+    # Ein Lauf ohne Build-Cache dauert rund 25 Minuten (gemessen an allen vier Projekten am
+    # 31.07.2026), die Voll-Analyse mit OWASP-CVE etwas länger. 90 Minuten lassen dafür Luft und
+    # beenden trotzdem einen Hänger von selbst. Ohne Limit gilt GitHubs Vorgabe von 6 Stunden —
+    # und ein hängender Job zählt als „Build läuft" und blockiert jede Automatik, die vor einem
+    # Merge auf ein freies Fenster wartet (Karte 365: fwtool-Lauf 30619851285 blockierte den
+    # Merge von PR #4 über 25 Durchläufe und musste von Hand abgebrochen werden).
+    timeout-minutes: 90
     # Gleiche Gruppe wie `ci`: dieser Job startet denselben Container `ci-postgres-<port>`.
     # Innerhalb eines Laufs ist das unkritisch (needs: ci), zwischen zwei Laeufen nicht.
     concurrency:
@@ -494,8 +501,13 @@ jobs:
       # Bewusst an den Schritt-Ausgang gebunden statt an job-level failure(): Der Job läuft
       # absichtlich auch bei rotem Build & Test (!cancelled()), und ein dort fehlgeschlagener Test
       # ist etwas anderes als eine Analyse, die nicht stattgefunden hat.
+      # 'cancelled' ist bewusst mitgefasst: Genau so sah der fwtool-Lauf 30619851285 aus — der
+      # Scanner lief 37 Minuten, der Job endete mit noch laufendem Java-Prozess, und in der
+      # Lauf-Übersicht stand nur ein anonymes „cancelled". Ein Abbruch ist für das Gate dasselbe
+      # wie ein Fehlschlag: Es hat kein neues Ergebnis bekommen und zeigt weiter seinen alten
+      # Stand. Dasselbe gilt jetzt für einen Ablauf des oben gesetzten timeout-minutes.
       - name: Pushover bei Analyse-Ausfall
-        if: always() && inputs.sonar-enabled && steps.sonar.outcome == 'failure'
+        if: always() && inputs.sonar-enabled && (steps.sonar.outcome == 'failure' || steps.sonar.outcome == 'cancelled')
         env:
           PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
           PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
