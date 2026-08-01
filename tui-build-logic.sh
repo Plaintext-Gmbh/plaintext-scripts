@@ -1215,6 +1215,27 @@ do_release() {
     NEXT_SNAPSHOT_VERSION="${MAJOR}.${NEXT_MINOR}.0-SNAPSHOT"
     echo -e "${BLUE}Next SNAPSHOT version: ${GREEN}${NEXT_SNAPSHOT_VERSION}${NC}"
 
+    # Karte 410 (M3): Kollisionspruefung VOR dem Build. Ist ${NEW_VERSION} im Release-Repo
+    # bereits veroeffentlicht, ist master nicht auf dem Stand des letzten Release — typischerweise
+    # weil ein Release-Commit verlorenging (siehe M1). Ohne diese Pruefung laeuft der Build sechs
+    # Minuten und stirbt dann am 409 des maven-deploy-plugin, mit einer Meldung, die die Ursache
+    # nicht nennt. Ein HTTP-HEAD kostet Millisekunden.
+    RELEASE_REPO_URL="${RELEASE_REPO_URL:-https://maven.plaintext.ch/releases}"
+    REL_GROUP="$(mvn -q -N help:evaluate -Dexpression=project.groupId -DforceStdout 2>/dev/null | tr . /)"
+    REL_ARTIFACT="$(mvn -q -N help:evaluate -Dexpression=project.artifactId -DforceStdout 2>/dev/null)"
+    if [ -n "$REL_GROUP" ] && [ -n "$REL_ARTIFACT" ]; then
+        REL_URL="${RELEASE_REPO_URL}/${REL_GROUP}/${REL_ARTIFACT}/${NEW_VERSION}/${REL_ARTIFACT}-${NEW_VERSION}.pom"
+        if [ "$(curl -s -o /dev/null -w '%{http_code}' "$REL_URL")" = "200" ]; then
+            echo -e "${RED}✗ Version ${NEW_VERSION} ist im Release-Repo bereits veroeffentlicht.${NC}"
+            echo -e "${RED}  master ist nicht auf dem Stand des letzten Release — vermutlich ging ein"
+            echo -e "  Release-Commit verloren (Karte 410). Erst master nachziehen, dann erneut.${NC}"
+            return 1
+        fi
+    else
+        # Eine nicht durchfuehrbare Vorpruefung darf keinen Release blockieren.
+        echo -e "${YELLOW}⚠ Maven-Koordinaten nicht ermittelbar — Kollisionspruefung uebersprungen.${NC}"
+    fi
+
     echo -e "${BLUE}Maven: Setting version to ${GREEN}${NEW_VERSION}${NC}"
     mvn versions:set -DnewVersion="${NEW_VERSION}" -DgenerateBackupPoms=false
 
@@ -1305,9 +1326,31 @@ Includes:
     git add pom.xml "*/pom.xml" || true
     git commit -m "Prepare next development iteration ${NEXT_SNAPSHOT_VERSION} [skip-ci]"
 
+    # Karte 410 (M1): Der Rueckgabewert BEIDER Pushes muss geprueft werden.
+    # Am 01.08.2026 wurde `git push` abgelehnt ("! [rejected] master -> master (fetch first)"),
+    # das Skript lief weiter und meldete "Release 2.1400.0 completed successfully!" — der Job
+    # wurde gruen. Folge: 2.1400.0 war veroeffentlicht, master kannte den Release-Commit nicht,
+    # und jeder weitere Lauf rechnete dieselbe Version und starb nach ~6 Minuten Build am
+    # 409 Conflict des maven-deploy-plugin. `set -e` greift an dieser Stelle nachweislich nicht,
+    # deshalb wird explizit geprueft.
+    #
+    # REIHENFOLGE IST TEIL DES FIX: Der Tag geht erst raus, wenn der Branch-Push gelungen ist.
+    # Andersherum entsteht genau der verwaiste Zustand vom 01.08. (Tag 2.1400.0 veroeffentlicht,
+    # Commit 971e5190 nie auf master). Beim naechsten Umbau nicht wieder tauschen.
     echo -e "${BLUE}Git: Pushing to remote...${NC}"
-    git push
-    git push --tags
+    if ! git push; then
+        echo -e "${RED}✗ Push von master abgelehnt — der Release ${NEW_VERSION} ist bereits"
+        echo -e "  veroeffentlicht, aber master kennt ihn nicht. Ohne Eingriff rechnet der"
+        echo -e "  naechste Lauf dieselbe Version und scheitert am 409 Conflict.${NC}"
+        echo -e "${RED}  Tag wird NICHT gepusht, damit kein verwaister Zustand entsteht.${NC}"
+        echo -e "${YELLOW}  Naechster Schritt: master auf ${NEXT_SNAPSHOT_VERSION} nachziehen,"
+        echo -e "  dann erneut releasen.${NC}"
+        return 1
+    fi
+    if ! git push --tags; then
+        echo -e "${RED}✗ Tag-Push fehlgeschlagen — Tag ${NEW_VERSION} fehlt auf dem Remote.${NC}"
+        return 1
+    fi
 
     echo -e "${GREEN}=== Release ${NEW_VERSION} completed successfully! ===${NC}"
     echo -e "${GREEN}=== Next development version: ${NEXT_SNAPSHOT_VERSION} ===${NC}"
