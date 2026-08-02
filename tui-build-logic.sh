@@ -533,6 +533,10 @@ check_container_health() {
                 CRASH_LOGS=$(ssh ${DEPLOY_SERVER} "sudo docker logs --tail 60 ${CONTAINER_NAME} 2>&1 | tail -60")
                 echo "$CRASH_LOGS"
                 diagnose_startfehler "$CRASH_LOGS"
+                # Fuer den Retry in deploy_to_slot: sichtbar machen, ob ein 429 im Spiel war.
+                if echo "$CRASH_LOGS" | grep -q "HTTP 429"; then
+                    HEALTHCHECK_SAH_429=true
+                fi
                 return 1 ;;
         esac
 
@@ -573,7 +577,21 @@ check_container_health() {
         ELAPSED=$((ELAPSED + INTERVAL))
     done
 
-    echo -e "${RED}✗ Health check failed after ${MAX_WAIT}s!${NC}"
+    # Zeitfenster ausgelaufen (Karte 422, Punkt 2): Bis hierher kam frueher nur die eine Zeile
+    # "Health check failed after 600s" — und damit wusste niemand etwas. Genau in diesen Pfad
+    # laeuft ein Container, der LANGSAM stirbt statt schnell: der Frueh-Abbruch oben greift nur
+    # bei exited/dead oder RestartCount>=2, ein Container, der einfach nie UP meldet, bleibt
+    # "running" und laeuft ins Timeout. Deshalb hier dieselben Logs und dieselbe Diagnose wie
+    # im Crash-Pfad.
+    echo -e "${RED}✗ Health check failed after ${MAX_WAIT}s! Letzte Logs:${NC}"
+    local TIMEOUT_LOGS
+    TIMEOUT_LOGS=$(ssh ${DEPLOY_SERVER} "sudo docker logs --tail 60 ${CONTAINER_NAME} 2>&1 | tail -60")
+    echo "$TIMEOUT_LOGS"
+    diagnose_startfehler "$TIMEOUT_LOGS"
+    # Fuer den Retry in deploy_to_slot: sichtbar machen, ob im Timeout-Pfad ein 429 stand.
+    if echo "$TIMEOUT_LOGS" | grep -q "HTTP 429"; then
+        HEALTHCHECK_SAH_429=true
+    fi
     return 1
 }
 
@@ -723,10 +741,45 @@ deploy_blue_green() {
     ssh ${DEPLOY_SERVER} "sudo docker ps | grep ${CONTAINER_NAME} || echo 'Container not running!'"
 
     # Health check on the inactive container
+    HEALTHCHECK_SAH_429=false
     if ! check_container_health "$CONTAINER_NAME" "$IMAGE_TAG"; then
-        echo -e "${RED}✗ Health check failed on ${CONTAINER_NAME}!${NC}"
-        echo -e "${YELLOW}Active slot (${ACTIVE_SLOT}) remains unchanged. No traffic switched.${NC}"
-        return 1
+        # EIN Wiederholungsversuch — ausschliesslich bei nachgewiesenem HTTP 429 (Karte 422, Punkt 1).
+        #
+        # Warum ueberhaupt: Ein 429 von Vaultwarden ist per Definition transient (Karte 395). Der
+        # Deploy scheitert heute endgueltig an einem Zustand, der Sekunden spaeter vorbei ist — und
+        # der neue Slot laeuft dabei bereits mit dem richtigen Jar, es fehlt ihm nur das Secret.
+        #
+        # Warum so eng gefasst: Automatische Wiederholungen im PROD-Deploy verschleiern Fehler.
+        # Deshalb GENAU EIN Versuch, NUR wenn "HTTP 429" nachweislich im Container-Log stand, mit
+        # spuerbarem Abstand — und laut protokolliert. Ein stiller Retry waere schlimmer als keiner.
+        #
+        # Nicht gefaehrlich, weil hier nichts halb Ausgerolltes wiederholt wird: der Traffic liegt
+        # unveraendert auf ${ACTIVE_SLOT}, umgeschaltet wird erst NACH bestandenem Healthcheck.
+        # Wiederholt wird allein der Container-Start des inaktiven Slots.
+        if [ "${HEALTHCHECK_SAH_429}" == "true" ] && [ "${DEPLOY_RETRY_ON_429:-true}" == "true" ]; then
+            local RETRY_WAIT="${DEPLOY_RETRY_WAIT:-60}"
+            echo -e "${YELLOW}⟳ RETRY (1 von 1): Im Log stand HTTP 429 — eine transiente Vault-Stoerung.${NC}"
+            echo -e "${YELLOW}  Warte ${RETRY_WAIT}s und starte ${CONTAINER_NAME} genau EINMAL neu.${NC}"
+            echo -e "${YELLOW}  Traffic liegt weiterhin auf ${ACTIVE_SLOT} — es wird nichts umgeschaltet.${NC}"
+            echo -e "${YELLOW}  Abschaltbar mit DEPLOY_RETRY_ON_429=false.${NC}"
+            sleep "$RETRY_WAIT"
+            ssh ${DEPLOY_SERVER} "sudo docker restart ${CONTAINER_NAME}"
+            # Neuer Container-Start == potenziell neue IP -> nginx muss neu aufloesen (Karte 379).
+            nginx_reload_after_recreate "Retry ${COMPOSE_SERVICE}"
+            HEALTHCHECK_SAH_429=false
+            if check_container_health "$CONTAINER_NAME" "$IMAGE_TAG"; then
+                echo -e "${GREEN}✓ Retry erfolgreich — der 429 war transient.${NC}"
+            else
+                echo -e "${RED}✗ Health check auch im Wiederholungsversuch fehlgeschlagen (${CONTAINER_NAME}).${NC}"
+                echo -e "${YELLOW}Damit ist es KEINE voruebergehende Stoerung mehr — die Ursache steht in den Logs oben.${NC}"
+                echo -e "${YELLOW}Active slot (${ACTIVE_SLOT}) remains unchanged. No traffic switched.${NC}"
+                return 1
+            fi
+        else
+            echo -e "${RED}✗ Health check failed on ${CONTAINER_NAME}!${NC}"
+            echo -e "${YELLOW}Active slot (${ACTIVE_SLOT}) remains unchanged. No traffic switched.${NC}"
+            return 1
+        fi
     fi
 
     # Switch nginx to the new slot
