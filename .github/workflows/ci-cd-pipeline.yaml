@@ -57,7 +57,7 @@ on:
         type: boolean
         default: false
       quality-analysis:
-        description: 'Wöchentliche Voll-Analyse: nach Sonar zusätzlich OWASP-CVE + SpotBugs, Quality-Gate bewerten, bei Breach quality/quality-gate.properties committen + Pushover. Erfordert sonar-enabled.'
+        description: 'Wöchentliche Voll-Analyse: nach Sonar zusätzlich OWASP-CVE + SpotBugs, Quality-Gate bewerten, bei Breach quality/quality-gate.properties committen. Erfordert sonar-enabled. (Kein Pushover mehr bei rotem Gate — Karte 401.)'
         required: false
         type: boolean
         default: false
@@ -196,7 +196,7 @@ jobs:
         # -DexcludedGroups=quality-gate: der Quality-Gate-Wächter (QualityGateTest) liest den STATISCHEN
         # wöchentlichen Sonar-/CVE-Gate-Stand (quality/quality-gate.properties) und färbt sonst JEDEN Code-PR
         # rot, obwohl der PR-Code sauber baut/testet. Der Gate-Stand wird separat im wöchentlichen
-        # quality-analysis-Lauf (Cron) bewertet + committet + per Pushover gemeldet — nicht hier bei jedem PR.
+        # quality-analysis-Lauf (Cron) bewertet + committet das Statusfile — nicht hier bei jedem PR.
         run: mvn clean install -B -DskipITs -DexcludedGroups=quality-gate
         env:
           SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:${{ inputs.postgres-port }}/${{ inputs.database-name }}
@@ -521,22 +521,18 @@ jobs:
             "Lauf ansehen" \
             || echo "::warning::Pushover-Meldung zum Analyse-Ausfall konnte nicht gesendet werden."
 
-      - name: Pushover bei Quality-Gate-Breach
-        if: inputs.quality-analysis && steps.gate.outputs.breached == 'true'
-        env:
-          PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
-          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
-        run: |
-          BODY="$(cat /tmp/breaches.txt)"
-          bash .plaintext-scripts/quality/pushover.sh \
-            "Quality-Gate rot: ${{ inputs.project-name }}" \
-            "Schwelle überschritten:
-          ${BODY}
-
-          Das Statusfile ist eingecheckt, nightly/PR-Builds sind rot bis zum Fix." \
-            1 \
-            "${{ inputs.sonar-url }}/dashboard?id=$(mvn help:evaluate -Dexpression=project.groupId -q -DforceStdout):$(mvn help:evaluate -Dexpression=project.artifactId -q -DforceStdout)" \
-            "SonarQube"
+      # ENTFERNT am 02.08.2026 (Karte 401, Auftrag Daniel): die Pushover-Meldung bei rotem
+      # Quality-Gate. Wortlaut: "sorge dafuer, dass ich diese sonarqube quality gate nachrichten
+      # nicht mehr bekomme. viel mehr sollen einmal in der woche eine karte erstellt werden".
+      #
+      # Was BLEIBT — bewusst, und nicht zu verwechseln:
+      #   * Die Bewertung selbst und das eingecheckte quality/quality-gate.properties. Nur die
+      #     Benachrichtigung entfaellt, nicht die Messung.
+      #   * Die Meldung "Sonar-Analyse fehlgeschlagen" weiter oben. Die meldet etwas anderes:
+      #     dass gar NICHT gemessen wurde. Genau dieser Ausfall blieb bei Karte 365 zehn Tage
+      #     unbemerkt, mit eingefrorenem "OK" als Folge — und er verhindert zusaetzlich die
+      #     Wochenkarte, die diese Meldung hier ersetzen soll. Sie zu streichen wuerde einen
+      #     blinden Fleck erzeugen, der schlimmer waere als die Meldung.
 
   # ── Deploy ─────────────────────────────────────────────────────
   deploy:
