@@ -457,6 +457,38 @@ switch_active() {
     fi
 }
 
+# Deutet die letzten Container-Logs eines gescheiterten Starts und sagt, WAS zu tun ist.
+#
+# Anlass (Karte 398): Am 01.08.2026 starb plaintext-schuetu-prod-blue mit
+# "PROD: JWT private key muss aus dem Vault-Item kommen". Das las sich wie eine fehlende
+# Konfiguration — sie war aber vorhanden. Zwei Zeilen darueber stand die Ursache:
+# Vaultwarden hatte den Login mit HTTP 429 abgewiesen, der VaultwardenClient faehrt
+# "fail-safe fort" und liefert kein Secret, und der JwtTokenService kann danach nicht mehr
+# unterscheiden zwischen "Item existiert nicht" und "Vault war gerade nicht erreichbar".
+# Die Karte trug deshalb tagelang den falschen Titel. Diese Funktion trennt die beiden Faelle.
+diagnose_startfehler() {
+    local LOGS="$1"
+
+    if echo "$LOGS" | grep -q "HTTP 429"; then
+        echo -e "${YELLOW}⚠ Diagnose: Der Start scheiterte an einer TRANSIENTEN Vault-Stoerung, nicht an${NC}"
+        echo -e "${YELLOW}  fehlender Konfiguration. Im Log steht ein HTTP 429 (Rate-Limit) von Vaultwarden;${NC}"
+        echo -e "${YELLOW}  der Secret-Client faehrt danach ohne Secret fort, und die JWT-Meldung ist nur die${NC}"
+        echo -e "${YELLOW}  Folgewirkung. Vault-Item und Referenz sind vermutlich in Ordnung.${NC}"
+        echo -e "${YELLOW}  Zu tun: pruefen, welcher Dienst Vaultwarden mit Logins flutet (typisch: ein${NC}"
+        echo -e "${YELLOW}  Container im Crashloop), das abstellen und den Deploy wiederholen.${NC}"
+        return 0
+    fi
+
+    if echo "$LOGS" | grep -q "muss aus dem Vault-Item"; then
+        echo -e "${YELLOW}⚠ Diagnose: Der JWT-Schluessel liess sich nicht aus dem Vault-Item lesen, und im Log${NC}"
+        echo -e "${YELLOW}  steht KEIN 429. Hier lohnt der Blick auf das Item selbst: existiert es, hat es das${NC}"
+        echo -e "${YELLOW}  Feld 'private_key_pem', und zeigt PLAINTEXT_JWT_PRIVATE_KEY_VAULT_ITEM darauf?${NC}"
+        return 0
+    fi
+
+    return 0
+}
+
 # Health check on a specific container via docker exec
 check_container_health() {
     local CONTAINER_NAME="$1"
@@ -497,7 +529,10 @@ check_container_health() {
         case "$CSTATE" in
             exited:*|dead:*|*:[2-9]|*:[1-9][0-9]*)
                 echo -e "${RED}✗ Container ${CONTAINER_NAME} startet nicht (State ${CSTATE}) – Abbruch. Letzte Logs:${NC}"
-                ssh ${DEPLOY_SERVER} "sudo docker logs --tail 60 ${CONTAINER_NAME} 2>&1 | tail -60"
+                local CRASH_LOGS
+                CRASH_LOGS=$(ssh ${DEPLOY_SERVER} "sudo docker logs --tail 60 ${CONTAINER_NAME} 2>&1 | tail -60")
+                echo "$CRASH_LOGS"
+                diagnose_startfehler "$CRASH_LOGS"
                 return 1 ;;
         esac
 
@@ -542,6 +577,78 @@ check_container_health() {
     return 1
 }
 
+# Prueft VOR dem Start des neuen Slots, ob die Pflicht-Secrets vorhanden und aufloesbar sind.
+#
+# Anlass (Karte 398, Aufgabe 5): Ein nicht lesbarer JWT-Schluessel kostete am 01.08.2026 erst
+# einen kompletten Release-Build (08:47) und dann 37s Healthcheck (08:51:47–08:52:24), bevor
+# ueberhaupt jemand erfuhr, was fehlt. Diese Pruefung meldet dasselbe in Sekunden, bevor ein
+# laufender Slot angefasst wird.
+#
+# BEWUSSTE GRENZE: Sie erkennt eine fehlende/leere Konfiguration und einen nicht erreichbaren
+# Vaultwarden. Sie erkennt NICHT, ob Vaultwarden gerade mit HTTP 429 abriegelt — dafuer muesste
+# sie sich einloggen, und genau dieser Login-Versuch wuerde selbst ins Rate-Limit einzahlen und
+# die Lage verschlimmern. Fuer diesen Fall greift die Diagnose in diagnose_startfehler().
+#
+# Schlaegt die Pruefung selbst fehl (Config nicht lesbar), wird NICHT abgebrochen: eine
+# Leitplanke, die Deploys aus eigenem Unvermoegen blockiert, ist schlimmer als keine.
+preflight_secrets() {
+    local COMPOSE_SERVICE="$1"
+
+    # Ohne aktivierten Vault gibt es keine Pflicht-Secrets zu pruefen.
+    local PFLICHT_VARS="${REQUIRED_SECRET_VARS:-PLAINTEXT_VAULT_EMAIL PLAINTEXT_VAULT_MASTER_PASSWORD PLAINTEXT_JWT_PRIVATE_KEY_VAULT_ITEM}"
+    local VAULT_URL="${VAULT_HEALTH_URL:-https://vault.plaintext.ch/alive}"
+
+    echo -e "${BLUE}Preflight: Pflicht-Secrets fuer ${COMPOSE_SERVICE}...${NC}"
+
+    # Die Auswertung laeuft vollstaendig auf dem NAS und gibt nur Variablen-NAMEN zurueck.
+    # Die Werte (u.a. das Vault-Master-Passwort) verlassen den Host nicht und landen nie im
+    # CI-Log — deshalb hier kein "docker compose config" auf der Runner-Seite.
+    local ERGEBNIS
+    ERGEBNIS=$(ssh ${DEPLOY_SERVER} "DP='${DEPLOY_PATH}' SVC='${COMPOSE_SERVICE}' VARS='${PFLICHT_VARS}' bash -s" <<'REMOTE'
+CFG=$(cd "$DP" 2>/dev/null && sudo docker compose config "$SVC" 2>/dev/null)
+if [ -z "$CFG" ]; then echo "UNLESBAR"; exit 0; fi
+if ! printf '%s\n' "$CFG" | grep -qE '^[[:space:]]+PLAINTEXT_VAULT_ENABLED:[[:space:]]*"?true"?[[:space:]]*$'; then
+    echo "VAULT_AUS"; exit 0
+fi
+FEHLT=""
+for v in $VARS; do
+    printf '%s\n' "$CFG" | grep -qE "^[[:space:]]+$v:[[:space:]]*\"?[^[:space:]\"]" || FEHLT="$FEHLT $v"
+done
+echo "FEHLT:$FEHLT"
+REMOTE
+)
+
+    case "$ERGEBNIS" in
+        UNLESBAR)
+            echo -e "${YELLOW}⚠ Preflight uebersprungen: 'docker compose config ${COMPOSE_SERVICE}' war nicht lesbar.${NC}"
+            return 0 ;;
+        VAULT_AUS)
+            echo -e "${BLUE}  Vault fuer diesen Slot nicht aktiv — keine Pflicht-Secrets zu pruefen.${NC}"
+            return 0 ;;
+    esac
+
+    local FEHLENDE="${ERGEBNIS#FEHLT:}"
+    if [ -n "$(echo "$FEHLENDE" | tr -d '[:space:]')" ]; then
+        echo -e "${RED}✗ Preflight: Pflicht-Variablen fehlen oder sind leer:${FEHLENDE}${NC}"
+        echo -e "${RED}  Der Slot wuerde beim Start daran scheitern. Deploy abgebrochen, bevor ein${NC}"
+        echo -e "${RED}  laufender Container angefasst wurde. Zu pruefen: env_file des Service${NC}"
+        echo -e "${RED}  ${COMPOSE_SERVICE} in ${DEPLOY_PATH} (typisch: vault.env bzw. app.env).${NC}"
+        return 1
+    fi
+
+    # Erreichbarkeit: /alive ist ein reiner Lebendcheck und zaehlt nicht ins Login-Rate-Limit.
+    local VAULT_CODE
+    VAULT_CODE=$(ssh ${DEPLOY_SERVER} "curl -s -o /dev/null -m 10 -w '%{http_code}' '${VAULT_URL}' 2>/dev/null || echo '000'")
+    if [ "$VAULT_CODE" != "200" ]; then
+        echo -e "${RED}✗ Preflight: Vaultwarden nicht erreichbar (${VAULT_URL} -> HTTP ${VAULT_CODE}).${NC}"
+        echo -e "${RED}  Die Slots koennen ihre vault:-Referenzen dann nicht aufloesen. Deploy abgebrochen.${NC}"
+        return 1
+    fi
+
+    echo -e "${GREEN}✓ Preflight: Pflicht-Secrets gesetzt, Vaultwarden erreichbar (HTTP 200).${NC}"
+    return 0
+}
+
 # Deploy image to the inactive slot using blue-green strategy
 deploy_blue_green() {
     local ENV_NAME="$1"
@@ -571,6 +678,11 @@ deploy_blue_green() {
     echo -e "${BLUE}Active slot:   ${GREEN}${ACTIVE_SLOT}${NC}"
     echo -e "${BLUE}Deploying to:  ${GREEN}${INACTIVE_SLOT}${NC} (${CONTAINER_NAME})"
     echo -e "${BLUE}Image tag:     ${GREEN}${IMAGE_TAG}${NC}"
+
+    # Karte 398: erst pruefen, dann den Slot anfassen — nicht umgekehrt.
+    if ! preflight_secrets "$COMPOSE_SERVICE"; then
+        return 1
+    fi
 
     if [ "${JAR_VOLUME_DEPLOY}" == "true" ]; then
         # M3: Jar aus dem Staging in das slot-eigene Volume kopieren, dann Container neu erzeugen
