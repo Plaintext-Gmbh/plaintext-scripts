@@ -43,7 +43,12 @@ chmod +x "$WERKSTATT/pushover-attrappe"
 
 cat > "$WERKSTATT/deck-attrappe" <<'ATT'
 #!/usr/bin/env bash
-# Erwartet: deck new <stack> <titel> <prio> --file -
+# Erwartet GENAU: deck new <stack> <titel> <prio> — Beschreibung ueber stdin.
+# Absichtlich streng: Eine fruehere Fassung reichte "--file -" mit, was das echte Werkzeug mit
+# "Datei '-' nicht gefunden" quittierte. Eine Attrappe, die jede Argumentfolge schluckt,
+# prueft nichts — sie haette diesen Fehler bis in den Betrieb durchgelassen (Karte 382).
+[ "$1" = "new" ] || { echo "FALSCHER UNTERBEFEHL: $1" >> "$WERKSTATT_LOG/auftraege"; exit 2; }
+[ $# -eq 4 ] || { echo "FALSCHE ARGUMENTZAHL ($#): $*" >> "$WERKSTATT_LOG/auftraege"; exit 2; }
 { echo "AUFTRAG stack=$2 titel=$3"; cat; } >> "$WERKSTATT_LOG/auftraege"
 ATT
 chmod +x "$WERKSTATT/deck-attrappe"
