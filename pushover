@@ -20,12 +20,14 @@
 #
 # AUFRUF
 #
-#   pushover [-p PRIORITAET] [-t TITEL] [-r DATEI] NACHRICHT
+#   pushover [-p PRIORITAET] [-t TITEL] [-r DATEI] [-u URL] [-U URL-TITEL] NACHRICHT
 #   pushover --quittiert RECEIPT
 #
 #   -p  Priorität -2..2 (Vorgabe 0). Bei 2 (Emergency) wird wiederholt, bis jemand quittiert.
 #   -t  Titel (Vorgabe: Hostname)
 #   -r  Bei Priorität 2: Beleg-Schlüssel zusätzlich in diese Datei schreiben
+#   -u  Optionaler Link in der Meldung (z. B. auf den CI-Lauf)
+#   -U  Beschriftung des Links (Vorgabe: Details)
 #   --quittiert RECEIPT   fragt ab, ob ein Emergency-Alarm quittiert wurde
 #
 # KONFIGURATION (in dieser Reihenfolge, erste Fundstelle gewinnt)
@@ -43,6 +45,8 @@ API="https://api.pushover.net/1"
 PRIO=0
 TITEL="$(hostname -s 2>/dev/null || echo plaintext)"
 RECEIPT_DATEI=""
+URL=""
+URL_TITEL="Details"
 # Emergency: alle 60 s wiederholen, nach 30 min aufgeben. Die Eskalation aus Teil 2 der Karte
 # greift nach 10 min — das Fenster muss also deutlich grösser sein als ihre Frist.
 RETRY=60
@@ -113,11 +117,13 @@ if [ "$1" = "--quittiert" ]; then
     quittierung_abfragen "$2"
 fi
 
-while getopts ":p:t:r:" opt; do
+while getopts ":p:t:r:u:U:" opt; do
     case "$opt" in
         p) PRIO="$OPTARG" ;;
         t) TITEL="$OPTARG" ;;
         r) RECEIPT_DATEI="$OPTARG" ;;
+        u) URL="$OPTARG" ;;
+        U) URL_TITEL="$OPTARG" ;;
         \?) fehler "unbekannte Option -$OPTARG"; exit 2 ;;
         :)  fehler "Option -$OPTARG braucht einen Wert"; exit 2 ;;
     esac
@@ -141,6 +147,9 @@ args=(--data-urlencode "token=$APP_TOKEN"
       --data-urlencode "priority=$PRIO")
 if [ "$PRIO" = "2" ]; then
     args+=(--data-urlencode "retry=$RETRY" --data-urlencode "expire=$EXPIRE")
+fi
+if [ -n "$URL" ]; then
+    args+=(--data-urlencode "url=$URL" --data-urlencode "url_title=$URL_TITEL")
 fi
 
 antwort="$(curl -sS --max-time 20 "${args[@]}" "$API/messages.json" 2>/dev/null)" || {
