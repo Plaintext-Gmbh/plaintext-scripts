@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# pushover-eskalation — unquittierter Emergency-Alarm erzeugt einen Auftrag (Karte 382, Teil 2).
+#
+# WARUM ES DAS GIBT
+#
+# Am 31.07.2026 fiel PROD aus. Der Alarm funktionierte technisch einwandfrei — er wurde nur
+# 45 Minuten lang von niemandem aufgegriffen (Karte 379). Ein Alarm, den niemand quittiert,
+# ist kein Alarm. Statt lauter zu werden, handelt das System selbst: Bleibt die Quittierung
+# aus, entsteht ein Auftrag auf dem Board, den die naechste Sitzung aufgreift.
+#
+# ABLAUF
+#
+#   melde   -> sendet mit Prioritaet 2 (Emergency) und legt einen Vorgang mit dem Beleg an
+#   pruefen -> (Cron) fragt den Beleg ab; unquittiert und aelter als die Frist -> Auftrag
+#   ende    -> Entwarnung: Vorgang schliessen, damit derselbe Anlass wieder eskalieren darf
+#
+# EINMAL PRO VORFALL — der wichtigste Teil
+#
+# Ein eskalierter Vorgang wird als erledigt markiert und NICHT erneut gemeldet. Sonst entsteht
+# genau die Rueckkopplung, vor der die Karte warnt: Die Sitzung reagiert auf den Auftrag, loest
+# dabei einen Neustart aus, der Dienst ist kurz weg, das erzeugt den naechsten Alarm. Ein
+# Vorfall darf erst nach ausdruecklicher Entwarnung ('ende') oder nach Ablauf der Sperrzeit
+# wieder eskalieren.
+#
+# LAEUFT BEWUSST AUSSERHALB DES UEBERWACHTEN
+#
+# Der Dienst gehoert auf eine andere Maschine als die ueberwachte (Cron auf der Arbeitsstation,
+# nicht auf dem NAS) — sonst faellt er mit dem aus, was er ueberwachen soll.
+#
+# NUR EIGENE UEBERWACHUNG
+#
+# Eskaliert wird ausschliesslich, was ueber 'melde' selbst gesendet wurde. Es gibt keinen
+# Eingang von aussen: Wer Alarme erzeugen kann, koennte sonst Auftraege erzeugen.
+#
+# AUFRUF
+#
+#   pushover-eskalation melde  "<Titel>" "<Text>" [vorfall-schluessel]
+#   pushover-eskalation pruefen
+#   pushover-eskalation ende   <vorfall-schluessel>
+#   pushover-eskalation status
+#   pushover-eskalation selbsttest
+#
+# KONFIGURATION (Umgebung, alles optional)
+#
+#   ESKALATION_FRIST_MIN     Minuten ohne Quittierung bis zum Auftrag   (Vorgabe 10)
+#   ESKALATION_SPERRE_MIN    Sperrzeit bis derselbe Vorfall erneut darf (Vorgabe 60)
+#   ESKALATION_KOMMANDO      Kommando, das den Auftrag anlegt           (Vorgabe: deck)
+#   ESKALATION_STACK         Zielstapel fuer den Auftrag                (Vorgabe: todo)
+#   ESKALATION_STATE_DIR     Ablage der Vorgaenge   (Vorgabe ~/.local/state/pushover-eskalation)
+#
+# Das Auftragskommando ist bewusst austauschbar: Dieses Repository ist oeffentlich und darf
+# kein bestimmtes Werkzeug voraussetzen. Fehlt es, wird der Auftrag in eine Datei geschrieben
+# und das gemeldet — verloren geht nichts.
+#
+# EXIT-CODES
+#   0 ok · 1 Konfiguration/Umgebung fehlt · 2 Aufruffehler · 3 Senden/Abfrage fehlgeschlagen
+
+set -uo pipefail
+
+HIER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PUSHOVER="${PUSHOVER_CMD:-$HIER/pushover}"
+FRIST_MIN="${ESKALATION_FRIST_MIN:-10}"
+SPERRE_MIN="${ESKALATION_SPERRE_MIN:-60}"
+KOMMANDO="${ESKALATION_KOMMANDO:-deck}"
+STACK="${ESKALATION_STACK:-todo}"
+STATE_DIR="${ESKALATION_STATE_DIR:-$HOME/.local/state/pushover-eskalation}"
+LOG="$STATE_DIR/log"
+
+fehler() { echo "pushover-eskalation: $*" >&2; }
+log() {
+    mkdir -p "$STATE_DIR"
+    echo "$(date '+%F %T') $*" >> "$LOG"
+    tail -n 500 "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
+}
+
+# Schluessel auf Dateiname-sichere Zeichen begrenzen — der Wert kommt aus einem Monitornamen.
+saeubere() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-80; }
+
+# ------------------------------------------------------------------------ melde
+melde() {
+    local titel="$1" text="$2" schluessel="${3:-$1}"
+    [ -n "$titel" ] && [ -n "$text" ] || { fehler "melde braucht Titel und Text"; exit 2; }
+    local sk; sk="$(saeubere "$schluessel")"
+    local datei="$STATE_DIR/$sk.vorgang"
+    mkdir -p "$STATE_DIR"
+
+    # Laeuft schon ein Vorgang zu diesem Schluessel? Dann NICHT erneut senden — ein zweiter
+    # Emergency zum selben Anlass erzeugt einen zweiten Beleg und damit eine zweite Eskalation.
+    if [ -f "$datei" ]; then
+        local zustand; zustand="$(sed -n '3p' "$datei")"
+        if [ "$zustand" = "offen" ]; then
+            log "melde: Vorgang '$sk' laeuft bereits — nicht erneut gesendet"
+            echo "Vorgang laeuft bereits (nicht erneut gesendet): $sk"
+            exit 0
+        fi
+        # Bereits eskaliert: erst nach Sperrzeit wieder zulassen (Rueckkopplungsschutz).
+        local seit; seit="$(sed -n '1p' "$datei")"
+        local alter_min=$(( ( $(date +%s) - ${seit:-0} ) / 60 ))
+        if [ "$alter_min" -lt "$SPERRE_MIN" ]; then
+            log "melde: Vorgang '$sk' vor ${alter_min} Min eskaliert, Sperre ${SPERRE_MIN} Min — unterdrueckt"
+            echo "Innerhalb der Sperrzeit (${alter_min}/${SPERRE_MIN} Min) — nicht erneut gesendet: $sk"
+            exit 0
+        fi
+    fi
+
+    local receipt
+    receipt="$("$PUSHOVER" -p 2 -t "$titel" "$text")" || {
+        fehler "Senden fehlgeschlagen"; exit 3; }
+    if [ -z "$receipt" ]; then
+        fehler "kein Beleg-Schluessel erhalten — ohne ihn ist keine Quittierungspruefung moeglich"
+        exit 3
+    fi
+    printf '%s\n%s\noffen\n%s\n%s\n' "$(date +%s)" "$receipt" "$titel" "$text" > "$datei"
+    chmod 600 "$datei" 2>/dev/null || true
+    log "melde: '$sk' gesendet, Beleg ${receipt:0:8}…"
+    echo "$receipt"
+}
+
+# ----------------------------------------------------------------------- pruefen
+auftrag_anlegen() {
+    local sk="$1" titel="$2" text="$3" receipt="$4" alt="$5"
+    local beschreibung
+    beschreibung="$(cat <<EOF
+## ESKALATION — Alarm seit ${alt} Minuten nicht quittiert
+
+**Erzeugt von \`pushover-eskalation\` am $(date '+%d.%m.%Y %H:%M:%S') auf $(hostname -s).**
+Beleg-Schluessel: \`${receipt}\`  ·  Vorfall: \`${sk}\`
+
+### Der Alarm
+
+**${titel}**
+
+${text}
+
+### Auftrag
+
+**Zuerst diagnostizieren und dokumentieren, dann erst handeln.** Ein Neustart loescht die Spur,
+an der die Ursache zu erkennen waere — deshalb gehoert der Logauszug in diese Karte, bevor
+etwas neu gestartet wird.
+
+**Erlaubt ohne Rueckfrage** (Entscheid Daniel, 03.08.2026):
+* Diagnose in jeder Tiefe (Logs, Zustand, Messungen)
+* \`nginx -s reload\`
+* **Neustart des betroffenen Containers** — nur dieser eine, kein Sammelneustart,
+  kein \`docker compose down\`
+
+**Nicht erlaubt:** Deploys, Datenbankeingriffe, Neustart weiterer Dienste (Teil 6.4).
+
+**Crashloop-Grenze:** Kommt derselbe Dienst binnen einer Stunde erneut hoch und faellt wieder
+aus, wird **nicht ein drittes Mal** neu gestartet — dann melden. Ein Neustart, der nicht haelt,
+ist keine Behebung, sondern Spurenvernichtung.
+
+**Jede autonome Handlung gehoert mit Uhrzeit, Grund und Ergebnis in diese Karte.** Ohne diesen
+Eintrag ist am Morgen nicht unterscheidbar, ob sich ein System erholt hat oder jemand eingegriffen
+hat.
+
+### Danach
+
+Ist der Vorfall erledigt, Entwarnung geben, damit derselbe Anlass wieder eskalieren darf:
+
+    pushover-eskalation ende ${sk}
+EOF
+)"
+    local titelzeile="ESKALATION: ${titel} — seit ${alt} Min nicht quittiert"
+
+    if command -v "$KOMMANDO" >/dev/null 2>&1; then
+        if printf '%s' "$beschreibung" | "$KOMMANDO" new "$STACK" "$titelzeile" 0 --file - >/dev/null 2>&1; then
+            echo "board"
+            return 0
+        fi
+        fehler "Auftragskommando '$KOMMANDO' ist fehlgeschlagen — schreibe in eine Datei"
+    fi
+    # Auffangweg: Der Auftrag darf nicht verloren gehen, nur weil das Board nicht erreichbar ist.
+    local ablage="$STATE_DIR/auftrag-$sk-$(date +%Y%m%d-%H%M%S).md"
+    { echo "# $titelzeile"; echo; printf '%s\n' "$beschreibung"; } > "$ablage"
+    echo "datei:$ablage"
+}
+
+pruefen() {
+    mkdir -p "$STATE_DIR"
+    local gefunden=0
+    shopt -s nullglob
+    for datei in "$STATE_DIR"/*.vorgang; do
+        local zustand; zustand="$(sed -n '3p' "$datei")"
+        [ "$zustand" = "offen" ] || continue
+        gefunden=1
+        local sk; sk="$(basename "$datei" .vorgang)"
+        local seit; seit="$(sed -n '1p' "$datei")"
+        local receipt; receipt="$(sed -n '2p' "$datei")"
+        local titel; titel="$(sed -n '4p' "$datei")"
+        local text; text="$(sed -n '5,$p' "$datei")"
+        local alt=$(( ( $(date +%s) - ${seit:-0} ) / 60 ))
+
+        # Quittiert? Dann ist der Alarm angekommen — Vorgang schliessen, nichts eskalieren.
+        if "$PUSHOVER" --quittiert "$receipt" >/dev/null 2>&1; then
+            sed -i '3s/.*/quittiert/' "$datei"
+            log "pruefen: '$sk' wurde quittiert (nach ${alt} Min) — keine Eskalation"
+            continue
+        fi
+        if [ "$alt" -lt "$FRIST_MIN" ]; then
+            log "pruefen: '$sk' offen seit ${alt} Min (Frist ${FRIST_MIN}) — noch nichts zu tun"
+            continue
+        fi
+        local weg; weg="$(auftrag_anlegen "$sk" "$titel" "$text" "$receipt" "$alt")"
+        sed -i '3s/.*/eskaliert/' "$datei"
+        log "pruefen: '$sk' nach ${alt} Min unquittiert — Auftrag angelegt ueber: $weg"
+        echo "ESKALIERT: $sk (${alt} Min unquittiert) — Auftrag: $weg"
+    done
+    shopt -u nullglob
+    [ "$gefunden" = "1" ] || log "pruefen: keine offenen Vorgaenge"
+    return 0
+}
+
+# -------------------------------------------------------------------------- ende
+ende() {
+    local sk; sk="$(saeubere "${1:-}")"
+    [ -n "$sk" ] || { fehler "ende braucht einen Vorfall-Schluessel"; exit 2; }
+    local datei="$STATE_DIR/$sk.vorgang"
+    [ -f "$datei" ] || { echo "kein Vorgang '$sk'"; exit 0; }
+    rm -f "$datei"
+    log "ende: Vorgang '$sk' geschlossen (Entwarnung)"
+    echo "Entwarnung: $sk"
+}
+
+# ------------------------------------------------------------------------ status
+status() {
+    echo "Frist:      ${FRIST_MIN} Min ohne Quittierung bis zum Auftrag"
+    echo "Sperre:     ${SPERRE_MIN} Min bis derselbe Vorfall erneut eskalieren darf"
+    echo "Auftragsweg: $(command -v "$KOMMANDO" >/dev/null 2>&1 && echo "$KOMMANDO new $STACK" || echo "Datei (Kommando '$KOMMANDO' nicht gefunden)")"
+    echo "Ablage:     $STATE_DIR"
+    echo
+    echo "Vorgaenge:"
+    shopt -s nullglob
+    local leer=1
+    for datei in "$STATE_DIR"/*.vorgang; do
+        leer=0
+        local sk; sk="$(basename "$datei" .vorgang)"
+        local seit; seit="$(sed -n '1p' "$datei")"
+        printf '  %-40s %-10s seit %s Min\n' "$sk" "$(sed -n '3p' "$datei")" \
+            "$(( ( $(date +%s) - ${seit:-0} ) / 60 ))"
+    done
+    shopt -u nullglob
+    [ "$leer" = "1" ] && echo "  (keine)"
+    echo
+    echo "Letzte Laeufe:"; tail -n 5 "$LOG" 2>/dev/null | sed 's/^/  /'
+}
+
+case "${1:-}" in
+    melde)   shift; melde "${1:-}" "${2:-}" "${3:-}" ;;
+    pruefen) pruefen ;;
+    ende)    shift; ende "${1:-}" ;;
+    status)  status ;;
+    *)
+        fehler "Aufruf: pushover-eskalation melde|pruefen|ende|status"
+        exit 2
+        ;;
+esac
