@@ -1,0 +1,177 @@
+#!/bin/bash
+# pushover — gemeinsames Sende-Werkzeug für Pushover-Meldungen (Karte 382, Teil 1).
+#
+# WARUM ES DAS GIBT
+#
+# Pushover wurde bisher an acht Stellen einzeln verdrahtet (Aufnahme worker01, 03.08.2026):
+# zwei Skripte auf zorin01, scripts/pushover/pushover.sh im app-Repo samt drei Testskripten,
+# und sechs curl-Blöcke in den CI-Workflows von root, app, guild, iot (2×) und fwtool. Jede
+# Stelle kannte Token, Format und Prioritätslogik selbst — acht Kopien derselben zwanzig Zeilen.
+#
+# Ein Java-Modul in plaintext-root wäre der falsche Ort gewesen: Es gibt (Stand 03.08.2026)
+# KEINEN einzigen Java-Sender, das Modul hätte also keinen Konsumenten. Deshalb Shell, und
+# deshalb hier — plaintext-scripts trägt bereits die geteilten Skripte.
+#
+# SICHERHEIT
+#
+# plaintext-scripts ist ein ÖFFENTLICHES Repository. In dieser Datei steht deshalb kein Token
+# und kein User-Key; beides kommt ausschliesslich von aussen (Umgebung oder Konfigurationsdatei
+# ausserhalb des Repos). Das Skript gibt Werte auch im Fehlerfall nie aus.
+#
+# AUFRUF
+#
+#   pushover [-p PRIORITAET] [-t TITEL] [-r DATEI] [-u URL] [-U URL-TITEL] NACHRICHT
+#   pushover --quittiert RECEIPT
+#
+#   -p  Priorität -2..2 (Vorgabe 0). Bei 2 (Emergency) wird wiederholt, bis jemand quittiert.
+#   -t  Titel (Vorgabe: Hostname)
+#   -r  Bei Priorität 2: Beleg-Schlüssel zusätzlich in diese Datei schreiben
+#   -u  Optionaler Link in der Meldung (z. B. auf den CI-Lauf)
+#   -U  Beschriftung des Links (Vorgabe: Details)
+#   --quittiert RECEIPT   fragt ab, ob ein Emergency-Alarm quittiert wurde
+#
+# KONFIGURATION (in dieser Reihenfolge, erste Fundstelle gewinnt)
+#
+#   1. Umgebung:  PUSHOVER_APP_TOKEN und PUSHOVER_USER_KEY   (der Weg für CI/GitHub-Secrets)
+#   2. Datei:     $PUSHOVER_CONFIG, sonst ~/.pushover, sonst /volume1/docker/_secrets/pushover.env
+#                 Format: APP_TOKEN=… / USER_KEY=…  (chmod 600)
+#
+# EXIT-CODES
+#   0 gesendet · 1 Konfiguration fehlt · 2 Aufruffehler · 3 Pushover meldet einen Fehler
+#   4 (--quittiert) noch nicht quittiert
+set -uo pipefail
+
+API="https://api.pushover.net/1"
+PRIO=0
+TITEL="$(hostname -s 2>/dev/null || echo plaintext)"
+RECEIPT_DATEI=""
+URL=""
+URL_TITEL="Details"
+# Emergency: alle 60 s wiederholen, nach 30 min aufgeben. Die Eskalation aus Teil 2 der Karte
+# greift nach 10 min — das Fenster muss also deutlich grösser sein als ihre Frist.
+RETRY=60
+EXPIRE=1800
+
+fehler() { echo "pushover: $*" >&2; }
+
+# ---------------------------------------------------------------- Konfiguration
+lade_konfiguration() {
+    if [ -n "${PUSHOVER_APP_TOKEN:-}" ] && [ -n "${PUSHOVER_USER_KEY:-}" ]; then
+        APP_TOKEN="$PUSHOVER_APP_TOKEN"
+        USER_KEY="$PUSHOVER_USER_KEY"
+        return 0
+    fi
+    local kandidaten=(
+        "${PUSHOVER_CONFIG:-}"
+        "$HOME/.pushover"
+        "/volume1/docker/_secrets/pushover.env"
+    )
+    for k in "${kandidaten[@]}"; do
+        [ -n "$k" ] && [ -r "$k" ] || continue
+        # shellcheck disable=SC1090
+        source "$k"
+        if [ -n "${APP_TOKEN:-}" ] && [ -n "${USER_KEY:-}" ]; then
+            return 0
+        fi
+    done
+    fehler "kein Token gefunden."
+    fehler "  Entweder PUSHOVER_APP_TOKEN und PUSHOVER_USER_KEY setzen (CI: aus den Secrets),"
+    fehler "  oder eine Konfigurationsdatei anlegen (chmod 600) mit:"
+    fehler "      APP_TOKEN=..."
+    fehler "      USER_KEY=..."
+    fehler "  Gesucht in: \$PUSHOVER_CONFIG, ~/.pushover, /volume1/docker/_secrets/pushover.env"
+    return 1
+}
+
+# ------------------------------------------------------------------ Quittierung
+quittierung_abfragen() {
+    local receipt="$1"
+    lade_konfiguration || exit 1
+    local antwort
+    antwort="$(curl -sS --max-time 20 -G "$API/receipts/$receipt.json" \
+        --data-urlencode "token=$APP_TOKEN" 2>/dev/null)" || {
+        fehler "Abfrage fehlgeschlagen (Netz?)"; exit 3; }
+
+    # Ohne jq auskommen — das Werkzeug soll auf jedem Runner und auf dem NAS laufen.
+    local ack; ack="$(printf '%s' "$antwort" | grep -o '"acknowledged":[01]' | head -1 | cut -d: -f2)"
+    local expired; expired="$(printf '%s' "$antwort" | grep -o '"expired":[01]' | head -1 | cut -d: -f2)"
+    local zeit; zeit="$(printf '%s' "$antwort" | grep -o '"acknowledged_at":[0-9]*' | head -1 | cut -d: -f2)"
+
+    if [ "$ack" = "1" ]; then
+        echo "quittiert${zeit:+ am $(date -d "@$zeit" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$zeit")}"
+        exit 0
+    fi
+    if [ "$expired" = "1" ]; then
+        echo "abgelaufen ohne Quittierung"
+        exit 4
+    fi
+    echo "noch nicht quittiert"
+    exit 4
+}
+
+# ------------------------------------------------------------------- Argumente
+[ $# -eq 0 ] && { fehler "keine Nachricht angegeben. Aufruf: pushover [-p PRIO] [-t TITEL] NACHRICHT"; exit 2; }
+
+if [ "$1" = "--quittiert" ]; then
+    [ -n "${2:-}" ] || { fehler "--quittiert braucht einen Beleg-Schluessel"; exit 2; }
+    quittierung_abfragen "$2"
+fi
+
+while getopts ":p:t:r:u:U:" opt; do
+    case "$opt" in
+        p) PRIO="$OPTARG" ;;
+        t) TITEL="$OPTARG" ;;
+        r) RECEIPT_DATEI="$OPTARG" ;;
+        u) URL="$OPTARG" ;;
+        U) URL_TITEL="$OPTARG" ;;
+        \?) fehler "unbekannte Option -$OPTARG"; exit 2 ;;
+        :)  fehler "Option -$OPTARG braucht einen Wert"; exit 2 ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+NACHRICHT="$*"
+[ -n "$NACHRICHT" ] || { fehler "keine Nachricht angegeben"; exit 2; }
+case "$PRIO" in
+    -2|-1|0|1|2) ;;
+    *) fehler "Prioritaet muss zwischen -2 und 2 liegen (war: $PRIO)"; exit 2 ;;
+esac
+
+lade_konfiguration || exit 1
+
+# ---------------------------------------------------------------------- Senden
+args=(--data-urlencode "token=$APP_TOKEN"
+      --data-urlencode "user=$USER_KEY"
+      --data-urlencode "title=$TITEL"
+      --data-urlencode "message=$NACHRICHT"
+      --data-urlencode "priority=$PRIO")
+if [ "$PRIO" = "2" ]; then
+    args+=(--data-urlencode "retry=$RETRY" --data-urlencode "expire=$EXPIRE")
+fi
+if [ -n "$URL" ]; then
+    args+=(--data-urlencode "url=$URL" --data-urlencode "url_title=$URL_TITEL")
+fi
+
+antwort="$(curl -sS --max-time 20 "${args[@]}" "$API/messages.json" 2>/dev/null)" || {
+    fehler "Senden fehlgeschlagen (Netz?)"; exit 3; }
+
+if ! printf '%s' "$antwort" | grep -q '"status":1'; then
+    # Die Antwort kann den Grund enthalten, aber niemals unsere Zugangsdaten — Pushover spiegelt
+    # sie nicht zurueck. Trotzdem nur die errors-Liste ausgeben, nicht die ganze Antwort.
+    fehler "Pushover meldet einen Fehler: $(printf '%s' "$antwort" | grep -o '"errors":\[[^]]*\]' || echo 'unbekannt')"
+    exit 3
+fi
+
+# Bei Emergency liefert Pushover einen Beleg-Schluessel. Ohne ihn laesst sich spaeter nicht
+# pruefen, ob jemand quittiert hat — genau daran ist die Pruefung am 31.07.2026 gescheitert.
+if [ "$PRIO" = "2" ]; then
+    receipt="$(printf '%s' "$antwort" | grep -o '"receipt":"[^"]*"' | cut -d'"' -f4)"
+    if [ -n "$receipt" ]; then
+        echo "$receipt"
+        if [ -n "$RECEIPT_DATEI" ]; then
+            printf '%s\n' "$receipt" > "$RECEIPT_DATEI"
+            chmod 600 "$RECEIPT_DATEI" 2>/dev/null || true
+        fi
+    fi
+fi
+exit 0
