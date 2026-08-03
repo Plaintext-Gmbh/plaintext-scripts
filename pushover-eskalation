@@ -164,7 +164,10 @@ EOF
     local titelzeile="ESKALATION: ${titel} — seit ${alt} Min nicht quittiert"
 
     if command -v "$KOMMANDO" >/dev/null 2>&1; then
-        if printf '%s' "$beschreibung" | "$KOMMANDO" new "$STACK" "$titelzeile" 0 --file - >/dev/null 2>&1; then
+        # Die Beschreibung geht ueber stdin — KEIN "--file -": das Werkzeug wuerde eine Datei
+        # namens "-" zu oeffnen versuchen. Am lebenden System aufgefallen; die Attrappe im Test
+        # hatte zuvor jede Argumentfolge geschluckt und den Fehler dadurch verdeckt (Karte 382).
+        if printf '%s' "$beschreibung" | "$KOMMANDO" new "$STACK" "$titelzeile" 0 >/dev/null 2>&1; then
             echo "board"
             return 0
         fi
