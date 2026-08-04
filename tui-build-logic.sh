@@ -1431,6 +1431,32 @@ Includes:
     echo -e "${BLUE}Git: Creating tag ${NEW_VERSION}...${NC}"
     git tag -a "${NEW_VERSION}" -m "Release version ${NEW_VERSION}"
 
+    # Karte 518: DER RELEASE-COMMIT GEHT RAUS, BEVOR IRGENDETWAS VEROEFFENTLICHT WIRD.
+    #
+    # Vorher lag der einzige `git push` ganz am Ende — nach `mvn deploy`, nach dem Jar aufs NAS,
+    # nach dem SNAPSHOT-Commit. Brach eine dieser Stufen ab, war die Version im Release-Repo
+    # (unumkehrbar), master kannte sie aber nicht. Da die naechste Versionsnummer aus der
+    # POM-Version von master abgeleitet wird, berechnete der naechste Lauf DIESELBE Version und
+    # starb an der Kollisionspruefung. Am 03.08.2026 sind daran sieben master-Laeufe gescheitert;
+    # vier gemergte Karten lagen dadurch ungenutzt auf master.
+    #
+    # Jetzt ist der Push der frueheste Punkt, an dem etwas schiefgehen darf: Schlaegt er fehl, ist
+    # NICHTS veroeffentlicht und der Zustand bleibt konsistent — der Lauf laesst sich einfach
+    # wiederholen. Gelingt er, ist master mindestens so weit wie das Release-Repo, und ein
+    # spaeterer Abbruch kostet hoechstens den SNAPSHOT-Commit (Kosmetik, keine Blockade).
+    echo -e "${BLUE}Git: Pushing release commit + tag BEFORE publishing...${NC}"
+    if ! git push; then
+        echo -e "${RED}✗ Push des Release-Commits abgelehnt — master hat sich inzwischen bewegt.${NC}"
+        echo -e "${RED}  Es wurde NICHTS veroeffentlicht; der Zustand ist konsistent.${NC}"
+        echo -e "${YELLOW}  Naechster Schritt: git pull --rebase, dann den Release erneut starten.${NC}"
+        return 1
+    fi
+    if ! git push --tags; then
+        echo -e "${RED}✗ Tag-Push fehlgeschlagen — Tag ${NEW_VERSION} fehlt auf dem Remote.${NC}"
+        echo -e "${RED}  Es wurde NICHTS veroeffentlicht; erst den Tag klaeren, dann erneut.${NC}"
+        return 1
+    fi
+
     # M1 (build once): die CI gibt MVN_TEST_FLAG (-DskipITs) explizit per Env vor → Unit-Tests im
     # EINZIGEN Build; lokal (ohne diese Vorgabe) ohne Tests (Dev-Rechner/Nacht-Runner ohne Test-DB).
     local TEST_FLAG="${MVN_TEST_FLAG:--DskipTests}"
@@ -1502,19 +1528,17 @@ Includes:
     # REIHENFOLGE IST TEIL DES FIX: Der Tag geht erst raus, wenn der Branch-Push gelungen ist.
     # Andersherum entsteht genau der verwaiste Zustand vom 01.08. (Tag 2.1400.0 veroeffentlicht,
     # Commit 971e5190 nie auf master). Beim naechsten Umbau nicht wieder tauschen.
-    echo -e "${BLUE}Git: Pushing to remote...${NC}"
+    # Karte 518: Release-Commit UND Tag sind oben schon draussen (vor dem Veroeffentlichen).
+    # Hier geht nur noch der SNAPSHOT-Commit raus. Scheitert das, ist der Release trotzdem
+    # vollstaendig und konsistent — master traegt die Release-Version, das Repo kennt den Tag,
+    # und der naechste Lauf rechnet korrekt weiter. Deshalb ist das ab jetzt eine WARNUNG und
+    # kein Abbruch: Ein kosmetischer Rueckstand darf keinen gelungenen Release rot faerben.
+    echo -e "${BLUE}Git: Pushing next SNAPSHOT commit...${NC}"
     if ! git push; then
-        echo -e "${RED}✗ Push von master abgelehnt — der Release ${NEW_VERSION} ist bereits"
-        echo -e "  veroeffentlicht, aber master kennt ihn nicht. Ohne Eingriff rechnet der"
-        echo -e "  naechste Lauf dieselbe Version und scheitert am 409 Conflict.${NC}"
-        echo -e "${RED}  Tag wird NICHT gepusht, damit kein verwaister Zustand entsteht.${NC}"
-        echo -e "${YELLOW}  Naechster Schritt: master auf ${NEXT_SNAPSHOT_VERSION} nachziehen,"
-        echo -e "  dann erneut releasen.${NC}"
-        return 1
-    fi
-    if ! git push --tags; then
-        echo -e "${RED}✗ Tag-Push fehlgeschlagen — Tag ${NEW_VERSION} fehlt auf dem Remote.${NC}"
-        return 1
+        echo -e "${YELLOW}⚠ Push des SNAPSHOT-Commits abgelehnt — master hat sich waehrend des"
+        echo -e "  Releases bewegt. Der Release ${NEW_VERSION} ist vollstaendig (Commit und Tag"
+        echo -e "  sind draussen); es fehlt nur die Vorbereitung auf ${NEXT_SNAPSHOT_VERSION}.${NC}"
+        echo -e "${YELLOW}  Nachziehen: git pull --rebase && git push${NC}"
     fi
 
     echo -e "${GREEN}=== Release ${NEW_VERSION} completed successfully! ===${NC}"
