@@ -411,11 +411,23 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Dashboard: [$PROJECT_NAME]($SONAR_HOST_URL/dashboard?id=${GROUP_ID}:${ARTIFACT_ID})" >> $GITHUB_STEP_SUMMARY
 
-      # ── Wöchentliche Voll-Analyse: OWASP-CVE + SpotBugs (best-effort) ──────
-      - name: OWASP-CVE + SpotBugs
+      # ── Wöchentliche Voll-Analyse ──────────────────────────────────────────
+      #
+      # Karte 420: OWASP-CVE und SpotBugs liefen bis zum 05.08.2026 in EINEM Schritt mit einem
+      # gemeinsamen Timeout von 45 Minuten. Folge: Wie lange der CVE-Scan allein braucht, war
+      # von aussen nicht feststellbar — und genau diese Zahl entscheidet die offene Frage der
+      # Karte ("CVE-Prüfung täglich?"). Ein täglicher Lauf hätte SpotBugs zwangsläufig
+      # mitgeschleppt und den 5-Minuten-Nightly auf ~50 Minuten gebracht.
+      #
+      # Die beiden Schritte sind deshalb getrennt. Am Verhalten ändert sich nichts (beide
+      # weiterhin best-effort, beide nur bei quality-analysis), an der Sichtbarkeit alles:
+      # der nächste Weekly-Lauf weist die Dauer je Schritt einzeln aus. ERST DANN ist zu
+      # entscheiden, ob ein schlanker täglicher CVE-Job lohnt — die Karte verlangt Messung
+      # statt Vermutung.
+      - name: OWASP-CVE
         if: inputs.quality-analysis
         continue-on-error: true
-        timeout-minutes: 45
+        timeout-minutes: 30
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
@@ -431,6 +443,12 @@ jobs:
           fi
           bash .plaintext-scripts/quality/owasp-dependency-check.sh "$PWD" 0 \
             || echo "::warning::OWASP best-effort fehlgeschlagen (Gate fällt auf Sonar-only zurück)"
+
+      - name: SpotBugs
+        if: inputs.quality-analysis
+        continue-on-error: true
+        timeout-minutes: 30
+        run: |
           bash .plaintext-scripts/quality/spotbugs.sh "$PWD" Medium \
             || echo "::warning::SpotBugs best-effort fehlgeschlagen"
 
