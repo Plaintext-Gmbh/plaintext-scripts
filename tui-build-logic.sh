@@ -959,10 +959,17 @@ ensure_nas_reachable() {
 }
 
 # Function to check version endpoint
+# $3 = optionales Zeitbudget, $4 = optionaler Container-Name fuer die Logausgabe im Timeout-Pfad.
 check_version() {
     local EXPECTED_VERSION=$1
     local VERSION_URL=${2:-"http://${NAS_HOST}:${DEV_PORT:-1121}/nosec/version"}
-    local MAX_WAIT=120
+    # 120s reichen fuer dev und den blue-green-PROD-Pfad. Der Single-PROD-Deploy (fwtool) braucht
+    # unter Last mehr: am 03.08. und 05.08.2026 scheiterte er zweimal identisch nach 120s mit
+    # HTTP 000, obwohl das Jar korrekt lag -- der jeweilige Rerun war gruen, und selbst der
+    # brauchte auf der ruhigeren Box noch 95-100s bis zur ersten 200-Antwort (Karte 555).
+    # Via CHECK_VERSION_MAX_WAIT ueberschreibbar, wie HEALTHCHECK_MAX_WAIT im blue-green-Pfad.
+    local MAX_WAIT="${3:-${CHECK_VERSION_MAX_WAIT:-120}}"
+    local LOG_CONTAINER="${4:-}"
     local INTERVAL=5
     local ELAPSED=0
 
@@ -987,7 +994,9 @@ check_version() {
         echo -e "${YELLOW}Checking version... (${ELAPSED}s / ${MAX_WAIT}s)${NC}"
 
         VERSION_RESPONSE=$(curl -s "$VERSION_URL" 2>/dev/null || echo "")
-        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$VERSION_URL" 2>/dev/null || echo "000")
+        # Nicht "|| echo 000": curl gibt im Fehlerfall selbst schon "000" aus, das echo haengte ein
+        # zweites an -- im Log stand dann "HTTP status: 000000" (Karte 555, beim Testen aufgefallen).
+        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$VERSION_URL" 2>/dev/null) || HTTP_STATUS="000"
 
         if [ "$HTTP_STATUS" == "200" ]; then
             if [ "$SKIP_VERSION_MATCH" == "true" ]; then
@@ -1010,6 +1019,16 @@ check_version() {
     echo -e "${RED}✗ Version check failed! Expected version '${EXPECTED_VERSION}' did not appear within ${MAX_WAIT} seconds${NC}"
     echo -e "${RED}Last response: ${VERSION_RESPONSE}${NC}"
     echo -e "${RED}Last HTTP status: ${HTTP_STATUS}${NC}"
+    # Karte 555: "HTTP status: 000" allein sagt nicht, ob der Container noch startet oder in einer
+    # Schleife stirbt -- beides sieht von aussen gleich aus. Dieselbe Selbstauskunft wie im
+    # blue-green-Timeout-Pfad (Karte 422), sofern der Aufrufer den Container benennt.
+    if [ -n "$LOG_CONTAINER" ]; then
+        echo -e "${RED}Letzte Logs von ${LOG_CONTAINER}:${NC}"
+        local TIMEOUT_LOGS
+        TIMEOUT_LOGS=$(ssh ${DEPLOY_SERVER} "sudo docker logs --tail 60 ${LOG_CONTAINER} 2>&1 | tail -60")
+        echo "$TIMEOUT_LOGS"
+        diagnose_startfehler "$TIMEOUT_LOGS"
+    fi
     return 1
 }
 
@@ -1309,7 +1328,11 @@ deploy_prod_single() {
     fi
     # Karte 379: neuer Container == potenziell neue IP -> nginx muss neu aufloesen.
     nginx_reload_after_recreate "Single-PROD-Recreate ${CONTAINER}"
-    if ! check_version "latest" "http://${NAS_HOST}:${PROD_PORT:-1142}/nosec/version"; then
+    # 300s statt der 120s-Vorgabe (Karte 555): dieser Pfad startet die JVM gedrosselt
+    # (-XX:ActiveProcessorCount=2, Karte 351) und lief unter Runner-Last zweimal ins Timeout,
+    # obwohl der Deploy in Ordnung war. Container-Name mitgeben, damit ein echter Fehlschlag
+    # seine Logs zeigt statt nur "HTTP status: 000".
+    if ! check_version "latest" "http://${NAS_HOST}:${PROD_PORT:-1142}/nosec/version" 300 "${CONTAINER}"; then
         echo -e "${RED}=== Single-PROD-Healthcheck FEHLGESCHLAGEN ===${NC}"
         return 1
     fi
