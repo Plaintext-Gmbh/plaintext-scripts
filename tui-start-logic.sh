@@ -10,14 +10,12 @@
 
 PID_FILE="$SCRIPT_DIR/.app.pid"
 LOG_FILE="$SCRIPT_DIR/app.log"
-# Karte 30: der statische /autologin?key= ist entfernt. Ohne Token oeffnet der Browser
-# schlicht die Loginseite; mit PLAINTEXT_KIOSK_TOKEN (ApiToken-JWT, Scope SESSION) den
-# Token-Login — letzteres funktioniert nur gegen Instanzen mit stabilem JWT-Schluessel.
-if [ -n "${PLAINTEXT_KIOSK_TOKEN:-}" ]; then
-    LOGIN_URL="http://localhost:8080/token-login?token=$PLAINTEXT_KIOSK_TOKEN"
-else
-    LOGIN_URL="http://localhost:8080/login.html"
-fi
+# Karte 30: der statische /autologin?key= ist entfernt.
+# Karte 564: der PLAINTEXT_KIOSK_TOKEN-Zweig ebenfalls — er konnte hier nie greifen. Die URL
+# zeigt fest auf die lokal gestartete Instanz, und die erzeugt ohne konfigurierten Schluessel
+# bei jedem Start ein fluechtiges RSA-Paar (JwtTokenService#loadPrivateKey); ein vorab
+# ausgestelltes Token validiert dort nicht. Gelebter Weg war ohnehin die Loginseite.
+LOGIN_URL="http://localhost:8080/login.html"
 
 # ── Action functions ─────────────────────────────────────────
 
