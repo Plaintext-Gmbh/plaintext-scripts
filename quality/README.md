@@ -23,6 +23,56 @@ Zentrale, projektübergreifende Code-Qualitäts-Skripte für die Plaintext-Sprin
 - **Weekly** (`0 4 * * 1`): Voll-Analyse — SonarQube (NAS) + OWASP-CVE + SpotBugs, dann Quality-Gate-Bewertung.
 - **Weekly Dashboard** (`0 6 * * 1`, `quality-dashboard.yaml`): Gesamt-HTML über alle 5 Projekte → **GitHub Pages** (`https://plaintext-gmbh.github.io/plaintext-scripts/`).
 
+### Ein manueller Dispatch löst die Voll-Analyse aus — auch ausserhalb des Montags
+
+```bash
+gh workflow run "Build And Deploy" -R Plaintext-Gmbh/plaintext-<repo> -f deploy-target=ci-only
+```
+
+Die Consumer-Workflows schalten Sonar und die Quality-Analyse an **zwei** Bedingungen:
+
+```yaml
+sonar-enabled:    ${{ github.event.schedule == '0 4 * * 1' || github.event_name == 'workflow_dispatch' }}
+quality-analysis: ${{ github.event.schedule == '0 4 * * 1' || github.event_name == 'workflow_dispatch' }}
+```
+
+Ein `workflow_dispatch` erzeugt damit einen **vollständigen** Analyse-Lauf. Das ist mehr als eine
+Bequemlichkeit: Das Quality-Gate wird nur in diesem Lauf neu bewertet. Ein Fund, der am Dienstag
+behoben wird, hält `quality/quality-gate.properties` sonst bis zum folgenden Montag auf `BREACHED`
+und färbt **jeden** Build rot — für etwas, das es nicht mehr gibt. Am 03.08.2026 ging
+`plaintext-fwtool` mit einem einzigen Dispatch von `BREACHED` auf `OK` (Karte 420).
+
+Wer dreimal erlebt, dass Rot „schon behoben" heisst, schaut beim vierten Mal nicht mehr hin —
+genau so wurde das Gate am 21.07.2026 stummgeschaltet (Karte 365). **Ein veraltetes Rot gehört
+neu bewertet, nicht ausgehalten.** Preis: ein voller Lauf (auf dem kleinsten Repo rund 70 Minuten,
+davon der Löwenanteil OWASP), also nicht beiläufig, aber jederzeit möglich.
+
+## Suppressions: was die Datei `quality/owasp-suppressions.xml` verspricht — und wer es einhält
+
+Ein CVE-Fund ohne verfügbaren Fix wird **version-gepinnt** ausgenommen
+(`pkg:maven/<group>/<artifact>@<version>`). Der Pin **ist** das Ablaufdatum: Zieht das Framework
+eine neue Version, greift die Suppression nicht mehr und der neue Stand wird erneut bewertet. Ein
+**False Positive** darf offen bleiben (`@.*`), muss die Fehlzuordnung aber in `<notes>` benennen —
+Musterfall `mxparser`, das OWASP wegen der groupId der XStream-CPE zuordnet.
+
+Die Lücke dieses Mechanismus war nicht der Ablauf, sondern **dass niemand den abgelaufenen Eintrag
+bemerkt**: Er bleibt stehen und liest sich weiter wie eine begründete Ausnahme. So trugen am
+06.08.2026 vier Repos eine Suppression auf `tomcat-embed-*@11.0.22`, während ihr Build längst
+11.0.24 auflöste — in zwei davon zusätzlich nur für `tomcat-embed-core`, ohne das
+Schwester-Artefakt `-websocket` mit denselben acht CVEs.
+
+**Durchgesetzt wird das jetzt im normalen Build, nicht durch eine Frist:**
+`PlaintextOwaspSuppressionsTest` in `plaintext-root-archtests` läuft über Surefire
+`<dependenciesToScan>` in jedem Consumer mit und meldet jeden Eintrag, dessen Version im
+**aufgelösten Klassenpfad** nicht mehr vorkommt (auch `regex="true"`-Einträge, solange ihr
+Versionsteil fest ist). Repositories ohne Suppression-Datei überspringt er sichtbar — die Pipeline
+übergibt die Datei ebenfalls nur, wenn es sie gibt.
+
+> **Noch nicht festgelegt** (Karte 420, Frage 2): **wer** einen neuen Fund ohne Fix fachlich
+> bewertet und in welcher Frist. Der Test sagt nur, ob eine Ausnahme noch *greift* — nicht, ob sie
+> noch *berechtigt* ist. Solange das offen ist, hängt die Bewertung an dem, der den Weekly-Alert
+> liest.
+
 ## Quality-Gate-Ratchet
 
 Auslöser (Schwelle überschritten): **SonarQube-Quality-Gate = ERROR** ODER **neue CVE mit CVSS ≥ 7** (OWASP).
