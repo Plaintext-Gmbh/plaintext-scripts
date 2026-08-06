@@ -424,10 +424,27 @@ jobs:
       # der nächste Weekly-Lauf weist die Dauer je Schritt einzeln aus. ERST DANN ist zu
       # entscheiden, ob ein schlanker täglicher CVE-Job lohnt — die Karte verlangt Messung
       # statt Vermutung.
+      # TIMEOUT 90, NICHT 30 (Karte 420, gemessen am 06.08.2026): Der Schritt ist auf dem
+      # KLEINSTEN Repo (fwtool) in die 30 Minuten gelaufen — "##[error]The action 'OWASP-CVE'
+      # has timed out after 30 minutes". Vorher, als OWASP und SpotBugs noch einen Schritt
+      # bildeten, lief er genauso in die damaligen 45 Minuten (Lauf 30804904241 vom 03.08.).
+      # Der Scan ist also seit mindestens dem 03.08. NIE durchgelaufen — in keinem Repo:
+      # alle sechs quality-gate.properties tragen `cve.high.count=n/a`.
+      #
+      # Weil der Schritt `continue-on-error: true` hat, endete er trotzdem auf "success"; es
+      # entsteht kein Report ("No files were found ... dependency-check-report.json"), und
+      # quality-gate.py wertet einen fehlenden Report ausdruecklich als "loest KEINEN Breach
+      # aus". Ergebnis: "Quality-Gate: OK (sonar=OK, cve>=7.0=None)" — gruen, weil nichts
+      # gemessen wurde. Von aussen ist das nicht von "keine CVEs gefunden" zu unterscheiden.
+      #
+      # 90 Minuten sind bewusst grosszuegig: Wie lange der Scan WIRKLICH braucht, weiss
+      # niemand — jede bisherige Zahl war eine Timeout-Grenze, keine Laufzeit. Der naechste
+      # Weekly liefert die erste echte Dauer. Faellt sie deutlich kleiner aus, gehoert der
+      # Wert nachgezogen.
       - name: OWASP-CVE
         if: inputs.quality-analysis
         continue-on-error: true
-        timeout-minutes: 30
+        timeout-minutes: 90
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
@@ -441,8 +458,12 @@ jobs:
             export OWASP_SUPPRESSION="$PWD/quality/owasp-suppressions.xml"
             echo "OWASP-Suppression aktiv: $OWASP_SUPPRESSION"
           fi
+          # ::error:: statt ::warning:: (Karte 420): Der Ausfall bedeutet, dass die CVE-Pruefung
+          # dieser Woche NICHT stattgefunden hat und das Gate gleich darauf trotzdem "OK"
+          # schreibt. Eine Warnung unter tausend Log-Zeilen hat das monatelang nicht sichtbar
+          # gemacht. Der Lauf wird davon nicht rot — der Schritt ist weiterhin best-effort.
           bash .plaintext-scripts/quality/owasp-dependency-check.sh "$PWD" 0 \
-            || echo "::warning::OWASP best-effort fehlgeschlagen (Gate fällt auf Sonar-only zurück)"
+            || echo "::error::OWASP-CVE-Scan NICHT gelaufen — es entsteht kein Report, und das Quality-Gate bewertet gleich darauf nur Sonar (cve.high.count=n/a). Grün heisst hier NICHT 'keine CVEs'."
 
       - name: SpotBugs
         if: inputs.quality-analysis
@@ -450,7 +471,7 @@ jobs:
         timeout-minutes: 30
         run: |
           bash .plaintext-scripts/quality/spotbugs.sh "$PWD" Medium \
-            || echo "::warning::SpotBugs best-effort fehlgeschlagen"
+            || echo "::error::SpotBugs NICHT gelaufen — keine Bytecode-/FindSecBugs-Analyse in diesem Lauf."
 
       # Report als Artifact sichern (Runner-Workspace ist ephemer; ohne Artifact ist
       # eine Nachanalyse der gemeldeten CVEs unmöglich).
