@@ -44,8 +44,27 @@ und färbt **jeden** Build rot — für etwas, das es nicht mehr gibt. Am 03.08.
 
 Wer dreimal erlebt, dass Rot „schon behoben" heisst, schaut beim vierten Mal nicht mehr hin —
 genau so wurde das Gate am 21.07.2026 stummgeschaltet (Karte 365). **Ein veraltetes Rot gehört
-neu bewertet, nicht ausgehalten.** Preis: ein voller Lauf (auf dem kleinsten Repo rund 70 Minuten,
-davon der Löwenanteil OWASP), also nicht beiläufig, aber jederzeit möglich.
+neu bewertet, nicht ausgehalten.** Preis: ein voller Lauf, auf dem kleinsten Repo über eine Stunde
+— also nicht beiläufig, aber jederzeit möglich.
+
+### ⚠️ Ein grünes Gate heisst nicht, dass geprüft wurde
+
+`quality-gate.py` behandelt einen **fehlenden** OWASP-Report ausdrücklich als „löst keinen Breach
+aus" (`owasp_high_cves` → `return None, None`). Fällt der Scan aus — Timeout, Netzfehler, kaputter
+Runner —, steht anschliessend trotzdem `status=OK` im Statusfile. Der einzige Unterschied ist eine
+Zeile, die niemand liest:
+
+```
+cve.high.count=n/a     <- kein Scan-Ergebnis
+cve.high.count=0       <- geprüft, nichts gefunden
+```
+
+Am 06.08.2026 trugen **alle sechs** Repos `n/a`: Der Scan war seit mindestens dem 03.08. in jedem
+Lauf ins Timeout gelaufen (Karte 420, behoben in `ci-cd-pipeline.yaml` mit
+`timeout-minutes: 90`). Vier Repos meldeten in dieser Zeit `status=OK`.
+
+**Wer ein grünes Gate als Aussage über CVEs liest, prüft zuerst `cve.high.count`.** Ob ein
+ausgefallener Scan das Gate künftig brechen soll, ist offen (Karte 420) — heute tut er es nicht.
 
 ## Suppressions: was die Datei `quality/owasp-suppressions.xml` verspricht — und wer es einhält
 
