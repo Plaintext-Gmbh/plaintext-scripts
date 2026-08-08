@@ -311,13 +311,6 @@ jobs:
           PGPASSWORD=plaintext psql -h localhost -p "$PGPORT" -U plaintext -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1 || \
           PGPASSWORD=plaintext psql -h localhost -p "$PGPORT" -U plaintext -d postgres -c "CREATE DATABASE \"$DB_NAME\""
 
-      - name: Stop postgres (cleanup on job-end)
-        if: always()
-        env:
-          PGPORT: ${{ inputs.postgres-port }}
-        run: |
-          docker rm -f "ci-postgres-${PGPORT}" 2>/dev/null || true
-
       - name: Connect to Twingate
         if: runner.environment != 'self-hosted'
         uses: twingate/github-action@v1
@@ -569,6 +562,30 @@ jobs:
             "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             "Lauf ansehen" \
             || echo "::warning::Pushover-Meldung zum Analyse-Ausfall konnte nicht gesendet werden."
+
+      # Karte 608 (08.08.2026): Dieser Schritt stand als DRITTER im Job — direkt hinter
+      # "Start postgres on host network" und damit VOR Checkout, Build und Analyse. Er hat also
+      # die Testdatenbank weggeraeumt, bevor irgendetwas sie benutzen konnte:
+      #
+      #   18:47:20.277  postgres on host:5441 ready after 2 tries
+      #   18:47:20.447  Run docker rm -f "ci-postgres-5441"
+      #   18:51:05.163  PSQLException: Connection to localhost:5441 refused
+      #                 -> Tests run: 1047, Errors: 48, BUILD FAILURE
+      #
+      # `if: always()` sorgt dafuer, dass ein Schritt auch nach einem Fehlschlag laeuft — es
+      # verschiebt ihn NICHT ans Ende. Dafuer gibt es nur die Position. Deshalb steht er jetzt
+      # hier unten, weiterhin mit `if: always()`, damit der Container auch bei rotem Lauf weg ist.
+      #
+      # Folge des Defekts: Der Maven-Lauf brach jedes Mal vor der Analyse ab, das
+      # quality-gate.properties wurde nie neu geschrieben, und QualityGateTest blieb rot — ohne
+      # dass am Code etwas falsch war. Der `ci`-Job hat den Schritt nicht und war deshalb gruen;
+      # genau diese Asymmetrie liess es wie ein Sonar-Problem aussehen.
+      - name: Stop postgres (cleanup on job-end)
+        if: always()
+        env:
+          PGPORT: ${{ inputs.postgres-port }}
+        run: |
+          docker rm -f "ci-postgres-${PGPORT}" 2>/dev/null || true
 
       # ENTFERNT am 02.08.2026 (Karte 401, Auftrag Daniel): die Pushover-Meldung bei rotem
       # Quality-Gate. Wortlaut: "sorge dafuer, dass ich diese sonarqube quality gate nachrichten
