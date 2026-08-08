@@ -43,9 +43,12 @@ if [ -n "${OWASP_DATA_DIR:-}" ]; then
   mkdir -p "$OWASP_DATA_DIR"
   EXTRA_ARGS+=("-DdataDirectory=${OWASP_DATA_DIR}")
 fi
-# Suppression-Datei nur mitgeben, wenn gesetzt (leerer Wert würde DC stören).
+# Suppression-Dateien nur mitgeben, wenn gesetzt (leerer Wert wuerde DC stoeren).
+# suppressionFileS (Plural, Karte 420): nimmt eine kommagetrennte Liste. Der Singular
+# haette nur die ERSTE Datei gelesen und die zweite still ignoriert -- der Build waere
+# rot geblieben, ohne dass auffaellt warum.
 if [ -n "${OWASP_SUPPRESSION:-}" ]; then
-  EXTRA_ARGS+=("-DsuppressionFile=${OWASP_SUPPRESSION}")
+  EXTRA_ARGS+=("-DsuppressionFiles=${OWASP_SUPPRESSION}")
 fi
 
 echo "== OWASP Dependency-Check ${DC_VERSION} für $(basename "$PROJECT_DIR") =="
