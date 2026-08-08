@@ -453,11 +453,21 @@ jobs:
           # (z.B. von VOR einer Suppression-Änderung) statt gar keinen (= Sonar-only).
           find . -path "*/target/dependency-check-report.*" -delete 2>/dev/null || true
           export OWASP_DATA_DIR="$HOME/.cache/owasp-dc-data"   # persistenter NVD-Cache auf dem Runner
-          # Projekt-lokale Suppression-Datei (dokumentierte False-Positives) automatisch verwenden.
-          if [ -f "$PWD/quality/owasp-suppressions.xml" ]; then
-            export OWASP_SUPPRESSION="$PWD/quality/owasp-suppressions.xml"
-            echo "OWASP-Suppression aktiv: $OWASP_SUPPRESSION"
+          # Suppression-Dateien (Karte 420): ZENTRAL aus plaintext-scripts fuer Befunde, die
+          # alle Repos gleichzeitig treffen -- PLUS die projekt-lokale fuer Sonderfaelle.
+          # Grund: Am 08.08.2026 standen alle sechs Repos wegen DESSELBEN CVE auf BREACHED.
+          # Sechs Eintraege sind sechs Gelegenheiten, einen zu vergessen -- und ein
+          # vergessener sieht aus wie ein echter Fund.
+          OWASP_SUPPRESSIONS=""
+          if [ -f ".plaintext-scripts/quality/owasp-suppressions-zentral.xml" ]; then
+            OWASP_SUPPRESSIONS=".plaintext-scripts/quality/owasp-suppressions-zentral.xml"
+            echo "OWASP-Suppression (zentral): $OWASP_SUPPRESSIONS"
           fi
+          if [ -f "$PWD/quality/owasp-suppressions.xml" ]; then
+            OWASP_SUPPRESSIONS="${OWASP_SUPPRESSIONS:+$OWASP_SUPPRESSIONS,}$PWD/quality/owasp-suppressions.xml"
+            echo "OWASP-Suppression (projekt-lokal): $PWD/quality/owasp-suppressions.xml"
+          fi
+          export OWASP_SUPPRESSION="$OWASP_SUPPRESSIONS"
           # ::error:: statt ::warning:: (Karte 420): Der Ausfall bedeutet, dass die CVE-Pruefung
           # dieser Woche NICHT stattgefunden hat und das Gate gleich darauf trotzdem "OK"
           # schreibt. Eine Warnung unter tausend Log-Zeilen hat das monatelang nicht sichtbar

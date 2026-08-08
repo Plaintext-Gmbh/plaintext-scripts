@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ZENTRALE OWASP-Suppressions fuer ALLE Repos (Karte 420, 08.08.2026).
+
+  WARUM ZENTRAL: Ein Befund, der alle sechs Anwendungen gleichzeitig trifft, musste bisher in
+  sechs Dateien einzeln eingetragen werden. Am 08.08.2026 standen deshalb alle sechs Repos
+  gleichzeitig auf BREACHED wegen desselben CVE. Sechs Eintraege bedeuten sechs Gelegenheiten,
+  einen zu vergessen — und ein vergessener Eintrag sieht aus wie ein echter Fund.
+  Projekt-eigene Faelle bleiben in quality/owasp-suppressions.xml des jeweiligen Repos.
+
+  REGEL FUER JEDEN EINTRAG (die Antwort dieser Karte auf "Umgang mit Funden ohne Fix"):
+
+    1. VERSIONS-GEPINNT (exakte @-Version im packageUrl). Zieht die Abhaengigkeit eine neue
+       Version, greift die Suppression NICHT mehr und der Fund wird neu bewertet.
+       Kein Dauer-Blindflug.
+    2. BEGRUENDUNG MIT BELEG, nicht "false positive". Woran ist die Nicht-Betroffenheit
+       gemessen worden?
+    3. ABLAUFDATUM im Notes-Feld (PRUEFEN-AB). Wer nach diesem Datum vorbeikommt, bewertet neu.
+    4. VOLLSTAENDIG. Traegt ein Schwester-Artefakt dieselbe CVE, gehoert es dazu — eine
+       Suppression, die nur die Haelfte trifft, sieht nach Kontrolle aus und ist keine
+       (Karte 389: tomcat-embed-core gedeckt, tomcat-embed-websocket nicht).
+-->
+<suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
+
+    <!--
+      CVE-2026-66299 — Uncontrolled Resource Consumption, CVSS 7.5.
+
+      NICHT BETROFFEN, gemessen statt angenommen. Die Schwachstelle steckt laut NVD in
+      Tomcats WebSocket-CHAT-BEISPIELANWENDUNG:
+
+        "Uncontrolled Resource Consumption vulnerability in Apache Tomcat's WebSocket chat
+         example. [...] Users who have followed the security guidance to remove the examples
+         web application are not affected by this issue."
+
+      Spring Boot mit eingebettetem Tomcat liefert die Examples-Webapp gar nicht mit.
+      Nachgesehen im laufenden PROD-Jar von plaintext-app am 08.08.2026:
+
+        unzip -l /app/app.jar | grep -iE "examples|chat"
+          -> 1 Treffer: BOOT-INF/classes/db/migration/V1784483469__drop_chat_tables.sql
+             (eine eigene Flyway-Migration, kein Tomcat-Beispiel)
+        Positivkontrolle: 3 tomcat-embed-*.jar sind vorhanden — der Suchausdruck greift.
+
+      KEIN FIX VERFUEGBAR: 11.0.24 ist der neueste Stand auf Maven Central (geprueft an
+      maven-metadata.xml). Die Suppression ist deshalb kein Aufschieben einer Reparatur,
+      sondern die Feststellung, dass es nichts zu reparieren gibt.
+
+      PRUEFEN-AB: 2026-10-01 — oder frueher, sobald Spring Boot eine neuere Tomcat-Version
+      pinnt; dann greift die Versions-Pinnung ohnehin nicht mehr.
+    -->
+    <suppress>
+        <notes><![CDATA[
+            CVE-2026-66299: betrifft nur Tomcats WebSocket-chat-EXAMPLE, das in einem
+            Spring-Boot-Fat-Jar nicht enthalten ist (am laufenden PROD-Jar nachgesehen).
+            Kein Fix verfuegbar, 11.0.24 ist der neueste Stand. PRUEFEN-AB: 2026-10-01.
+        ]]></notes>
+        <packageUrl regex="false">pkg:maven/org.apache.tomcat.embed/tomcat-embed-core@11.0.24</packageUrl>
+        <cve>CVE-2026-66299</cve>
+    </suppress>
+
+    <suppress>
+        <notes><![CDATA[
+            CVE-2026-66299, Schwester-Artefakt. Punkt 4 der Regel oben: Der OWASP-Scanner
+            ordnet dieselbe CVE beiden tomcat-embed-Artefakten zu. Ohne diesen Eintrag
+            bliebe die Haelfte des Befundes stehen und der Build weiterhin rot — genau der
+            Fehler aus Karte 389. PRUEFEN-AB: 2026-10-01.
+        ]]></notes>
+        <packageUrl regex="false">pkg:maven/org.apache.tomcat.embed/tomcat-embed-websocket@11.0.24</packageUrl>
+        <cve>CVE-2026-66299</cve>
+    </suppress>
+
+</suppressions>
