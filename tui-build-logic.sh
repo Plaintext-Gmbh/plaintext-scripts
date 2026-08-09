@@ -426,15 +426,45 @@ assert_rollback_safe() {
 switch_active() {
     local ENV_NAME="$1"
     local NEW_COLOR="$2"
+    local ZIEL_CONTAINER="${IMAGE_NAME}-${ENV_NAME}-${NEW_COLOR}"
 
     echo -e "${BLUE}Switching ${ENV_NAME} to ${NEW_COLOR}...${NC}"
 
+    # Karte 632: Ersatz für einen Schutz, der mit der Resolver-Umstellung wegfällt.
+    #
+    # Der `nginx -t` weiter unten wirkte bisher nebenbei als Rollback-Schutz: bei einem
+    # `upstream{}`-Block löst nginx den Zielnamen beim Test auf und bricht ab, wenn der Slot nicht
+    # läuft. Seit die Upstreams als Variable + `resolver` konfiguriert sind (Karte 379 für app,
+    # Karte 632 für guild/iot/schuetu/root/fwtool), findet beim Test keine Auflösung mehr statt.
+    # Gemessen am 09.08.2026 gegen einen gestoppten Slot:
+    #     upstream{}   -> "host not found in upstream ..."  / "test failed"
+    #     map+resolver -> "syntax is ok" / "test is successful"
+    # Ein Umschalten auf einen gestoppten Slot würde also stillschweigend gelingen und die
+    # Umgebung vom Netz nehmen -- genau der Fall, den der alte Test verhindert hat.
+    #
+    # Ersatz: vorher fragen, ob der Zielcontainer läuft. Das ist strenger als der alte Test, der
+    # nur die Namensauflösung prüfte und einen laufenden, aber toten Container durchgelassen hätte.
+    # Notausgang für einen erzwungenen Rollback: SWITCH_FORCE=true.
+    if [ "${SWITCH_FORCE:-false}" != "true" ]; then
+        if ! ssh ${DEPLOY_SERVER} "sudo docker inspect -f '{{.State.Running}}' ${ZIEL_CONTAINER} 2>/dev/null" | grep -qx "true"; then
+            echo -e "${RED}✗ Zielcontainer ${ZIEL_CONTAINER} läuft nicht - Umschalten abgebrochen.${NC}"
+            echo -e "${YELLOW}  Der Traffic bleibt, wo er ist. Slot zuerst starten, dann erneut umschalten.${NC}"
+            echo -e "${YELLOW}  (Bewusst erzwingen: SWITCH_FORCE=true switch_active ${ENV_NAME} ${NEW_COLOR})${NC}"
+            return 1
+        fi
+    else
+        echo -e "${YELLOW}⚠ SWITCH_FORCE=true - Slot-Prüfung übersprungen.${NC}"
+    fi
+
     # Defensiv: vorherige upstream-Config sichern, neue einspielen und mit `nginx -t` PRÜFEN, BEVOR
-    # Marker gesetzt + reloaded wird. Zeigt der neue Upstream auf einen nicht (mehr) existierenden
-    # Container (z. B. Rollback auf einen bereits gestoppten Slot), schlägt `nginx -t` fehl ->
-    # wir stellen die vorherige Config wieder her und ändern weder Marker noch laufende nginx-Config.
-    # So bleibt nie eine kaputte conf liegen (die sonst den nächsten Reload/Reboot des GESAMTEN
-    # nginx inkl. PROD verhindern würde).
+    # Marker gesetzt + reloaded wird. Ist die neue Config syntaktisch kaputt, stellen wir die
+    # vorherige wieder her und ändern weder Marker noch laufende nginx-Config. So bleibt nie eine
+    # kaputte conf liegen (die sonst den nächsten Reload/Reboot des GESAMTEN nginx inkl. PROD
+    # verhindern würde).
+    #
+    # NICHT mehr abgedeckt (Karte 632): ein Ziel-Slot, der nicht läuft. Seit der Umstellung auf
+    # `resolver` + Variable löst nginx beim Test nicht mehr auf -- dafür ist die Slot-Prüfung oben
+    # zuständig, nicht dieser `nginx -t`.
     ssh ${DEPLOY_SERVER} "
         cp ${BG_NGINX_CONF_DIR}/${ENV_NAME}-upstream.conf /tmp/${ENV_NAME}-upstream.conf.bak 2>/dev/null || true
         cp ${BG_NGINX_TEMPLATES_DIR}/${ENV_NAME}-${NEW_COLOR}.conf ${BG_NGINX_CONF_DIR}/${ENV_NAME}-upstream.conf || exit 1
