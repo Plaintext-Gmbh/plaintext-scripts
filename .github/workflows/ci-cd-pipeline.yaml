@@ -333,7 +333,7 @@ jobs:
         if: inputs.quality-analysis
         uses: actions/checkout@v7
         with:
-          repository: daniel-marthaler/plaintext-scripts
+          repository: Plaintext-Gmbh/plaintext-scripts
           ref: ${{ inputs.scripts-ref }}
           path: .plaintext-scripts
           token: ${{ secrets.MVN_DEPLOY_TOKEN }}
@@ -663,7 +663,7 @@ jobs:
       - name: Checkout plaintext-scripts
         uses: actions/checkout@v7
         with:
-          repository: daniel-marthaler/plaintext-scripts
+          repository: Plaintext-Gmbh/plaintext-scripts
           ref: ${{ inputs.scripts-ref }}
           path: plaintext-scripts
           token: ${{ secrets.MVN_DEPLOY_TOKEN }}
@@ -680,7 +680,7 @@ jobs:
       - name: Checkout plaintext-config
         uses: actions/checkout@v7
         with:
-          repository: daniel-marthaler/plaintext-config
+          repository: Plaintext-Gmbh/plaintext-config
           path: plaintext-config
           token: ${{ secrets.MVN_DEPLOY_TOKEN }}
 
