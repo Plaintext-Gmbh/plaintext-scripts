@@ -41,7 +41,7 @@ cd "$SCRIPT_DIR"
 
 SCRIPTS_DIR="$HOME/.plaintext-scripts"
 if [ ! -d "$SCRIPTS_DIR/.git" ]; then
-    git clone git@github.com:daniel-marthaler/plaintext-scripts.git "$SCRIPTS_DIR"
+    git clone git@github.com:Plaintext-Gmbh/plaintext-scripts.git "$SCRIPTS_DIR"
 fi
 source "$SCRIPTS_DIR/tui-common.sh"
 source "$SCRIPTS_DIR/tui-build-logic.sh"
@@ -149,7 +149,7 @@ on:
 
 jobs:
   deploy:
-    uses: daniel-marthaler/plaintext-scripts/.github/workflows/maven-build-deploy.yaml@master
+    uses: Plaintext-Gmbh/plaintext-scripts/.github/workflows/maven-build-deploy.yaml@master
     with:
       build-command: ${{ inputs.build-command }}
       build-config: |
