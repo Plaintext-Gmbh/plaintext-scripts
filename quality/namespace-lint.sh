@@ -61,7 +61,10 @@ treffer_suchen() {
             printf '%s' "$inhalt" | grep -qE '^[[:space:]]*(#|<!--|//)' && continue
             printf '%s:%s:%s\n' "${datei#"$wurzel"/}" "$nr" "$inhalt"
             gefunden=1
-        done < <(grep -nF "$MUSTER" "$datei" 2>/dev/null)
+        # --binary-files=without-match: grep meldet bei Binaerdateien sonst "Binary file matches"
+        # OHNE Zeilennummer — die Ausgabe waere dann nicht mehr datei:zeile:inhalt und der
+        # Ausnahmen-Filter liefe ins Leere.
+        done < <(grep -nF --binary-files=without-match "$MUSTER" "$datei" 2>/dev/null)
     done < <(dateien_finden "$wurzel")
     return $gefunden
 }
