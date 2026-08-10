@@ -13,6 +13,7 @@ Zentrale, projektübergreifende Code-Qualitäts-Skripte für die Plaintext-Sprin
 | `owasp-dependency-check.sh` | CVE-Scan der Maven-Abhängigkeiten (NVD) | ja |
 | `spotbugs.sh` | Statische Bytecode-Analyse + FindSecBugs (Security) | ja |
 | `pushover.sh` | CI-Benachrichtigung (env: `PUSHOVER_APP_TOKEN`/`PUSHOVER_USER_KEY`) | nein |
+| `namespace-lint.sh` | verbietet den alten Namespace `daniel-marthaler` in Workflows/POMs/`renovate.json`/build-Skripten | nein |
 
 > Die Linux-Box hat **kein lokales Maven** — die mvn-basierten Skripte laufen in der CI
 > oder auf einer Dev-Maschine. Die Python-Skripte ziehen ihre Daten über REST und laufen überall.
@@ -135,6 +136,47 @@ quality/spotbugs.sh <projekt-dir> [Low|Medium|High]   # Default: Medium
 SpotBugs (Effort Max) + FindSecBugs-Plugin über den kompilierten Bytecode. Sinnvoll vor
 allem dort, wo **CodeQL nicht aktiv** ist (aktuell alle außer root). Reports je Modul unter
 `target/spotbugsXml.xml`.
+
+## namespace-lint.sh
+
+```bash
+quality/namespace-lint.sh [wurzelverzeichnis]    # Default: .   Exit 1 = Verstoss
+```
+
+Verbietet den alten, persönlichen Namespace `daniel-marthaler` in allem, was **funktional
+wirkt**: `.github/workflows/*.y*ml`, jedes `pom.xml`, `renovate.json`, `build`/`build.sh`.
+Doku bleibt bewusst aussen vor — dort stehen die historischen Erklärungen des Org-Umzugs, und
+ein Lint, der die anmeckert, wird abgeschaltet statt befolgt.
+
+**Warum es das braucht** (Karte 600/606): Bis zum 10.08.2026 zog die zentrale Pipeline ihre
+Build-Config aus `daniel-marthaler/plaintext-config`, fünf POMs ihre Artefakte aus
+`daniel-marthaler/plaintext-mvn`. Es funktionierte — über den Transfer-Redirect, den GitHub
+nach einem Repo-Umzug hält. Ein Redirect ist eine Bequemlichkeit, keine Zusage: er fällt weg,
+sobald der alte Name neu besetzt wird. GitHub bietet dagegen **keine** Schranke — die
+Actions-Allowlist der Organisation greift nur für `uses:`, nicht für `actions/checkout` mit
+`repository:`, nicht für Maven-URLs, nicht für `git clone`.
+
+**Zwei bewusste Ausnahmen:** `<username>daniel-marthaler</username>` (Auth-Feld der
+settings.xml gegen GitHub Packages, kein Namespace) und reine Kommentarzeilen (`#`, `<!--`,
+`//`) — etwa `plaintext-schuetu/.github/workflows/ci-cd.yaml:90`, wo die alte Referenz
+historisch **erklärt** wird. Eine Zeile mit funktionalem Inhalt *und* angehängtem Kommentar
+bleibt ein Verstoss.
+
+**Der Check testet sich selbst.** Vor jedem Lauf legt er je einen Verstoss pro geprüftem
+Dateityp an und bricht ab, wenn er sie *nicht* findet — plus die Gegenprobe, dass die beiden
+Ausnahmen grün bleiben. Ohne das wäre ein kaputtes `find`/`grep` von einem sauberen Repo nicht
+zu unterscheiden: es meldete grün, und der Fehler sähe aus wie Ordnung. Genau dieser
+Fehlerklasse verdankt die Leitplanke ihre Existenz (das Dashboard aus Karte 606 meldete zwei
+Wochen lang „success" und mass dabei den falschen Account).
+
+**Wo er läuft:** als Job `namespace-lint` in `ci-cd-pipeline.yaml` (damit in jedem
+Consumer-Repo, ohne dort etwas zu ändern) und als eigener Workflow `namespace-lint.yaml` in
+diesem Repo. Er hängt an keinem anderen Job und blockiert keinen Deploy — er färbt den Lauf
+rot, und zwar auf dem PR, bevor gemergt wird.
+
+**Nicht abgedeckt:** Repos, die die zentrale Pipeline nicht aufrufen (`plaintext-config`,
+`plaintext-all`, `plaintext-website`, `plaintext-dockercompose`). Dort ist heute keine
+Referenz mehr, aber auch keine Leitplanke — `namespace-lint.yaml` lässt sich dorthin kopieren.
 
 ## Versionen
 
