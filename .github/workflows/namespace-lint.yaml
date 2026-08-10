@@ -1,0 +1,30 @@
+# ═══════════════════════════════════════════════════════════════
+#  namespace-lint — dieses Repo prueft sich selbst
+#
+#  Die Consumer-Repos (app, guild, schuetu, iot, fwtool, root) bekommen den Check ueber den
+#  Job `namespace-lint` in ci-cd-pipeline.yaml. plaintext-scripts ruft die eigene Pipeline
+#  aber nicht auf — und genau hier stand der Originalfund aus Karte 600 (drei
+#  `actions/checkout` auf `daniel-marthaler/...`). Ohne diesen Workflow waere ausgerechnet
+#  das Repo ungeschuetzt, in dem der Fehler passiert ist.
+#
+#  Die Pruefung selbst steht in quality/namespace-lint.sh (inkl. Selbsttest) — eine
+#  Implementierung fuer beide Aufrufwege, nicht zwei, die auseinanderlaufen.
+# ═══════════════════════════════════════════════════════════════
+name: namespace-lint
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auf den alten Namespace pruefen
+        run: ./quality/namespace-lint.sh .

@@ -123,6 +123,45 @@ env:
   JAVA_TOOL_OPTIONS: "-XX:MaxRAM=4g -XX:ActiveProcessorCount=2"
 
 jobs:
+  # ── Namespace-Leitplanke (Karte 600/606/642) ───────────────────
+  # Bis zum 10.08.2026 zog genau DIESE Pipeline ihre Build-Config aus
+  # `daniel-marthaler/plaintext-config` und fuenf POMs ihre Java-Artefakte aus
+  # `daniel-marthaler/plaintext-mvn`. Es funktionierte — ueber den Transfer-Redirect, den
+  # GitHub nach einem Repo-Umzug haelt. Der faellt weg, sobald der alte Name neu besetzt
+  # wird; dann liefert ein fremdes Repo Build-Config, Skripte und Maven-Artefakte.
+  #
+  # Warum ein eigener Job und keine GitHub-Einstellung: die Org-Actions-Allowlist greift nur
+  # fuer `uses:`. Fuer `actions/checkout` mit `repository:`, fuer Maven-URLs und fuer
+  # `git clone` im build-Skript gibt es keine GitHub-seitige Schranke.
+  #
+  # Der Job haengt bewusst an KEINEM anderen und blockiert nichts: er faerbt den Lauf rot
+  # (auf dem PR sichtbar, bevor gemergt wird), haelt aber keinen Deploy auf. Kosten:
+  # zwei Checkouts und ein grep.
+  namespace-lint:
+    name: Namespace-Lint
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Projekt
+        uses: actions/checkout@v7
+        with:
+          path: projekt
+
+      - name: Checkout plaintext-scripts (Pruefskript)
+        uses: actions/checkout@v7
+        with:
+          repository: Plaintext-Gmbh/plaintext-scripts
+          ref: ${{ inputs.scripts-ref }}
+          path: werkzeuge
+          token: ${{ secrets.MVN_DEPLOY_TOKEN }}
+
+      - name: Auf den alten Namespace pruefen
+        # Das Skript testet sich zuerst selbst (legt Verstoesse an und bricht ab, wenn es sie
+        # NICHT findet) — sonst waere ein kaputter Check von einem sauberen Repo nicht zu
+        # unterscheiden.
+        run: ./werkzeuge/quality/namespace-lint.sh projekt
+
   # ── Build + Test + Coverage ────────────────────────────────────
   ci:
     name: Build & Test
