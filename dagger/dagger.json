@@ -1,7 +1,0 @@
-{
-  "name": "plaintext-build",
-  "engineVersion": "v0.20.6",
-  "sdk": {
-    "source": "java"
-  }
-}
