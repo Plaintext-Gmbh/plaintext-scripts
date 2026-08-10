@@ -58,9 +58,11 @@ Sauberer Ansatz (CI baut einmal MIT Tests, `./build` baut dann nicht nochmal):
 **Gemeinsame Fälle nach M1 (je EIN Build):** PR→ci-only (nur ci/test); Branch-Push→snapshot-dev (nur
 deploy, mit Tests); master→release-all (nur deploy, mit Tests+Release+dev+prod). Schedule→ci(sonar)+deploy.
 
-**Repo-Hinweis:** App-`ci-cd.yaml` nutzt `uses: Plaintext-Gmbh/plaintext-scripts@master`, der
-deploy-Job klont aber `daniel-marthaler/plaintext-scripts` für `./build`. VOR Umsetzung klären, welches
-Remote/Fork maßgeblich ist (beide ggf. synchron halten). Lokal: `/home/mad/codeplain/plaintext-scripts`.
+**Repo-Hinweis:** Erledigt mit Karte 606 (10.08.2026) — die Frage ist beantwortet, maßgeblich ist
+**`Plaintext-Gmbh`**. Der deploy-Job klonte bis dahin `daniel-marthaler/plaintext-scripts`; das
+funktionierte nur über GitHubs Repo-Redirect und zog die Deploy-Skripte aus einem Namespace, den die
+Organisation nicht kontrolliert. Es gibt kein zweites Remote und keinen Fork synchron zu halten.
+Lokal: `/home/mad/codeplain/plaintext-scripts`.
 
 **Validierung (ohne andere Apps zu brechen):** plaintext-scripts-Branch `feat/build-once`; in einem
 plaintext-app-Testbranch `ci-cd.yaml` temporär auf `@feat/build-once` zeigen; Push (→ snapshot-dev) →
