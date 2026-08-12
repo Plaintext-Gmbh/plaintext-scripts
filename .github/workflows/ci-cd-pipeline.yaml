@@ -169,24 +169,6 @@ jobs:
           path: werkzeuge
           token: ${{ secrets.MVN_DEPLOY_TOKEN }}
 
-      # ── TEMPORÄR, Karte 717 — wird nach der Umstellung aller Repos wieder entfernt ──────
-      # Misst, ob ein Secret im aufgerufenen Workflow ankommt, das die Pipeline gar nicht
-      # braucht. Mit `secrets: inherit` beim Aufrufer ist das der Fall (erwartet: vorhanden=true),
-      # mit einer expliziten Liste nicht mehr (erwartet: false). Ohne diese Vorher/Nachher-Probe
-      # waere die Umstellung eine Behauptung: Man sieht einem gruenen Lauf nicht an, welche
-      # Secrets er NICHT bekommen hat.
-      #
-      # Es wird ausschliesslich der Vergleich `!= ''` ausgegeben, nie ein Wert — und GitHub
-      # maskiert Secretwerte in Logs ohnehin.
-      - name: 'Karte 717: reicht der Aufrufer nicht benoetigte Secrets durch?'
-        run: |
-          echo "AUTOBUMP_TOKEN vorhanden=${{ secrets.AUTOBUMP_TOKEN != '' }}"
-          # Die Gegenrichtung: kommt ein Secret an, das die Pipeline BRAUCHT und das erst seit
-          # #62 deklariert ist? Ohne diese Zeile bliebe unbelegt, ob die explizite Liste die
-          # noetigen Werte wirklich durchreicht -- der Maven-Deploy selbst taugt dafuer nicht:
-          # guild setzt `maven.deploy.skip`, und Abhaengigkeiten kommen aus dem ~/.m2-Cache.
-          echo "MAVEN_NAS_TOKEN vorhanden=${{ secrets.MAVEN_NAS_TOKEN != '' }}"
-
       - name: Auf den alten Namespace pruefen
         # Das Skript testet sich zuerst selbst (legt Verstoesse an und bricht ab, wenn es sie
         # NICHT findet) — sonst waere ein kaputter Check von einem sauberen Repo nicht zu
