@@ -94,6 +94,19 @@ on:
         required: false
       PUSHOVER_USER_KEY:
         required: false
+      # Karte 717: Beide werden seit jeher VERWENDET (MAVEN_NAS_TOKEN in der settings.xml des
+      # deploy-Jobs, NVD_API_KEY in der OWASP-Pruefung), waren aber nie deklariert. Dass das
+      # funktioniert, ist selbst der Beleg dafuer, dass `secrets: inherit` mehr durchreicht als
+      # diese Liste. Wer in den aufrufenden Repos `inherit` durch eine explizite Liste ersetzt,
+      # ohne die beiden hier zu deklarieren, bricht den Maven-Deploy und die OWASP-Pruefung —
+      # und zwar erst zur Laufzeit, nicht beim Lint.
+      #
+      # `required: false`, damit kein Repo rot wird, das eines der beiden nicht besitzt (z. B.
+      # kennt plaintext-guild kein NVD_API_KEY).
+      MAVEN_NAS_TOKEN:
+        required: false
+      NVD_API_KEY:
+        required: false
 
 # ── Ressourcen-Leitplanke fuer die self-hosted NAS-Runner (Karte 351) ──────────
 # Die NAS-Box hat 6 Kerne / 62 GB, davon im Leerlauf nur ~16 GB frei (qemu-VMs +
@@ -155,6 +168,19 @@ jobs:
           ref: ${{ inputs.scripts-ref }}
           path: werkzeuge
           token: ${{ secrets.MVN_DEPLOY_TOKEN }}
+
+      # ── TEMPORÄR, Karte 717 — wird nach der Umstellung aller Repos wieder entfernt ──────
+      # Misst, ob ein Secret im aufgerufenen Workflow ankommt, das die Pipeline gar nicht
+      # braucht. Mit `secrets: inherit` beim Aufrufer ist das der Fall (erwartet: vorhanden=true),
+      # mit einer expliziten Liste nicht mehr (erwartet: false). Ohne diese Vorher/Nachher-Probe
+      # waere die Umstellung eine Behauptung: Man sieht einem gruenen Lauf nicht an, welche
+      # Secrets er NICHT bekommen hat.
+      #
+      # Es wird ausschliesslich der Vergleich `!= ''` ausgegeben, nie ein Wert — und GitHub
+      # maskiert Secretwerte in Logs ohnehin.
+      - name: 'Karte 717: reicht der Aufrufer nicht benoetigte Secrets durch?'
+        run: |
+          echo "AUTOBUMP_TOKEN vorhanden=${{ secrets.AUTOBUMP_TOKEN != '' }}"
 
       - name: Auf den alten Namespace pruefen
         # Das Skript testet sich zuerst selbst (legt Verstoesse an und bricht ab, wenn es sie
