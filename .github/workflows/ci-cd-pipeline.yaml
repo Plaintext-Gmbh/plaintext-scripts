@@ -7,6 +7,9 @@
 #   snapshot-dev – Snapshot build + deploy to DEV
 #   release-dev  – Release + deploy to DEV
 #   release-all  – Release + deploy to DEV + deploy to PROD
+#   release-only – Release (Maven-Artefakt in den Reposilite), KEIN Container-Deploy
+#                  (Karte 776: Projekt stillgelegt, Bibliothek lebt weiter)
+#   prod-single  – Build + Recreate der EINEN PROD-Instanz (kein blue-green, kein DEV)
 
 name: Build And Deploy Pipeline
 
@@ -14,7 +17,7 @@ on:
   workflow_call:
     inputs:
       deploy-target:
-        description: 'Deployment target: ci-only | snapshot-dev | release-dev | release-all'
+        description: 'Deployment target: ci-only | snapshot-dev | release-dev | release-all | release-only | prod-single'
         required: true
         type: string
       project-name:
@@ -860,6 +863,17 @@ jobs:
               echo "=== Release + Deploy DEV + PROD ==="
               ./build 56
               ;;
+            release-only)
+              # Karte 776: fuer ein Projekt, dessen CONTAINER stillgelegt ist, dessen
+              # MAVEN-ARTEFAKT aber weiterlebt (plaintext-root ist der Parent-POM von app,
+              # guild, schuetu und iot). `./build release` ohne Deploy-Argument macht
+              # `mvn clean deploy` in den Reposilite, Version-Bump, Tag und Push — die
+              # Aufrufe von deploy_to_dev/deploy_to_prod bleiben aus, es entsteht also kein
+              # Container. Ohne dieses Ziel gaebe es nur die Wahl zwischen "gar kein
+              # Release" (ci-only) und "Release samt Container-Deploy" (release-all).
+              echo "=== Release (Maven-Artefakt) OHNE Container-Deploy ==="
+              ./build release
+              ;;
             prod-single)
               echo "=== Single PROD instance (kein blue-green, kein DEV) ==="
               ./build build prod-single
@@ -913,7 +927,10 @@ jobs:
   verify-dev:
     name: Verify DEV
     needs: deploy
-    if: inputs.deploy-target != 'ci-only' && inputs.dev-url != ''
+    # Karte 776: `release-only` deployt bewusst keinen Container — es gibt dann auch kein DEV
+    # zu verifizieren. Ohne diesen Ausschluss wuerde der Verify-Schritt eine stillgelegte
+    # Umgebung anpingen und den ansonsten gelungenen Release rot faerben.
+    if: inputs.deploy-target != 'ci-only' && inputs.deploy-target != 'release-only' && inputs.dev-url != ''
     runs-on: ${{ fromJSON(inputs.runner) }}
 
     steps:
