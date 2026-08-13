@@ -212,8 +212,11 @@ jobs:
           DB_NAME: ${{ inputs.database-name }}
         run: |
           # Unique container name pro Job, aber stable für cleanup
+          # `rm -f -v`: postgres:18-alpine deklariert VOLUME /var/lib/postgresql, jeder Start legt
+          # also ein anonymes Volume an. Ohne `-v` bleibt es als herrenlose Kopie der Test-DB auf
+          # dem NAS liegen — so sind bis zum 13.08.2026 rund 1760 Stueck aufgelaufen (Karte 791).
           CTR="ci-postgres-${PGPORT}"
-          docker rm -f "$CTR" 2>/dev/null || true
+          docker rm -f -v "$CTR" 2>/dev/null || true
           docker run -d --name "$CTR" --network host \
             -e POSTGRES_DB="$DB_NAME" \
             -e POSTGRES_USER=plaintext \
@@ -344,8 +347,11 @@ jobs:
           DB_NAME: ${{ inputs.database-name }}
         run: |
           # Unique container name pro Job, aber stable für cleanup
+          # `rm -f -v`: postgres:18-alpine deklariert VOLUME /var/lib/postgresql, jeder Start legt
+          # also ein anonymes Volume an. Ohne `-v` bleibt es als herrenlose Kopie der Test-DB auf
+          # dem NAS liegen — so sind bis zum 13.08.2026 rund 1760 Stueck aufgelaufen (Karte 791).
           CTR="ci-postgres-${PGPORT}"
-          docker rm -f "$CTR" 2>/dev/null || true
+          docker rm -f -v "$CTR" 2>/dev/null || true
           docker run -d --name "$CTR" --network host \
             -e POSTGRES_DB="$DB_NAME" \
             -e POSTGRES_USER=plaintext \
@@ -640,7 +646,7 @@ jobs:
         env:
           PGPORT: ${{ inputs.postgres-port }}
         run: |
-          docker rm -f "ci-postgres-${PGPORT}" 2>/dev/null || true
+          docker rm -f -v "ci-postgres-${PGPORT}" 2>/dev/null || true
 
       # ENTFERNT am 02.08.2026 (Karte 401, Auftrag Daniel): die Pushover-Meldung bei rotem
       # Quality-Gate. Wortlaut: "sorge dafuer, dass ich diese sonarqube quality gate nachrichten
@@ -683,7 +689,7 @@ jobs:
           DEPLOY_PGPORT=$((PGPORT + 100))
           echo "DEPLOY_PGPORT=$DEPLOY_PGPORT" >> "$GITHUB_ENV"
           CTR="ci-postgres-deploy-${DEPLOY_PGPORT}"
-          docker rm -f "$CTR" 2>/dev/null || true
+          docker rm -f -v "$CTR" 2>/dev/null || true
           docker run -d --name "$CTR" --network host \
             -e POSTGRES_DB="$DB_NAME" -e POSTGRES_USER=plaintext -e POSTGRES_PASSWORD=plaintext \
             --health-cmd "pg_isready -U plaintext -p $DEPLOY_PGPORT" \
@@ -886,7 +892,7 @@ jobs:
 
       - name: Stop postgres (deploy cleanup)
         if: always()
-        run: docker rm -f "ci-postgres-deploy-${DEPLOY_PGPORT}" 2>/dev/null || true
+        run: docker rm -f -v "ci-postgres-deploy-${DEPLOY_PGPORT}" 2>/dev/null || true
 
       - name: Secrets vom Runner entfernen (cleanup on job-end)
         if: always()
