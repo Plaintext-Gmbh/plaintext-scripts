@@ -217,6 +217,11 @@ jobs:
           # dem NAS liegen — so sind bis zum 13.08.2026 rund 1760 Stueck aufgelaufen (Karte 791).
           CTR="ci-postgres-${PGPORT}"
           docker rm -f -v "$CTR" 2>/dev/null || true
+          # WEGWERF-TESTDATENBANK — kein Geheimnis (Karte 812). Der Container existiert nur
+          # fuer die Dauer dieses Laufs und wird oben mit `rm -f -v` wieder entfernt; er ist
+          # von aussen nicht erreichbar und traegt keine echten Daten. Ein starkes Passwort
+          # waere hier kein Gewinn, sondern ein starkes Passwort im Repo. Der Kommentar steht
+          # da, damit die naechste Geheimnissuche diese Zeilen nicht erneut untersucht.
           docker run -d --name "$CTR" --network host \
             -e POSTGRES_DB="$DB_NAME" \
             -e POSTGRES_USER=plaintext \
@@ -352,6 +357,11 @@ jobs:
           # dem NAS liegen — so sind bis zum 13.08.2026 rund 1760 Stueck aufgelaufen (Karte 791).
           CTR="ci-postgres-${PGPORT}"
           docker rm -f -v "$CTR" 2>/dev/null || true
+          # WEGWERF-TESTDATENBANK — kein Geheimnis (Karte 812). Der Container existiert nur
+          # fuer die Dauer dieses Laufs und wird oben mit `rm -f -v` wieder entfernt; er ist
+          # von aussen nicht erreichbar und traegt keine echten Daten. Ein starkes Passwort
+          # waere hier kein Gewinn, sondern ein starkes Passwort im Repo. Der Kommentar steht
+          # da, damit die naechste Geheimnissuche diese Zeilen nicht erneut untersucht.
           docker run -d --name "$CTR" --network host \
             -e POSTGRES_DB="$DB_NAME" \
             -e POSTGRES_USER=plaintext \
@@ -690,6 +700,11 @@ jobs:
           echo "DEPLOY_PGPORT=$DEPLOY_PGPORT" >> "$GITHUB_ENV"
           CTR="ci-postgres-deploy-${DEPLOY_PGPORT}"
           docker rm -f -v "$CTR" 2>/dev/null || true
+          # WEGWERF-TESTDATENBANK — kein Geheimnis (Karte 812). Der Container existiert nur
+          # fuer die Dauer dieses Laufs und wird oben mit `rm -f -v` wieder entfernt; er ist
+          # von aussen nicht erreichbar und traegt keine echten Daten. Ein starkes Passwort
+          # waere hier kein Gewinn, sondern ein starkes Passwort im Repo. Der Kommentar steht
+          # da, damit die naechste Geheimnissuche diese Zeilen nicht erneut untersucht.
           docker run -d --name "$CTR" --network host \
             -e POSTGRES_DB="$DB_NAME" -e POSTGRES_USER=plaintext -e POSTGRES_PASSWORD=plaintext \
             --health-cmd "pg_isready -U plaintext -p $DEPLOY_PGPORT" \
