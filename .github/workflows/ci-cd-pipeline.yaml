@@ -547,6 +547,37 @@ jobs:
           bash .plaintext-scripts/quality/spotbugs.sh "$PWD" Medium \
             || echo "::error::SpotBugs NICHT gelaufen — keine Bytecode-/FindSecBugs-Analyse in diesem Lauf."
 
+      # Karte 896: Der Ausfall des CVE-Scans war UNSICHTBAR, und zwar dreifach gesichert:
+      #   1. `continue-on-error: true` am OWASP-Schritt -> er endet auf "success",
+      #   2. das `|| echo "::error::"` im run-Block laeuft bei einem TIMEOUT nicht mehr,
+      #   3. `if-no-files-found: ignore` am Artifact-Upload schweigt ebenfalls.
+      # Ergebnis: kein Report, und quality-gate.py wertet das ausdruecklich als "kein Breach"
+      # -> "Quality-Gate: OK (cve>=7.0=None)". Von aussen nicht von "keine CVEs" zu
+      # unterscheiden. Gemessen: am 17.08. endeten ALLE SECHS Repos nach genau 90 Minuten mit
+      # `cancelled`, und laut Code-Kommentar oben ist der Scan seit mindestens dem 03.08. nie
+      # durchgelaufen.
+      #
+      # Dieser Schritt sagt es. `if: always()` ist noetig, weil der Vorgaenger per Timeout
+      # abgebrochen sein kann; die Position hier im File bestimmt die Reihenfolge, nicht das
+      # always() selbst.
+      - name: CVE-Report vorhanden?
+        if: always() && inputs.quality-analysis
+        run: |
+          if find . -path "*/target/dependency-check-report.json" 2>/dev/null | grep -q .; then
+            echo "CVE-Report vorhanden."
+          else
+            echo "::error title=CVE-Scan ohne Ergebnis::OWASP-Dependency-Check hat KEINEN Report erzeugt. Das Quality-Gate bewertet gleich darauf nur Sonar (cve.high.count=n/a) — GRUEN heisst in diesem Lauf NICHT 'keine CVEs', sondern 'nicht gemessen'. Ursache pruefen (Karte 896: NVD_API_KEY fehlt, Download laeuft ins Timeout)."
+            {
+              echo "### CVE-Scan ohne Ergebnis"
+              echo ""
+              echo "Es wurde **kein** \`dependency-check-report.json\` erzeugt. Das Quality-Gate"
+              echo "bewertet in diesem Lauf **nur Sonar**; \`cve>=7.0=None\` bedeutet hier"
+              echo "**nicht gemessen**, nicht **keine CVEs**."
+              echo ""
+              echo "Siehe Karte 896 — fehlender \`NVD_API_KEY\`, der NVD-Download laeuft ins Timeout."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       # Report als Artifact sichern (Runner-Workspace ist ephemer; ohne Artifact ist
       # eine Nachanalyse der gemeldeten CVEs unmöglich).
       - name: OWASP-Report als Artifact
