@@ -328,7 +328,13 @@ jobs:
     # und ein hängender Job zählt als „Build läuft" und blockiert jede Automatik, die vor einem
     # Merge auf ein freies Fenster wartet (Karte 365: fwtool-Lauf 30619851285 blockierte den
     # Merge von PR #4 über 25 Durchläufe und musste von Hand abgebrochen werden).
-    timeout-minutes: 90
+    # Karte 896: 150, nicht 90 — das JOB-Timeout muss ueber dem des OWASP-Schritts (120) liegen.
+    # Am 17.08.2026 standen beide auf 90: der Job startete 05:03:25Z, der OWASP-Schritt 05:06:55Z,
+    # also griff das Job-Limit 3,5 Minuten VOR dem Schritt-Limit. Der Job endete auf `cancelled`,
+    # `continue-on-error` am Schritt kam nie zum Tragen und die dort vorgesehene ::error::-Meldung
+    # lief nicht. Deshalb hat der Timeout-Fix aus Karte 420 nie gewirkt: gemessen wurde in allen
+    # fuenf Laeufen des 17.08. genau 90:19 bis 90:44 Minuten — fuenfmal das Job-Limit, keine Laufzeit.
+    timeout-minutes: 150
     # Gleiche Gruppe wie `ci`: dieser Job startet denselben Container `ci-postgres-<port>`.
     # Innerhalb eines Laufs ist das unkritisch (needs: ci), zwischen zwei Laeufen nicht.
     concurrency:
@@ -508,7 +514,15 @@ jobs:
       - name: OWASP-CVE
         if: inputs.quality-analysis
         continue-on-error: true
-        timeout-minutes: 90
+        # Karte 896: 120, nicht 90 — ohne NVD_API_KEY braucht allein der NVD-Download rund 96
+        # Minuten (gemessen 17.08.: 84 Minuten fuer 330.000 von 378.426 Eintraegen, dann Abbruch
+        # bei 87 %). Mit 90 stirbt der Lauf JEDES Mal kurz vor dem Ziel, der Cache in
+        # $HOME/.cache/owasp-dc-data bleibt unvollstaendig (gemessen: 411-722 MB, auf jedem der
+        # vier Runner anders weit) und der Zustand erhaelt sich selbst. Mit 120 wird er einmal
+        # fertig; danach laeuft der Scan inkrementell in Minuten.
+        # SOBALD NVD_API_KEY gesetzt ist (Karte 897), gehoert dieser Wert zurueck auf ~30 —
+        # mit Key ist das Rate-Limit zehnmal hoeher und 120 Minuten waeren nur noch ein Hoschlaf.
+        timeout-minutes: 120
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
