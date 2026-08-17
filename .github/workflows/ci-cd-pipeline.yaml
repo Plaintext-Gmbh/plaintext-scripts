@@ -211,7 +211,14 @@ jobs:
           PGPORT: ${{ inputs.postgres-port }}
           DB_NAME: ${{ inputs.database-name }}
         run: |
-          # Unique container name pro Job, aber stable für cleanup
+          # Der Containername ist NICHT pro Job eindeutig, sondern pro PROJEKT fest:
+          # `ci-postgres-${PGPORT}` mit einem festen Port je Repo. Hier stand bis zum
+          # 17.08.2026 "Unique container name pro Job" — das Gegenteil, und es ist die
+          # gefaehrlichere Halbwahrheit, weil die Zeile darunter mit `docker rm -f` beginnt:
+          # zwei Laeufe desselben Projekts loeschen einander den laufenden Container samt
+          # Test-DB. Genau deshalb serialisiert die concurrency-Gruppe `testdb-<project>`
+          # oben — sie ist kein Beiwerk, sondern der einzige Schutz davor (Karte 905/906).
+          # Und es gibt KEINE Belegtpruefung des Ports: der Schritt macht rm -f, dann run.
           # `rm -f -v`: postgres:18-alpine deklariert VOLUME /var/lib/postgresql, jeder Start legt
           # also ein anonymes Volume an. Ohne `-v` bleibt es als herrenlose Kopie der Test-DB auf
           # dem NAS liegen — so sind bis zum 13.08.2026 rund 1760 Stueck aufgelaufen (Karte 791).
@@ -372,7 +379,14 @@ jobs:
           PGPORT: ${{ inputs.postgres-port }}
           DB_NAME: ${{ inputs.database-name }}
         run: |
-          # Unique container name pro Job, aber stable für cleanup
+          # Der Containername ist NICHT pro Job eindeutig, sondern pro PROJEKT fest:
+          # `ci-postgres-${PGPORT}` mit einem festen Port je Repo. Hier stand bis zum
+          # 17.08.2026 "Unique container name pro Job" — das Gegenteil, und es ist die
+          # gefaehrlichere Halbwahrheit, weil die Zeile darunter mit `docker rm -f` beginnt:
+          # zwei Laeufe desselben Projekts loeschen einander den laufenden Container samt
+          # Test-DB. Genau deshalb serialisiert die concurrency-Gruppe `testdb-<project>`
+          # oben — sie ist kein Beiwerk, sondern der einzige Schutz davor (Karte 905/906).
+          # Und es gibt KEINE Belegtpruefung des Ports: der Schritt macht rm -f, dann run.
           # `rm -f -v`: postgres:18-alpine deklariert VOLUME /var/lib/postgresql, jeder Start legt
           # also ein anonymes Volume an. Ohne `-v` bleibt es als herrenlose Kopie der Test-DB auf
           # dem NAS liegen — so sind bis zum 13.08.2026 rund 1760 Stueck aufgelaufen (Karte 791).
