@@ -977,7 +977,7 @@ jobs:
           #
           # WICHTIG (Messung 30.07.2026): MAVEN_ARGS allein traegt hier NICHT.
           # Der deploy-Job laeuft auf [self-hosted, nas, twingate], und die
-          # twingate-Runner haben /usr/bin/mvn = Apache Maven 3.6.3 (Debian-Paket);
+          # twingate-Runner hatten /usr/bin/mvn = Apache Maven 3.6.3 (Debian-Paket);
           # MAVEN_ARGS wird erst ab Maven 3.9.0 ausgewertet:
           #   gh-runner-org-twingate-1  grep -c MAVEN_ARGS /usr/bin/mvn        -> 0
           #   gh-runner-org-1           grep -c MAVEN_ARGS .../3.9.11/bin/mvn  -> 2
@@ -987,6 +987,20 @@ jobs:
           # den PATH kommt und "-s <settings>" versionsunabhaengig erzwingt - auch
           # fuer die mvn-Aufrufe in ./build bzw. tui-build-logic.sh, ohne eine
           # einzige Call-Site anzufassen.
+          #
+          # STAND SEIT 17.08.2026 (Karte 918) — die Begruendung oben ist historisch:
+          # alle VIER Runner fahren jetzt Maven 3.9.11 aus /opt/apache-maven-3.9.11
+          # (Daniels Commit 273566c gleicht twingate/Dockerfile an, Rollout am selben
+          # Abend). Das apt-Maven 3.6.3 ist auf den twingate-Runnern entfernt, im
+          # Beleglauf 32060362151 meldet der deploy-Job dort:
+          #   mvn-Binary: /usr/local/bin/mvn (Apache Maven 3.9.11)
+          #
+          # DER SHIM BLEIBT TROTZDEM, und zwar bewusst: er erzwingt "-s <settings>"
+          # VERSIONSUNABHAENGIG. Ihn jetzt durch MAVEN_ARGS zu ersetzen wuerde ein
+          # funktionierendes Konstrukt gegen eines tauschen, das an einer Version
+          # haengt — und beim naechsten Runner mit aelterem Maven still die
+          # Repo-Credentials verlieren. Wer hier aufraeumen will, braucht dafuer eine
+          # eigene Karte und einen Beleg auf allen vier Runnern, nicht diesen Kommentar.
           umask 077
           cat > "$RUNNER_TEMP/settings.xml" << EOF
           <settings>
