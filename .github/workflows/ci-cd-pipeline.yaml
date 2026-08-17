@@ -304,7 +304,14 @@ jobs:
         with:
           java-version: ${{ inputs.java-version }}
           distribution: temurin
-          cache: maven
+          # Karte 911: `cache: maven` NUR fuer GitHub-hosted Runner. Auf den self-hosted
+          # NAS-Runnern ist ~/.m2 ein persistentes Docker-Volume (github-runners_m2-cache,
+          # 41 GB) — der Actions-Cache ist dort redundant UND schaedlich: er laedt einen
+          # 35-GB-Eintrag herunter (bricht bei 62 % ab) und laedt das Volume danach wieder
+          # hoch. Leerer Wert schaltet Restore und Save ab (setup-java: `if (cache)`),
+          # deshalb `cache-jdk` explizit an, damit der JDK-Cache unveraendert bleibt.
+          cache: ${{ !contains(inputs.runner, 'self-hosted') && 'maven' || '' }}
+          cache-jdk: 'true'
           server-id: plaintext
           server-username: GITHUB_ACTOR
           server-password: GITHUB_TOKEN
@@ -524,7 +531,14 @@ jobs:
         with:
           java-version: ${{ inputs.java-version }}
           distribution: temurin
-          cache: maven
+          # Karte 911: `cache: maven` NUR fuer GitHub-hosted Runner. Auf den self-hosted
+          # NAS-Runnern ist ~/.m2 ein persistentes Docker-Volume (github-runners_m2-cache,
+          # 41 GB) — der Actions-Cache ist dort redundant UND schaedlich: er laedt einen
+          # 35-GB-Eintrag herunter (bricht bei 62 % ab) und laedt das Volume danach wieder
+          # hoch. Leerer Wert schaltet Restore und Save ab (setup-java: `if (cache)`),
+          # deshalb `cache-jdk` explizit an, damit der JDK-Cache unveraendert bleibt.
+          cache: ${{ !contains(inputs.runner, 'self-hosted') && 'maven' || '' }}
+          cache-jdk: 'true'
           server-id: plaintext
           server-username: GITHUB_ACTOR
           server-password: GITHUB_TOKEN
@@ -1176,7 +1190,14 @@ jobs:
         with:
           java-version: ${{ inputs.java-version }}
           distribution: temurin
-          cache: maven
+          # Karte 911: `cache: maven` NUR fuer GitHub-hosted Runner. Auf den self-hosted
+          # NAS-Runnern ist ~/.m2 ein persistentes Docker-Volume (github-runners_m2-cache,
+          # 41 GB) — der Actions-Cache ist dort redundant UND schaedlich: er laedt einen
+          # 35-GB-Eintrag herunter (bricht bei 62 % ab) und laedt das Volume danach wieder
+          # hoch. Leerer Wert schaltet Restore und Save ab (setup-java: `if (cache)`),
+          # deshalb `cache-jdk` explizit an, damit der JDK-Cache unveraendert bleibt.
+          cache: ${{ !contains(inputs.runner, 'self-hosted') && 'maven' || '' }}
+          cache-jdk: 'true'
           server-id: plaintext
           server-username: GITHUB_ACTOR
           server-password: GITHUB_TOKEN
@@ -1299,7 +1320,14 @@ jobs:
         with:
           java-version: ${{ inputs.java-version }}
           distribution: temurin
-          cache: maven
+          # Karte 911: `cache: maven` NUR fuer GitHub-hosted Runner. Auf den self-hosted
+          # NAS-Runnern ist ~/.m2 ein persistentes Docker-Volume (github-runners_m2-cache,
+          # 41 GB) — der Actions-Cache ist dort redundant UND schaedlich: er laedt einen
+          # 35-GB-Eintrag herunter (bricht bei 62 % ab) und laedt das Volume danach wieder
+          # hoch. Leerer Wert schaltet Restore und Save ab (setup-java: `if (cache)`),
+          # deshalb `cache-jdk` explizit an, damit der JDK-Cache unveraendert bleibt.
+          cache: ${{ !contains(inputs.runner, 'self-hosted') && 'maven' || '' }}
+          cache-jdk: 'true'
           server-id: plaintext
           server-username: GITHUB_ACTOR
           server-password: GITHUB_TOKEN
