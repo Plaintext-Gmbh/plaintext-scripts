@@ -334,7 +334,22 @@ jobs:
     # `continue-on-error` am Schritt kam nie zum Tragen und die dort vorgesehene ::error::-Meldung
     # lief nicht. Deshalb hat der Timeout-Fix aus Karte 420 nie gewirkt: gemessen wurde in allen
     # fuenf Laeufen des 17.08. genau 90:19 bis 90:44 Minuten — fuenfmal das Job-Limit, keine Laufzeit.
-    timeout-minutes: 150
+    # Karte 896, zweite Korrektur: 180, nicht 150. Die Hierarchie 'Job > Step' stimmt
+    # arithmetisch, ignorierte aber den VORLAUF vor dem OWASP-Schritt. Gemessen an zwei
+    # echten Laeufen am 17.08.2026:
+    #   Setup JDK 25            20:02 / 20:00 min   (Cache-Wiederherstellung, feste Groesse)
+    #   SonarQube Analysis      11:00 min (root) / 1:08 min (fwtool)
+    #   -> Vorlauf bis OWASP    31:28 min (root)
+    # Mit Job=150 blieben real nur 118:32 fuer einen Schritt, der 120 haben darf. Der
+    # root-Lauf 32017744221 starb deshalb um 12:43:07Z am JOB-Limit — 75 Sekunden VOR
+    # seinem Step-Limit. Folge: SpotBugs, 'Quality-Gate bewerten' und der Rueckcommit
+    # wurden geskippt, cve.high.count blieb n/a. Genau der Zustand, den Karte 896
+    # beheben sollte, nur eine Ebene hoeher.
+    # Rechnung fuer 180: 31 Vorlauf + 120 OWASP + 1 Gate/Commit + 4 Post-Setup = 156,
+    # also 24 Minuten Reserve. Schoepft SpotBugs sein eigenes Limit von 30 voll aus,
+    # reisst es — dann ist der CVE-Scan aber durch und die Meldung erscheint.
+    # SOBALD NVD_API_KEY gesetzt ist (Karte 897), gehoeren Step auf ~30 und Job auf ~90.
+    timeout-minutes: 180
     # Gleiche Gruppe wie `ci`: dieser Job startet denselben Container `ci-postgres-<port>`.
     # Innerhalb eines Laufs ist das unkritisch (needs: ci), zwischen zwei Laeufen nicht.
     concurrency:
