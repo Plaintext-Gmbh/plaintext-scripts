@@ -185,22 +185,37 @@ jobs:
     # Der separate ci-Build ist nur noch für PRs (ci-only) und den Sonar-Schedule nötig.
     if: inputs.deploy-target == 'ci-only' || inputs.sonar-enabled
     runs-on: ${{ fromJSON(inputs.runner) }}
-    # Der Test-Postgres heisst `ci-postgres-<port>` und der Port ist je Projekt FEST — der Name ist
-    # also nicht lauf-eindeutig, obwohl der Kommentar unten das behauptet. Jeder Lauf beginnt mit
-    # `docker rm -f`, weshalb zwei gleichzeitige Laeufe desselben Projekts einander die Datenbank
-    # wegraeumen. Belegt an plaintext-schuetu PR #104: push (15:57:22) und pull_request (15:57:25)
-    # starteten 3 Sekunden auseinander, der push-Lauf starb an `role "plaintext" does not exist`.
-    # Ein dynamischer Port scheidet aus (--network host), deshalb hier serialisiert.
-    # cancel-in-progress bewusst false: ein laufender master-Build darf nicht abgebrochen werden.
-    concurrency:
-      group: testdb-${{ inputs.project-name }}
-      cancel-in-progress: false
+    # 17.08.2026 (Karte 906): die concurrency-Gruppe `testdb-<project>` ist hier ENTFERNT.
+    #
+    # Sie war der einzige Schutz davor, dass zwei gleichzeitige Laeufe desselben Projekts einander
+    # die Test-DB wegraeumen (belegt an plaintext-schuetu PR #104: push 15:57:22 und pull_request
+    # 15:57:25, der push-Lauf starb an `role "plaintext" does not exist`). Der Preis war, dass ein
+    # wartender Lauf verdraengt wurde (Karte 905).
+    #
+    # Der Grund, der bisher gegen einen dynamischen Port sprach — "scheidet aus (--network host)" —
+    # ist ein Fehlschluss: `--network host` heisst, dass Postgres direkt am Host-Loopback bindet,
+    # nicht dass der Port fest sein muss. Der Port steht nirgends im Anwendungscode; der Test liest
+    # ihn ueber SPRING_DATASOURCE_URL aus der Umgebung (EmbeddedPg.java).
+    #
+    # Ersetzt durch drei zusammenhaengende Massnahmen im Schritt unten — jede einzeln waere
+    # schlechter als der Status quo:
+    #   1. Port aus der run-id  -> zwei Laeufe treffen sich praktisch nicht mehr
+    #   2. lauf-eindeutiger Containername -> `docker rm -f` trifft nie einen fremden Lauf, auch bei
+    #      einer Portkollision (ohne 2 waere die Kollision genau der alte Schaden)
+    #   3. Pruefung, dass der EIGENE Container laeuft -> ohne 3 wird aus einer Kollision mit einem
+    #      fremden Postgres ein STILLER Fehlschlag (Karte 906, gemessen)
+    # Dazu Labels und ein eigener Cleanup-Schritt: der feste Name hatte eine unbeabsichtigte
+    # Aufraeumfunktion (jeder Lauf begann mit `rm -f` auf den immer gleichen Namen), die mit
+    # dynamischen Namen entfaellt — sonst laufen Waisen auf wie die ~1760 aus Karte 791.
+    #
+    # `deploy` behaelt seine Gruppe `deploy-<project>`: die schuetzt die Blue-Green-Slots, nicht die
+    # Testdatenbank, und ist von dieser Aenderung nicht betroffen.
     permissions:
       contents: read
       packages: read
 
     steps:
-      - name: Start postgres on host network
+      - name: Start postgres on host network   # ci-Job (Karte 906)
         # Statt GH Actions services-block (der den Container in ein eigenes
         # Docker-Network packt und via -p publishet) starten wir Postgres
         # selbst mit --network host. Auf self-hosted Runnern mit network_mode:
@@ -208,28 +223,48 @@ jobs:
         # an OUTPUT (lo) — localhost:port erreicht den Service nicht. Mit
         # --network host bindet Postgres direkt am Host-Loopback.
         env:
-          PGPORT: ${{ inputs.postgres-port }}
           DB_NAME: ${{ inputs.database-name }}
         run: |
-          # Der Containername ist NICHT pro Job eindeutig, sondern pro PROJEKT fest:
-          # `ci-postgres-${PGPORT}` mit einem festen Port je Repo. Hier stand bis zum
-          # 17.08.2026 "Unique container name pro Job" — das Gegenteil, und es ist die
-          # gefaehrlichere Halbwahrheit, weil die Zeile darunter mit `docker rm -f` beginnt:
-          # zwei Laeufe desselben Projekts loeschen einander den laufenden Container samt
-          # Test-DB. Genau deshalb serialisiert die concurrency-Gruppe `testdb-<project>`
-          # oben — sie ist kein Beiwerk, sondern der einzige Schutz davor (Karte 905/906).
-          # Und es gibt KEINE Belegtpruefung des Ports: der Schritt macht rm -f, dann run.
+          # PORT AUS DER RUN-ID (Karte 906), deterministisch statt "freien Port suchen" — Letzteres
+          # hat eine Wettlauf-Luecke zwischen Pruefung und Belegung. `inputs.postgres-port` wird von
+          # `ci` und `sonar` nicht mehr gelesen; der Input bleibt gueltig (required: false, default
+          # '5434'), damit die sechs Consumer-Repos nicht angefasst werden muessen.
+          # ABSICHTLICH NICHT UMGESTELLT ist der `deploy`-Job: der liest den Input weiter
+          # (DEPLOY_PGPORT = PGPORT + 100). Er hat das Problem dieser Karte nicht, weil ihn
+          # `deploy-<project>` ohnehin serialisiert — und diese Gruppe muss aus einem anderen Grund
+          # bleiben (Blue-Green-Slots). Am PROD-ausrollenden Job ohne Not zu drehen waere das
+          # groessere Risiko. Der Input ist damit noch NICHT ungenutzt; sein Entfernen setzt voraus,
+          # dass auch deploy umgestellt wird, und ist eine eigene Aufraeumkarte.
+          # Restrisiko: zwei gleichzeitige Laeufe mit einer run-id-Differenz von genau 10000 treffen
+          # denselben Port, rechnerisch alle ~2 Wochen. Dagegen wirken die beiden Zeilen darunter.
+          PGPORT=$(( 20000 + ${{ github.run_id }} % 10000 ))
+          echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
+          # LAUF-EINDEUTIGER NAME: die run-id gehoert IN den Namen, nicht nur in den Port. Ein Name
+          # aus dem Port allein waere bei einer Portkollision wieder mehrdeutig — und die Zeile
+          # darunter beginnt mit `docker rm -f`, wuerde also den fremden Lauf mitten im Betrieb
+          # loeschen. Genau dieser Fall ist fuer Karte 906 nachgebaut und gemessen worden: der
+          # fremde Lauf verliert seine Test-DB und faellt danach wie ein zufaelliger Testfehler um.
+          # Das Kuerzel `ci` trennt zusaetzlich von `sonar`, das im selben Lauf dieselbe run-id hat.
+          CTR="ci-postgres-ci-${{ github.run_id }}"
+          echo "PG_CTR=$CTR" >> "$GITHUB_ENV"
           # `rm -f -v`: postgres:18-alpine deklariert VOLUME /var/lib/postgresql, jeder Start legt
           # also ein anonymes Volume an. Ohne `-v` bleibt es als herrenlose Kopie der Test-DB auf
           # dem NAS liegen — so sind bis zum 13.08.2026 rund 1760 Stueck aufgelaufen (Karte 791).
-          CTR="ci-postgres-${PGPORT}"
+          # Trifft jetzt nur noch den eigenen Namen. Fremde Reste raeumt der Cleanup-Schritt am
+          # Jobende ueber das Label auf — der feste Name hatte diese Funktion unbeabsichtigt mit
+          # uebernommen, und ohne Ersatz liefen die Waisen wieder auf.
           docker rm -f -v "$CTR" 2>/dev/null || true
           # WEGWERF-TESTDATENBANK — kein Geheimnis (Karte 812). Der Container existiert nur
           # fuer die Dauer dieses Laufs und wird oben mit `rm -f -v` wieder entfernt; er ist
           # von aussen nicht erreichbar und traegt keine echten Daten. Ein starkes Passwort
           # waere hier kein Gewinn, sondern ein starkes Passwort im Repo. Der Kommentar steht
           # da, damit die naechste Geheimnissuche diese Zeilen nicht erneut untersucht.
+          # LABELS (Karte 906): der Aufraeumteil braucht ein Merkmal, das nicht am Namen haengt —
+          # ein dynamischer Name ist per Definition nicht mehr erratbar. `ci-postgres=1` findet
+          # alle Test-Container, `ci-run-id` sagt, zu welchem Lauf einer gehoert.
           docker run -d --name "$CTR" --network host \
+            --label ci-postgres=1 \
+            --label ci-run-id=${{ github.run_id }} \
             -e POSTGRES_DB="$DB_NAME" \
             -e POSTGRES_USER=plaintext \
             -e POSTGRES_PASSWORD=plaintext \
@@ -238,6 +273,18 @@ jobs:
             --health-timeout 3s \
             --health-retries 12 \
             postgres:18-alpine postgres -p "$PGPORT"
+          # STARTPRUEFUNG (Karte 906): ohne sie wird aus einer Portkollision ein STILLER Fehlschlag.
+          # Gemessen: liegt ein fremder Postgres auf dem Port, endet der eigene Container mit
+          # ExitCode 1 ("cannot bind"), und die Warteschleife unten redet dann MIT DEM FREMDEN
+          # Dienst weiter — hat der eine Rolle `plaintext`, meldet sie sogar Erfolg, und die Tests
+          # fallen zwei Minuten spaeter mit `role "plaintext" does not exist` oder fehlenden
+          # Tabellen um (Karte 906 / project_ci_postgres_port_kollision). Die Pruefung MUSS also
+          # vor der Warteschleife stehen, nicht danach.
+          if [ "$(docker inspect -f '{{.State.Running}}' "$CTR" 2>/dev/null)" != "true" ]; then
+            echo "::error title=Test-Postgres nicht gestartet::Der eigene Container $CTR laeuft nicht (Port $PGPORT). Wahrscheinlich liegt ein fremder Dienst auf dem Port — ohne diese Pruefung haette die Warteschleife mit ihm geredet und der Lauf waere erst in den Tests umgefallen (Karte 906)."
+            docker logs "$CTR" 2>&1 | tail -20 || true
+            exit 1
+          fi
           # Warte bis postgres listened
           for i in $(seq 1 60); do
             if PGPASSWORD=plaintext psql -h localhost -p "$PGPORT" -U plaintext -d postgres -c "SELECT 1" >/dev/null 2>&1; then
@@ -269,7 +316,10 @@ jobs:
         # quality-analysis-Lauf (Cron) bewertet + committet das Statusfile — nicht hier bei jedem PR.
         run: mvn clean install -B -DskipITs -DexcludedGroups=quality-gate
         env:
-          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:${{ inputs.postgres-port }}/${{ inputs.database-name }}
+          # env.PGPORT statt inputs.postgres-port (Karte 906): der Port wird im Start-Schritt aus der
+          # run-id berechnet und dort nach GITHUB_ENV geschrieben. Gleiches Muster wie im deploy-Job,
+          # der env.DEPLOY_PGPORT schon so liest.
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:${{ env.PGPORT }}/${{ inputs.database-name }}
           SPRING_DATASOURCE_USERNAME: plaintext
           SPRING_DATASOURCE_PASSWORD: plaintext
           GITHUB_ACTOR: ${{ github.actor }}
@@ -320,6 +370,22 @@ jobs:
             fi
           done
 
+      # NEU am 17.08.2026 (Karte 906): der ci-Job hatte KEINEN Cleanup-Schritt. Das war bisher
+      # folgenlos, weil der naechste Lauf denselben festen Containernamen benutzte und mit
+      # `docker rm -f` begann — eine unbeabsichtigte Aufraeumfunktion. Mit einem lauf-eindeutigen
+      # Namen faellt sie weg, und ohne diesen Schritt bliebe jeder ci-Lauf als Waise liegen
+      # (vgl. die ~1760 Altcontainer aus Karte 791). Der Kommentar am sonar-Cleanup nennt genau
+      # diese Asymmetrie als Grund, warum ein Defekt dort lange wie ein Sonar-Problem aussah.
+      - name: Stop postgres (cleanup on job-end)
+        if: always()
+        run: |
+          if [ -n "${PG_CTR:-}" ]; then
+            docker rm -f -v "$PG_CTR" 2>/dev/null || true
+          else
+            docker ps -aq --filter "label=ci-run-id=${{ github.run_id }}" \
+              | xargs -r docker rm -f -v 2>/dev/null || true
+          fi
+
   # ── SonarQube Analysis ──────────────────────────────────────────
   sonar:
     name: SonarQube Analysis
@@ -357,11 +423,14 @@ jobs:
     # reisst es — dann ist der CVE-Scan aber durch und die Meldung erscheint.
     # SOBALD NVD_API_KEY gesetzt ist (Karte 897), gehoeren Step auf ~30 und Job auf ~90.
     timeout-minutes: 180
-    # Gleiche Gruppe wie `ci`: dieser Job startet denselben Container `ci-postgres-<port>`.
-    # Innerhalb eines Laufs ist das unkritisch (needs: ci), zwischen zwei Laeufen nicht.
-    concurrency:
-      group: testdb-${{ inputs.project-name }}
-      cancel-in-progress: false
+    # 17.08.2026 (Karte 906): Gruppe `testdb-<project>` entfernt, wie im ci-Job — Begruendung dort.
+    # Der Satz, der hier stand, war richtig und ist der Grund, warum die Aenderung ueberhaupt sicher
+    # ist: „Innerhalb eines Laufs ist das unkritisch (needs: ci), zwischen zwei Laeufen nicht."
+    # Am Lauf 32033760134 (root) nachgemessen: Build & Test 13:11:56-13:22:58, SonarQube Analysis
+    # 13:23:01-15:17:24 — die Reihenfolge kommt aus `needs: ci`, nicht aus dieser Gruppe. Uebrig
+    # bleibt der Fall „zwei Laeufe", und den loesen jetzt Port + Name + Startpruefung im Schritt
+    # unten. Der Containername traegt zusaetzlich das Kuerzel `sonar`, damit die beiden Jobs
+    # desselben Laufs (gleiche run-id!) sich nicht denselben Namen teilen.
     permissions:
       # write: die wöchentliche Voll-Analyse committet quality/quality-gate.properties zurück.
       contents: write
@@ -376,21 +445,19 @@ jobs:
         # an OUTPUT (lo) — localhost:port erreicht den Service nicht. Mit
         # --network host bindet Postgres direkt am Host-Loopback.
         env:
-          PGPORT: ${{ inputs.postgres-port }}
           DB_NAME: ${{ inputs.database-name }}
         run: |
-          # Der Containername ist NICHT pro Job eindeutig, sondern pro PROJEKT fest:
-          # `ci-postgres-${PGPORT}` mit einem festen Port je Repo. Hier stand bis zum
-          # 17.08.2026 "Unique container name pro Job" — das Gegenteil, und es ist die
-          # gefaehrlichere Halbwahrheit, weil die Zeile darunter mit `docker rm -f` beginnt:
-          # zwei Laeufe desselben Projekts loeschen einander den laufenden Container samt
-          # Test-DB. Genau deshalb serialisiert die concurrency-Gruppe `testdb-<project>`
-          # oben — sie ist kein Beiwerk, sondern der einzige Schutz davor (Karte 905/906).
-          # Und es gibt KEINE Belegtpruefung des Ports: der Schritt macht rm -f, dann run.
+          # Port, Name, Labels und Startpruefung wie im ci-Job (Karte 906) — Begruendung dort im
+          # Detail. Derselbe Port ist hier unbedenklich, weil `needs: ci` die beiden Jobs desselben
+          # Laufs trennt; der NAME muss sich trotzdem unterscheiden, sonst raeumt der Cleanup des
+          # einen Jobs dem anderen den Container weg.
+          PGPORT=$(( 20000 + ${{ github.run_id }} % 10000 ))
+          echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
+          CTR="ci-postgres-sonar-${{ github.run_id }}"
+          echo "PG_CTR=$CTR" >> "$GITHUB_ENV"
           # `rm -f -v`: postgres:18-alpine deklariert VOLUME /var/lib/postgresql, jeder Start legt
           # also ein anonymes Volume an. Ohne `-v` bleibt es als herrenlose Kopie der Test-DB auf
           # dem NAS liegen — so sind bis zum 13.08.2026 rund 1760 Stueck aufgelaufen (Karte 791).
-          CTR="ci-postgres-${PGPORT}"
           docker rm -f -v "$CTR" 2>/dev/null || true
           # WEGWERF-TESTDATENBANK — kein Geheimnis (Karte 812). Der Container existiert nur
           # fuer die Dauer dieses Laufs und wird oben mit `rm -f -v` wieder entfernt; er ist
@@ -398,6 +465,8 @@ jobs:
           # waere hier kein Gewinn, sondern ein starkes Passwort im Repo. Der Kommentar steht
           # da, damit die naechste Geheimnissuche diese Zeilen nicht erneut untersucht.
           docker run -d --name "$CTR" --network host \
+            --label ci-postgres=1 \
+            --label ci-run-id=${{ github.run_id }} \
             -e POSTGRES_DB="$DB_NAME" \
             -e POSTGRES_USER=plaintext \
             -e POSTGRES_PASSWORD=plaintext \
@@ -406,6 +475,12 @@ jobs:
             --health-timeout 3s \
             --health-retries 12 \
             postgres:18-alpine postgres -p "$PGPORT"
+          # STARTPRUEFUNG (Karte 906) — vor der Warteschleife, siehe ci-Job.
+          if [ "$(docker inspect -f '{{.State.Running}}' "$CTR" 2>/dev/null)" != "true" ]; then
+            echo "::error title=Test-Postgres nicht gestartet::Der eigene Container $CTR laeuft nicht (Port $PGPORT). Wahrscheinlich liegt ein fremder Dienst auf dem Port (Karte 906)."
+            docker logs "$CTR" 2>&1 | tail -20 || true
+            exit 1
+          fi
           # Warte bis postgres listened
           for i in $(seq 1 60); do
             if PGPASSWORD=plaintext psql -h localhost -p "$PGPORT" -U plaintext -d postgres -c "SELECT 1" >/dev/null 2>&1; then
@@ -457,7 +532,8 @@ jobs:
       - name: SonarQube Analysis
         id: sonar
         env:
-          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:${{ inputs.postgres-port }}/${{ inputs.database-name }}
+          # env.PGPORT statt inputs.postgres-port — siehe ci-Job (Karte 906).
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:${{ env.PGPORT }}/${{ inputs.database-name }}
           SPRING_DATASOURCE_USERNAME: plaintext
           SPRING_DATASOURCE_PASSWORD: plaintext
           GITHUB_ACTOR: ${{ github.actor }}
@@ -727,10 +803,35 @@ jobs:
       # genau diese Asymmetrie liess es wie ein Sonar-Problem aussehen.
       - name: Stop postgres (cleanup on job-end)
         if: always()
-        env:
-          PGPORT: ${{ inputs.postgres-port }}
         run: |
-          docker rm -f -v "ci-postgres-${PGPORT}" 2>/dev/null || true
+          # Eigener Container ueber PG_CTR (Karte 906) — der Name ist dynamisch und stand vorher
+          # als `ci-postgres-${PGPORT}` fest hier drin. Fallback auf das Label, falls der
+          # Start-Schritt gar nicht bis zum GITHUB_ENV-Schreiben kam.
+          if [ -n "${PG_CTR:-}" ]; then
+            docker rm -f -v "$PG_CTR" 2>/dev/null || true
+          else
+            docker ps -aq --filter "label=ci-run-id=${{ github.run_id }}" \
+              | xargs -r docker rm -f -v 2>/dev/null || true
+          fi
+          # WAISEN aus abgebrochenen Laeufen (Karte 906/791). Der feste Name hat sie bisher
+          # unbeabsichtigt mitentfernt, weil jeder Lauf mit `rm -f` auf denselben Namen begann.
+          # Mit dynamischen Namen faellt das weg, deshalb hier ueber das Label — und ausdruecklich
+          # NICHT mit `docker prune -f` (Karte 787: das trifft auch fremde Container/Volumes).
+          # Nur beendete, mindestens 6 Stunden alte Test-Container: ein laufender kann zu einem
+          # gleichzeitigen fremden Lauf gehoeren, und genau den nicht anzufassen ist der Zweck
+          # dieser ganzen Aenderung.
+          NOW=$(date +%s)
+          for c in $(docker ps -aq --filter "label=ci-postgres=1" --filter "status=exited"); do
+            FIN=$(docker inspect -f '{{.State.FinishedAt}}' "$c" 2>/dev/null || true)
+            [ -n "$FIN" ] || continue
+            FIN_S=$(date -d "$FIN" +%s 2>/dev/null || true)
+            [ -n "$FIN_S" ] || continue
+            AGE=$(( NOW - FIN_S ))
+            if [ "$AGE" -gt 21600 ]; then
+              echo "Waise entfernt: $c (beendet vor $((AGE/3600)) h)"
+              docker rm -f -v "$c" 2>/dev/null || true
+            fi
+          done
 
       # ENTFERNT am 02.08.2026 (Karte 401, Auftrag Daniel): die Pushover-Meldung bei rotem
       # Quality-Gate. Wortlaut: "sorge dafuer, dass ich diese sonarqube quality gate nachrichten
