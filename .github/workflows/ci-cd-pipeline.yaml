@@ -649,30 +649,29 @@ jobs:
           # Sonst bewertet das Gate nach einem DC-Timeout einen veralteten Report
           # (z.B. von VOR einer Suppression-Änderung) statt gar keinen (= Sonar-only).
           find . -path "*/target/dependency-check-report.*" -delete 2>/dev/null || true
-          # NVD-/RetireJS-Datenbestand (Karte 914). Bis zum 17.08.2026 stand hier
-          # "$HOME/.cache/owasp-dc-data" — und der Kommentar "persistenter NVD-Cache auf dem
-          # Runner" war falsch: $HOME liegt in der SCHREIBSCHICHT des Runner-Containers, nicht in
-          # einem Volume (`docker inspect` meldete fuer alle vier Runner 0 owasp-Mounts). Ein
-          # `docker compose up` nach einem Image-Update loescht den Bestand deshalb vollstaendig;
-          # beim Rollout von Karte 918 ist das real passiert, alle vier waren danach leer.
+          # NVD-/RetireJS-Datenbestand. Der Kommentar hier lautete bis zum 17.08.2026
+          # "persistenter NVD-Cache auf dem Runner" — und das war falsch: `docker inspect` meldete
+          # fuer alle vier Runner 0 Mounts auf diesem Pfad, er lag also in der SCHREIBSCHICHT des
+          # Containers. Ein `docker compose up` nach einem Image-Update loescht ihn damit; beim
+          # Rollout von Karte 918 ist das real passiert, alle vier Bestaende waren danach leer,
+          # darunter der einzige mit intakter jsrepository.json (deren Fehlen den RetireJS-Abbruch
+          # ausgeloest hatte, Karte 914).
           #
-          # Seit Karte 914 haengt unter /var/owasp-cache ein benanntes Volume (github-runners:
-          # owasp-cache) mit einem Unterverzeichnis JE RUNNER. Getrennt, weil die H2-Datenbank von
-          # dependency-check mit odc.update.lock arbeitet und keine gleichzeitigen Schreiber
-          # vertraegt; zusaetzliche Downloads entstehen dadurch nicht, denn der Bestand war auch
-          # vorher schon je Container getrennt — nur eben fluechtig.
-          if [ -d /var/owasp-cache ]; then
-            export OWASP_DATA_DIR="/var/owasp-cache/${RUNNER_NAME:-unbenannt}"
-          else
-            # KEIN stiller Rueckfall: laeuft der Job auf einem Runner ohne das Volume (aelterer
-            # Compose-Stand, GitHub-hosted Runner), bleibt der alte Pfad — aber sichtbar. Sonst
-            # waere der Unterschied erst daran zu merken, dass der Scan jedes Mal 84 Minuten neu
-            # laedt und dabei ins Rate-Limit laeuft (Karte 897/914).
-            export OWASP_DATA_DIR="$HOME/.cache/owasp-dc-data"
-            echo "::warning title=OWASP-Cache nicht persistent::/var/owasp-cache fehlt auf ${RUNNER_NAME:-diesem Runner} — der NVD-Bestand liegt in der Container-Schreibschicht und ist beim naechsten Image-Update weg (Karte 914). Compose-Stand von github-runners pruefen."
-          fi
+          # Seit Karte 914 haengt hier ein benanntes Volume (github-runners: odc-cache) mit einem
+          # subpath je Runner. Der PFAD bleibt derselbe — die Trennung macht das Compose, nicht
+          # dieser Workflow. Deshalb steht hier auch kein Pfadwechsel, sondern nur die Pruefung,
+          # dass die Persistenz wirklich da ist.
+          export OWASP_DATA_DIR="$HOME/.cache/owasp-dc-data"
           mkdir -p "$OWASP_DATA_DIR"
-          echo "OWASP-Datenbestand: $OWASP_DATA_DIR"
+          # KEIN stiller Rueckfall: laeuft der Job auf einem Runner mit aelterem Compose-Stand
+          # (oder GitHub-hosted), ist der Pfad kein Mount und der Bestand wieder fluechtig. Ohne
+          # diese Meldung waere der Unterschied erst daran zu merken, dass jeder CVE-Lauf rund
+          # 84 Minuten neu laedt und dabei ins Rate-Limit laeuft (Karte 897).
+          if mountpoint -q "$OWASP_DATA_DIR" 2>/dev/null; then
+            echo "OWASP-Datenbestand persistent: $OWASP_DATA_DIR (Volume)"
+          else
+            echo "::warning title=OWASP-Cache nicht persistent::${OWASP_DATA_DIR} ist auf ${RUNNER_NAME:-diesem Runner} kein Mount — der NVD-Bestand liegt in der Container-Schreibschicht und ist beim naechsten Image-Update weg (Karte 914). Compose-Stand von github-runners pruefen."
+          fi
           # Suppression-Dateien (Karte 420): ZENTRAL aus plaintext-scripts fuer Befunde, die
           # alle Repos gleichzeitig treffen -- PLUS die projekt-lokale fuer Sonderfaelle.
           # Grund: Am 08.08.2026 standen alle sechs Repos wegen DESSELBEN CVE auf BREACHED.
