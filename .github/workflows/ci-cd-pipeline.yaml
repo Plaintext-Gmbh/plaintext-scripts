@@ -691,8 +691,29 @@ jobs:
           # dieser Woche NICHT stattgefunden hat und das Gate gleich darauf trotzdem "OK"
           # schreibt. Eine Warnung unter tausend Log-Zeilen hat das monatelang nicht sichtbar
           # gemacht. Der Lauf wird davon nicht rot — der Schritt ist weiterhin best-effort.
-          bash .plaintext-scripts/quality/owasp-dependency-check.sh "$PWD" 0 \
-            || echo "::error::OWASP-CVE-Scan NICHT gelaufen — es entsteht kein Report, und das Quality-Gate bewertet gleich darauf nur Sonar (cve.high.count=n/a). Grün heisst hier NICHT 'keine CVEs'."
+          # 18.08.2026 (Karte 925): DREI Faelle statt zwei. Bis heute hing die Meldung am
+          # EXIT-CODE des Skripts — und der ist bei dependency-check zweideutig, weil das
+          # Werkzeug den Build ABSICHTLICH rot macht, wenn Funde ueber der Schwelle liegen.
+          # Der Melder las diesen roten Exit als "kein Report" und meldete "Scan NICHT
+          # gelaufen", zwei Sekunden nachdem der Report geschrieben worden war. Gemessen am
+          # schuetu-Lauf 32108232812 (18.08.):
+          #   06:49:15  Writing HTML report to: .../dependency-check-report.html
+          #   06:49:16  Writing JSON report to: ...
+          #   06:49:17  [INFO] BUILD FAILURE
+          #   06:49:17  ##[error]OWASP-CVE-Scan NICHT gelaufen ...
+          # Folge: acht CVE-Eintraege standen im Report (darunter einer mit CVSS 9.1) und
+          # wurden als "nicht gemessen" ausgegeben — der Melder tarnte genau die Funde, deren
+          # Uebersehen er verhindern soll. Unterscheidungsmerkmal ist deshalb der REPORT.
+          if bash .plaintext-scripts/quality/owasp-dependency-check.sh "$PWD" 0; then
+            echo "OWASP-CVE-Scan durchgelaufen, kein Fund ueber der Schwelle."
+          elif find . -path "*/target/dependency-check-report.json" 2>/dev/null | grep -q .; then
+            echo "::warning title=CVE-Scan mit Funden::Der Scan LIEF und hat einen Report geschrieben; der Fehlercode kommt von Funden ueber der Schwelle. Das ist ein BEFUND, kein Ausfall — die CVEs stehen im Report, der als Artefakt owasp-dependency-check-${{ inputs.project-name }} am Lauf haengt (Karte 925). NICHT als 'Scan nicht gelaufen' lesen."
+          else
+            # NEGATIVKONTROLLE: nur DIESER Fall ist der Ausfall, den Karte 420 gemeint hat —
+            # Skript rot UND kein Report. Diese Meldung muss erhalten bleiben, sonst tauscht
+            # man einen Fehlalarm gegen ein Schweigen.
+            echo "::error::OWASP-CVE-Scan NICHT gelaufen — es entsteht kein Report, und das Quality-Gate bewertet gleich darauf nur Sonar (cve.high.count=n/a). Grün heisst hier NICHT 'keine CVEs'."
+          fi
 
       - name: SpotBugs
         if: inputs.quality-analysis
