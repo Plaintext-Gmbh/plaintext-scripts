@@ -51,26 +51,35 @@ init_versions
 # ... TUI menu and command dispatch (see plaintext-root for a full example)
 ```
 
-### 2. Create `plaintext-build.cfg`
+### 2. Create `build-conf.txt`
 
 Copy the template and adjust to your project:
 
 ```bash
-cp ~/.plaintext-scripts/plaintext-build.cfg.template ./plaintext-build.cfg
+cp ~/.plaintext-scripts/build-conf.txt.template ./build-conf.txt
 ```
 
-Add `plaintext-build.cfg` to your `.gitignore` — it contains environment-specific configuration.
+Add `build-conf.txt` to your `.gitignore` if it contains environment-specific values.
+
+> **Der Dateiname ist nicht frei waehlbar.** `load_build_conf()` sucht ausschliesslich nach
+> `build-conf.txt`. Bis zur Karte 961 stand hier `plaintext-build.cfg` — diesen Namen hat nie
+> etwas gelesen; wer der Anleitung folgte, bekam `ERROR: build-conf.txt not found`.
 
 ### Configuration
 
-Configuration is loaded with the following priority (highest wins):
+`load_build_conf()` sucht **eine** Datei, in dieser Reihenfolge:
 
-| Priority | Source | Use case |
-|----------|--------|----------|
-| 1 | Individual environment variables | CI overrides, one-off changes |
-| 2 | `PLAINTEXT_BUILD_CONFIG` env | GitHub Actions (full config as string) |
-| 3 | `plaintext-build.cfg` file | Local development |
-| 4 | `build-conf.txt` file | Legacy support |
+| Reihenfolge | Ort | Verwendung |
+|----|-----|------------|
+| 1 | `$PLAINTEXT_CONFIG_DIR/<projektname>/build-conf.txt` | die zentrale Konfiguration aus `plaintext-config` |
+| 2 | `<projektverzeichnis>/build-conf.txt` | Projekte ausserhalb von `plaintext-config` |
+
+Die erste gefundene Datei gewinnt; eine zweite wird nicht mehr gelesen.
+
+> **Achtung:** die Werte aus der Datei werden per `export` gesetzt und ueberschreiben damit
+> **gleichnamige Umgebungsvariablen**. Eine Variable vorher zu setzen wirkt also *nicht* als
+> Uebersteuerung — hier stand frueher das Gegenteil (Karte 961). Ebenfalls entfernt:
+> `PLAINTEXT_BUILD_CONFIG`, das im Code nirgends vorkommt (0 Treffer in `*.sh`).
 
 #### Required settings
 
@@ -289,7 +298,7 @@ A **Glass sound** plays whenever Claude Code finishes a response. Detection work
 | `stop-postgres.sh` | Stop PostgreSQL container |
 | `common-functions.sh` | Shared utility functions |
 | `voice` | Voice-to-Claude interface (see above) |
-| `plaintext-build.cfg.template` | Configuration template for consumer projects |
+| `build-conf.txt.template` | Configuration template for consumer projects |
 
 ## License
 
