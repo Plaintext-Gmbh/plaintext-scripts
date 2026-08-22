@@ -255,22 +255,53 @@ backup_prod_db() {
     local REMOTE_BACKUP_DIR="${DEPLOY_PATH}/backups"
     local BACKUP_NAME="backup-$(date +%y-%m-%d_%H-%M).sql.gz"
     local REMOTE_BACKUP_PATH="${REMOTE_BACKUP_DIR}/${BACKUP_NAME}"
+    local _DB_CONTAINER="${DB_CONTAINER_PREFIX:-${IMAGE_NAME}}-db-prod"
+    local _DB_NAME="${DB_NAME:-${IMAGE_NAME}}"
+    # Karte 955: wie viele Deploy-Sicherungen aufbewahrt werden. Ohne Aufbewahrung waechst der
+    # Ordner unbegrenzt -- app allein macht ~29 Deploys/Woche a 1,59 GB.
+    local _KEEP="${BACKUP_KEEP_DEPLOY:-5}"
+    # Karte 955: ein leeres gzip ist 20 Byte gross. Alles darunter ist keine Sicherung.
+    local _MIN_BYTE="${BACKUP_MIN_BYTE:-1024}"
 
     echo -e "${BLUE}=== Creating database backup ===${NC}" >&2
     echo -e "${BLUE}Backup location: ${GREEN}${REMOTE_BACKUP_PATH}${NC}" >&2
 
-    # Create backup directory and run pg_dump via docker exec
+    # Karte 955: KEINE Pipe mehr. Frueher stand hier "pg_dump ... | gzip > datei"; danach ist
+    # $? der Status des LETZTEN Glieds, also von gzip -- und gzip gelingt auch dann, wenn
+    # pg_dump nichts liefert (es schreibt ein leeres Archiv von 20 Byte und meldet 0).
+    # Zusammen mit einem falschen DB_CONTAINER_PREFIX ergab das 611 leere Sicherungen, jede
+    # als "Database backup created" gemeldet, fuenf Monate lang unbemerkt.
+    # "pg_dump -Z 9" komprimiert selbst; damit ist $? wieder der Status von docker exec.
+    # Am lebenden System belegt: falscher Container -> alt rc=0/20 Byte, neu rc=1/0 Byte.
     ssh ${DEPLOY_SERVER} "mkdir -p '${REMOTE_BACKUP_DIR}' && \
-        sudo docker exec ${DB_CONTAINER_PREFIX:-${IMAGE_NAME}}-db-prod pg_dump -U plaintext ${DB_NAME:-${IMAGE_NAME}} | gzip > '${REMOTE_BACKUP_PATH}'"
+        sudo docker exec ${_DB_CONTAINER} pg_dump -U plaintext -Z 9 ${_DB_NAME} > '${REMOTE_BACKUP_PATH}'"
+    local _RC=$?
 
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}✓ Database backup created: ${BACKUP_NAME}${NC}" >&2
-        echo "${REMOTE_BACKUP_PATH}"
-        return 0
-    else
-        echo -e "${RED}✗ Database backup failed!${NC}" >&2
+    if [ ${_RC} -ne 0 ]; then
+        echo -e "${RED}✗ Database backup failed (pg_dump/docker exec rc=${_RC})!${NC}" >&2
+        ssh ${DEPLOY_SERVER} "rm -f '${REMOTE_BACKUP_PATH}'" >/dev/null 2>&1
         return 1
     fi
+
+    # Karte 955: zweite, unabhaengige Wache. Ein Aufruf, der 0 meldet, aber nichts geschrieben
+    # hat, ist trotzdem keine Sicherung -- und genau darauf greift restore_prod_db() zurueck.
+    local _SIZE
+    _SIZE=$(ssh ${DEPLOY_SERVER} "stat -c %s '${REMOTE_BACKUP_PATH}' 2>/dev/null || echo 0")
+    if [ "${_SIZE:-0}" -lt "${_MIN_BYTE}" ]; then
+        echo -e "${RED}✗ Database backup is empty (${_SIZE:-0} bytes, expected >= ${_MIN_BYTE})!${NC}" >&2
+        echo -e "${RED}   Container: ${_DB_CONTAINER}, database: ${_DB_NAME}${NC}" >&2
+        ssh ${DEPLOY_SERVER} "rm -f '${REMOTE_BACKUP_PATH}'" >/dev/null 2>&1
+        return 1
+    fi
+
+    # Karte 955: Aufbewahrung. Die BACKUP_KEEP_*-Regeln des Sicherungs-Containers
+    # (prodrigestivill/postgres-backup-local) gelten NUR fuer dessen eigenen scheduled/-Baum --
+    # hier raeumt sonst niemand auf.
+    ssh ${DEPLOY_SERVER} "ls -1t '${REMOTE_BACKUP_DIR}'/backup-*.sql.gz 2>/dev/null | tail -n +$((_KEEP + 1)) | xargs -r rm -f" >/dev/null 2>&1
+
+    echo -e "${GREEN}✓ Database backup created: ${BACKUP_NAME} (${_SIZE} bytes)${NC}" >&2
+    echo "${REMOTE_BACKUP_PATH}"
+    return 0
 }
 
 # Function to restore database from backup (PostgreSQL via SSH on NAS)
