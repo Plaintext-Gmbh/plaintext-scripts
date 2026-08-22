@@ -25,7 +25,10 @@ fi
 ROOT_POM="$SCRIPT_DIR/pom.xml"
 STATE_FILE="$SCRIPT_DIR/.modules-state"
 
-# Webapp POM path: read WEBAPP_MODULE from build-conf.txt or plaintext-build.cfg
+# Webapp POM path: read WEBAPP_MODULE from build-conf.txt.
+# Karte 961: hier stand frueher "or plaintext-build.cfg" -- das war schon damals falsch,
+# der Code unten liest ausschliesslich build-conf.txt. Die plaintext-build.cfg in
+# plaintext-config ist entfernt; es gibt nur noch eine Quelle.
 _WEBAPP_MODULE=""
 _build_conf=""
 if [[ -f "$PLAINTEXT_CONFIG_DIR/$_project_name/build-conf.txt" ]]; then
