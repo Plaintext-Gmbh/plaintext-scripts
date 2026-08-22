@@ -590,9 +590,16 @@ check_container_health() {
         case "$CSTATE" in
             exited:*|dead:*|*:[2-9]|*:[1-9][0-9]*)
                 echo -e "${RED}✗ Container ${CONTAINER_NAME} startet nicht (State ${CSTATE}) – Abbruch. Letzte Logs:${NC}"
+                # 300 statt 60 Zeilen (Vorfall 21.08.2026): Der Fail-fast-Abbruch bei einer
+                # unaufloesbaren vault:-Referenz druckt ZWEI ~30-zeilige Stacktraces NACH der
+                # entscheidenden WARN-Zeile "... token-Endpoint HTTP 429 ...". Mit --tail 60
+                # bestand der Dump nur aus den Stacktraces, der 429-Beweis lag oberhalb des
+                # Fensters — HEALTHCHECK_SAH_429 blieb false und der Karte-422-Retry zuendete
+                # nie (guild 1.372.0 und app-snapshot scheiterten genau daran). Gezeigt werden
+                # weiterhin nur die letzten 60 Zeilen; Diagnose und 429-Erkennung lesen alle 300.
                 local CRASH_LOGS
-                CRASH_LOGS=$(ssh ${DEPLOY_SERVER} "sudo docker logs --tail 60 ${CONTAINER_NAME} 2>&1 | tail -60")
-                echo "$CRASH_LOGS"
+                CRASH_LOGS=$(ssh ${DEPLOY_SERVER} "sudo docker logs --tail 300 ${CONTAINER_NAME} 2>&1 | tail -300")
+                echo "$CRASH_LOGS" | tail -60
                 diagnose_startfehler "$CRASH_LOGS"
                 # Fuer den Retry in deploy_to_slot: sichtbar machen, ob ein 429 im Spiel war.
                 if echo "$CRASH_LOGS" | grep -q "HTTP 429"; then
@@ -645,9 +652,10 @@ check_container_health() {
     # "running" und laeuft ins Timeout. Deshalb hier dieselben Logs und dieselbe Diagnose wie
     # im Crash-Pfad.
     echo -e "${RED}✗ Health check failed after ${MAX_WAIT}s! Letzte Logs:${NC}"
+    # 300 Zeilen wie im Crash-Pfad: die 429-WARN-Zeile darf nicht oberhalb des Fensters liegen.
     local TIMEOUT_LOGS
-    TIMEOUT_LOGS=$(ssh ${DEPLOY_SERVER} "sudo docker logs --tail 60 ${CONTAINER_NAME} 2>&1 | tail -60")
-    echo "$TIMEOUT_LOGS"
+    TIMEOUT_LOGS=$(ssh ${DEPLOY_SERVER} "sudo docker logs --tail 300 ${CONTAINER_NAME} 2>&1 | tail -300")
+    echo "$TIMEOUT_LOGS" | tail -60
     diagnose_startfehler "$TIMEOUT_LOGS"
     # Fuer den Retry in deploy_to_slot: sichtbar machen, ob im Timeout-Pfad ein 429 stand.
     if echo "$TIMEOUT_LOGS" | grep -q "HTTP 429"; then
@@ -726,6 +734,25 @@ REMOTE
 
     echo -e "${GREEN}✓ Preflight: Pflicht-Secrets gesetzt, Vaultwarden erreichbar (HTTP 200).${NC}"
     return 0
+}
+
+# Stoppt den GESCHEITERTEN neuen Slot nach einem endgueltig fehlgeschlagenen Healthcheck.
+#
+# Warum (Vorfall 21.08.2026): Der frisch erzeugte Slot-Container hat "restart: always". Bleibt er
+# nach dem Deploy-Abbruch stehen, crashloopt er unbegrenzt weiter — und jeder Boot macht einen
+# frischen Vaultwarden-Login. Der Login-Rate-Limiter (Token-Bucket, ein Bucket fuer ALLE Clients,
+# weil alle als dieselbe NAT-IP ankommen) wird dadurch dauerhaft leergehalten: Docker-Restart-
+# Backoff pendelt sich bei ~1 Boot/Minute ein, exakt der Refill-Rate. Am 21.08. hielt der
+# Flyway-Zombie von app-int-green den Bucket leer und liess den guild-Release-Deploy UND den
+# naechsten app-Deploy mit HTTP 429 scheitern (Kettenreaktion wie am 01.08., Karte 395).
+#
+# Gefahrlos: Der Traffic wurde nie umgeschaltet, der gescheiterte Slot bedient nichts. Der
+# naechste Deploy erzeugt den Container ohnehin per force-recreate neu.
+stoppe_gescheiterten_slot() {
+    local CONTAINER_NAME="$1"
+    echo -e "${BLUE}Stoppe den gescheiterten Slot ${CONTAINER_NAME} (kein Zombie-Crashloop gegen Vaultwarden)...${NC}"
+    ssh ${DEPLOY_SERVER} "sudo docker stop ${CONTAINER_NAME}" >/dev/null 2>&1 || true
+    echo -e "${GREEN}✓ ${CONTAINER_NAME} gestoppt${NC}"
 }
 
 # Deploy image to the inactive slot using blue-green strategy
@@ -834,11 +861,13 @@ deploy_blue_green() {
                 echo -e "${RED}✗ Health check auch im Wiederholungsversuch fehlgeschlagen (${CONTAINER_NAME}).${NC}"
                 echo -e "${YELLOW}Damit ist es KEINE voruebergehende Stoerung mehr — die Ursache steht in den Logs oben.${NC}"
                 echo -e "${YELLOW}Active slot (${ACTIVE_SLOT}) remains unchanged. No traffic switched.${NC}"
+                stoppe_gescheiterten_slot "$CONTAINER_NAME"
                 return 1
             fi
         else
             echo -e "${RED}✗ Health check failed on ${CONTAINER_NAME}!${NC}"
             echo -e "${YELLOW}Active slot (${ACTIVE_SLOT}) remains unchanged. No traffic switched.${NC}"
+            stoppe_gescheiterten_slot "$CONTAINER_NAME"
             return 1
         fi
     fi
