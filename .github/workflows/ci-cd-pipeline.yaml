@@ -344,7 +344,7 @@ jobs:
         with:
           name: test-results
           path: '**/target/surefire-reports/*.xml'
-          retention-days: 7
+          retention-days: 3
 
       - name: Upload Coverage Reports
         if: always()
@@ -353,7 +353,7 @@ jobs:
         with:
           name: coverage-reports
           path: '**/target/site/jacoco/'
-          retention-days: 14
+          retention-days: 7
 
       - name: Coverage Summary
         if: always()
@@ -764,7 +764,7 @@ jobs:
           name: owasp-dependency-check-${{ inputs.project-name }}
           path: '**/target/dependency-check-report.json'
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 7
 
       # ── Quality-Gate bewerten: Sonar-Gate ERROR ODER High-CVE (CVSS>=7) ────
       - name: Quality-Gate bewerten
@@ -1283,7 +1283,7 @@ jobs:
         with:
           name: integration-test-results-dev
           path: '**/target/failsafe-reports/*.xml'
-          retention-days: 7
+          retention-days: 3
 
       - name: Upload Screenshots (DEV)
         if: inputs.integration-tests-enabled && always()
@@ -1292,7 +1292,7 @@ jobs:
         with:
           name: playwright-screenshots-dev
           path: '**/target/screenshots/'
-          retention-days: 7
+          retention-days: 3
           if-no-files-found: ignore
 
       # ── Node.js Playwright Tests ──
@@ -1322,7 +1322,7 @@ jobs:
         with:
           name: playwright-report-dev
           path: playwright-report/
-          retention-days: 7
+          retention-days: 3
 
   # ── Verify PROD ────────────────────────────────────────────────
   verify-prod:
@@ -1410,7 +1410,7 @@ jobs:
         with:
           name: integration-test-results-prod
           path: '**/target/failsafe-reports/*.xml'
-          retention-days: 7
+          retention-days: 3
 
       - name: Upload Screenshots (PROD)
         if: inputs.integration-tests-enabled && always()
@@ -1419,7 +1419,7 @@ jobs:
         with:
           name: playwright-screenshots-prod
           path: '**/target/screenshots/'
-          retention-days: 7
+          retention-days: 3
           if-no-files-found: ignore
 
       # ── Node.js Playwright Tests ──
@@ -1449,4 +1449,4 @@ jobs:
         with:
           name: playwright-report-prod
           path: playwright-report/
-          retention-days: 7
+          retention-days: 3
