@@ -337,23 +337,42 @@ jobs:
         run: mvn jacoco:report -B
         continue-on-error: true
 
+      # ── Artefakt-Uploads: NUR bei Fehlschlag, Aufbewahrung 1 Tag ──────────────
+      # Karte 942 (23.08.2026): Die Org laeuft auf GitHub Free (500 MB Actions-Storage
+      # inklusive) und das Actions-Budget steht bewusst auf 0 $ mit "prevent further
+      # usage" — es soll kein Geld an GitHub fliessen. Ist der inkludierte Speicher im
+      # Monat aufgebraucht, lehnt GitHub JEDEN weiteren Upload ab
+      # ("Artifact storage quota has been hit") und der Zaehler laeuft erst am 1. des
+      # Folgemonats zurueck. Gemessen am 23.08.2026: 847 GB-Stunden im August, also
+      # rund das 2,3-Fache des Inklusivvolumens.
+      #
+      # Kostentreiber waren die Uploads der ERFOLGREICHEN Laeufe: coverage-reports
+      # 3,6 MB und test-results 1,5 MB pro Lauf, bei ~2 Releases/Tag ueber fuenf
+      # Projekte. Niemand liest sie — im gesamten plaintext-Verbund gibt es keinen
+      # einzigen download-artifact-Schritt, der sie konsumiert; die Coverage-Tabelle
+      # im Job-Summary entsteht unten direkt aus dem Workspace, nicht aus dem Artefakt.
+      # Bei einem gruenen Lauf ist der Report also Ballast, bei einem roten die
+      # Grundlage der Nachanalyse. Deshalb failure() statt always().
+      #
+      # `Build & Test` traegt bewusst KEIN continue-on-error — ein Testfehler faerbt
+      # den Job rot, damit failure() hier greift.
       - name: Upload Test Results
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v7
         continue-on-error: true  # Artefakt-Upload ist nur Convenience/Reporting; darf die Pipeline nicht wegen Storage-Quota o.ae. scheitern lassen
         with:
           name: test-results
           path: '**/target/surefire-reports/*.xml'
-          retention-days: 3
+          retention-days: 1
 
       - name: Upload Coverage Reports
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v7
         continue-on-error: true  # Artefakt-Upload ist nur Convenience/Reporting; darf die Pipeline nicht wegen Storage-Quota o.ae. scheitern lassen
         with:
           name: coverage-reports
           path: '**/target/site/jacoco/'
-          retention-days: 7
+          retention-days: 1
 
       - name: Coverage Summary
         if: always()
@@ -764,7 +783,7 @@ jobs:
           name: owasp-dependency-check-${{ inputs.project-name }}
           path: '**/target/dependency-check-report.json'
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 3
 
       # ── Quality-Gate bewerten: Sonar-Gate ERROR ODER High-CVE (CVSS>=7) ────
       - name: Quality-Gate bewerten
@@ -1277,22 +1296,22 @@ jobs:
           DEV_URL: ${{ inputs.dev-url }}
 
       - name: Upload Integration Test Results (DEV)
-        if: inputs.integration-tests-enabled && always()
+        if: inputs.integration-tests-enabled && failure()
         uses: actions/upload-artifact@v7
         continue-on-error: true  # Artefakt-Upload ist nur Convenience/Reporting; darf die Pipeline nicht wegen Storage-Quota o.ae. scheitern lassen
         with:
           name: integration-test-results-dev
           path: '**/target/failsafe-reports/*.xml'
-          retention-days: 3
+          retention-days: 1
 
       - name: Upload Screenshots (DEV)
-        if: inputs.integration-tests-enabled && always()
+        if: inputs.integration-tests-enabled && failure()
         uses: actions/upload-artifact@v7
         continue-on-error: true  # Artefakt-Upload ist nur Convenience/Reporting; darf die Pipeline nicht wegen Storage-Quota o.ae. scheitern lassen
         with:
           name: playwright-screenshots-dev
           path: '**/target/screenshots/'
-          retention-days: 3
+          retention-days: 1
           if-no-files-found: ignore
 
       # ── Node.js Playwright Tests ──
@@ -1316,13 +1335,13 @@ jobs:
           BASE_URL: ${{ inputs.dev-url }}
 
       - name: Upload Playwright Report (DEV)
-        if: inputs.playwright-enabled && always()
+        if: inputs.playwright-enabled && failure()
         uses: actions/upload-artifact@v7
         continue-on-error: true  # Artefakt-Upload ist nur Convenience/Reporting; darf die Pipeline nicht wegen Storage-Quota o.ae. scheitern lassen
         with:
           name: playwright-report-dev
           path: playwright-report/
-          retention-days: 3
+          retention-days: 1
 
   # ── Verify PROD ────────────────────────────────────────────────
   verify-prod:
@@ -1404,22 +1423,22 @@ jobs:
           PROD_URL: ${{ inputs.prod-url }}
 
       - name: Upload Integration Test Results (PROD)
-        if: inputs.integration-tests-enabled && always()
+        if: inputs.integration-tests-enabled && failure()
         uses: actions/upload-artifact@v7
         continue-on-error: true  # Artefakt-Upload ist nur Convenience/Reporting; darf die Pipeline nicht wegen Storage-Quota o.ae. scheitern lassen
         with:
           name: integration-test-results-prod
           path: '**/target/failsafe-reports/*.xml'
-          retention-days: 3
+          retention-days: 1
 
       - name: Upload Screenshots (PROD)
-        if: inputs.integration-tests-enabled && always()
+        if: inputs.integration-tests-enabled && failure()
         uses: actions/upload-artifact@v7
         continue-on-error: true  # Artefakt-Upload ist nur Convenience/Reporting; darf die Pipeline nicht wegen Storage-Quota o.ae. scheitern lassen
         with:
           name: playwright-screenshots-prod
           path: '**/target/screenshots/'
-          retention-days: 3
+          retention-days: 1
           if-no-files-found: ignore
 
       # ── Node.js Playwright Tests ──
@@ -1443,10 +1462,10 @@ jobs:
           BASE_URL: ${{ inputs.prod-url }}
 
       - name: Upload Playwright Report (PROD)
-        if: inputs.playwright-enabled && always()
+        if: inputs.playwright-enabled && failure()
         uses: actions/upload-artifact@v7
         continue-on-error: true  # Artefakt-Upload ist nur Convenience/Reporting; darf die Pipeline nicht wegen Storage-Quota o.ae. scheitern lassen
         with:
           name: playwright-report-prod
           path: playwright-report/
-          retention-days: 3
+          retention-days: 1
