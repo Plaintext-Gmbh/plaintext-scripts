@@ -23,49 +23,88 @@
 <suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
 
     <!--
-      CVE-2026-66299 — Uncontrolled Resource Consumption, CVSS 7.5.
+      CVE-2026-66299 (Tomcat-WebSocket-Chat-Beispiel): Die beiden versions-gepinnten
+      Suppressions an tomcat-embed-*@11.0.24 sind seit dem 28.08.2026 entfernt — root
+      pinnt Tomcat 11.0.25, und dort ist der CVE behoben (NVD-CPE-Abfrage: 11.0.24
+      traegt 11 CVEs, 11.0.25 null). Die Versions-Pinnung haette ohnehin nicht mehr
+      gegriffen; der Eintrag waere nur noch totes Gewicht gewesen.
+    -->
 
-      NICHT BETROFFEN, gemessen statt angenommen. Die Schwachstelle steckt laut NVD in
-      Tomcats WebSocket-CHAT-BEISPIELANWENDUNG:
-
-        "Uncontrolled Resource Consumption vulnerability in Apache Tomcat's WebSocket chat
-         example. [...] Users who have followed the security guidance to remove the examples
-         web application are not affected by this issue."
-
-      Spring Boot mit eingebettetem Tomcat liefert die Examples-Webapp gar nicht mit.
-      Nachgesehen im laufenden PROD-Jar von plaintext-app am 08.08.2026:
-
-        unzip -l /app/app.jar | grep -iE "examples|chat"
-          -> 1 Treffer: BOOT-INF/classes/db/migration/V1784483469__drop_chat_tables.sql
-             (eine eigene Flyway-Migration, kein Tomcat-Beispiel)
-        Positivkontrolle: 3 tomcat-embed-*.jar sind vorhanden — der Suchausdruck greift.
-
-      KEIN FIX VERFUEGBAR: 11.0.24 ist der neueste Stand auf Maven Central (geprueft an
-      maven-metadata.xml). Die Suppression ist deshalb kein Aufschieben einer Reparatur,
-      sondern die Feststellung, dass es nichts zu reparieren gibt.
-
-      PRUEFEN-AB: 2026-10-01 — oder frueher, sobald Spring Boot eine neuere Tomcat-Version
-      pinnt; dann greift die Versions-Pinnung ohnehin nicht mehr.
+    <!--
+      CVE-2025-15104 — Nu Html Checker (validator.nu), SSRF. CPE-FEHLZUORDNUNG:
+      Die CPE lautet validator:validator; der Scanner matcht sie auf JEDE Bibliothek
+      mit "validator" im Namen. hibernate-validator (Bean Validation) und
+      json-schema-validator (networknt) haben mit validator.nu nichts zu tun —
+      dasselbe CVE an zwei fachfremden Bibliotheken ist das bekannte FP-Muster
+      (Karte: CPE ist sprachagnostisch). Bewusst OHNE Versions-Pinnung: die
+      Fehlzuordnung haengt am Namen, nicht an der Version.
     -->
     <suppress>
         <notes><![CDATA[
-            CVE-2026-66299: betrifft nur Tomcats WebSocket-chat-EXAMPLE, das in einem
-            Spring-Boot-Fat-Jar nicht enthalten ist (am laufenden PROD-Jar nachgesehen).
-            Kein Fix verfuegbar, 11.0.24 ist der neueste Stand. PRUEFEN-AB: 2026-10-01.
+            CVE-2025-15104 gilt validator.nu (Nu Html Checker), nicht Hibernate
+            Bean Validation. CPE-Fehlzuordnung ueber den Namensbestandteil "validator".
         ]]></notes>
-        <packageUrl regex="false">pkg:maven/org.apache.tomcat.embed/tomcat-embed-core@11.0.24</packageUrl>
-        <cve>CVE-2026-66299</cve>
+        <packageUrl regex="true">^pkg:maven/org\.hibernate\.validator/hibernate-validator@.*$</packageUrl>
+        <cve>CVE-2025-15104</cve>
     </suppress>
-
     <suppress>
         <notes><![CDATA[
-            CVE-2026-66299, Schwester-Artefakt. Punkt 4 der Regel oben: Der OWASP-Scanner
-            ordnet dieselbe CVE beiden tomcat-embed-Artefakten zu. Ohne diesen Eintrag
-            bliebe die Haelfte des Befundes stehen und der Build weiterhin rot — genau der
-            Fehler aus Karte 389. PRUEFEN-AB: 2026-10-01.
+            CVE-2025-15104 gilt validator.nu (Nu Html Checker), nicht dem
+            networknt-JSON-Schema-Validator. Gleiche CPE-Fehlzuordnung wie oben.
         ]]></notes>
-        <packageUrl regex="false">pkg:maven/org.apache.tomcat.embed/tomcat-embed-websocket@11.0.24</packageUrl>
-        <cve>CVE-2026-66299</cve>
+        <packageUrl regex="true">^pkg:maven/com\.networknt/json-schema-validator@.*$</packageUrl>
+        <cve>CVE-2025-15104</cve>
+    </suppress>
+
+    <!--
+      CVE-2025-10543 — Eclipse Paho GO (paho.mqtt.golang), UTF-8-Encoding-Fehler.
+      SPRACHFREMD: betrifft die Go-Bibliothek; unsere Jars sind die Java-Clients
+      (mqttv3/mqttv5). Klassischer sprachagnostischer CPE-Match.
+    -->
+    <suppress>
+        <notes><![CDATA[
+            CVE-2025-10543 betrifft paho.mqtt.golang (Go), nicht die Java-Clients.
+        ]]></notes>
+        <packageUrl regex="true">^pkg:maven/org\.eclipse\.paho/org\.eclipse\.paho\.(client\.mqttv3|mqttv5\.client)@.*$</packageUrl>
+        <cve>CVE-2025-10543</cve>
+    </suppress>
+
+    <!--
+      CVE-2026-54285 — opentelemetry-JS (@opentelemetry/core), Baggage-Header ohne
+      Groessenlimit. SPRACHFREMD: betrifft den JavaScript-Client, nicht
+      io.opentelemetry:opentelemetry-api (Java).
+    -->
+    <suppress>
+        <notes><![CDATA[
+            CVE-2026-54285 betrifft opentelemetry-js, nicht das Java-API-Artefakt.
+        ]]></notes>
+        <packageUrl regex="true">^pkg:maven/io\.opentelemetry/opentelemetry-api@.*$</packageUrl>
+        <cve>CVE-2026-54285</cve>
+    </suppress>
+
+    <!--
+      CVE-2026-23907 / CVE-2026-33929 — Apache PDFBox "ExtractEmbeddedFiles example".
+      Beide CVEs betreffen laut NVD ausdruecklich NUR das Beispielprogramm aus dem
+      Examples-Modul (Path Traversal beim Entpacken eingebetteter Dateien). Das
+      Examples-Modul ist keine Abhaengigkeit unserer Apps — im Klassenpfad liegt nur
+      org.apache.pdfbox:pdfbox. PRUEFEN-AB: 2027-03-01 (falls ein spaeterer Fund die
+      Kernbibliothek betrifft, greift diese Suppression wegen der CVE-Nummern nicht).
+    -->
+    <suppress>
+        <notes><![CDATA[
+            Betrifft nur das PDFBox-Beispielprogramm ExtractEmbeddedFiles, das nicht
+            im Klassenpfad liegt. PRUEFEN-AB: 2027-03-01.
+        ]]></notes>
+        <packageUrl regex="true">^pkg:maven/org\.apache\.pdfbox/pdfbox@.*$</packageUrl>
+        <cve>CVE-2026-23907</cve>
+    </suppress>
+    <suppress>
+        <notes><![CDATA[
+            Betrifft nur das PDFBox-Beispielprogramm ExtractEmbeddedFiles, das nicht
+            im Klassenpfad liegt. PRUEFEN-AB: 2027-03-01.
+        ]]></notes>
+        <packageUrl regex="true">^pkg:maven/org\.apache\.pdfbox/pdfbox@.*$</packageUrl>
+        <cve>CVE-2026-33929</cve>
     </suppress>
 
 </suppressions>
