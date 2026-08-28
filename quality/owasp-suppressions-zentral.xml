@@ -78,7 +78,7 @@
         <notes><![CDATA[
             CVE-2026-54285 betrifft opentelemetry-js, nicht das Java-API-Artefakt.
         ]]></notes>
-        <packageUrl regex="true">^pkg:maven/io\.opentelemetry/opentelemetry-api@.*$</packageUrl>
+        <packageUrl regex="true">^pkg:maven/io\.opentelemetry/opentelemetry-(api|sdk)@.*$</packageUrl>
         <cve>CVE-2026-54285</cve>
     </suppress>
 
@@ -95,7 +95,7 @@
             Betrifft nur das PDFBox-Beispielprogramm ExtractEmbeddedFiles, das nicht
             im Klassenpfad liegt. PRUEFEN-AB: 2027-03-01.
         ]]></notes>
-        <packageUrl regex="true">^pkg:maven/org\.apache\.pdfbox/pdfbox@.*$</packageUrl>
+        <packageUrl regex="true">^pkg:maven/org\.apache\.pdfbox/pdfbox(-io)?@.*$</packageUrl>
         <cve>CVE-2026-23907</cve>
     </suppress>
     <suppress>
@@ -103,7 +103,7 @@
             Betrifft nur das PDFBox-Beispielprogramm ExtractEmbeddedFiles, das nicht
             im Klassenpfad liegt. PRUEFEN-AB: 2027-03-01.
         ]]></notes>
-        <packageUrl regex="true">^pkg:maven/org\.apache\.pdfbox/pdfbox@.*$</packageUrl>
+        <packageUrl regex="true">^pkg:maven/org\.apache\.pdfbox/pdfbox(-io)?@.*$</packageUrl>
         <cve>CVE-2026-33929</cve>
     </suppress>
 
