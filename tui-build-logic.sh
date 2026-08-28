@@ -1430,16 +1430,41 @@ deploy_prod_single() {
     return 0
 }
 
+# ── Versionsschritt (rein rechnend, ohne Seiteneffekte -> testbar) ──────────
+# $1 = aktuelle POM-Version (z.B. "1.616.0-SNAPSHOT"), $2 = Increment-Typ (1=MAJOR, 2=MINOR, 3=PATCH)
+# Ausgabe auf stdout: "<Release-Version> <naechste-SNAPSHOT-Version>"
+#
+# WARUM DIE NAECHSTE SNAPSHOT-VERSION DIE RELEASE-NUMMER TRAEGT (und nicht die darauf folgende):
+# Die Release-Nummer wird aus der POM-Version GERECHNET (POM-Version + ein Schritt). Traegt die
+# POM nach dem Release bereits die naechste Nummer, rechnet der folgende Lauf ein zweites Mal
+# hoch — und jede zweite Nummer bleibt unbenutzt. Genau so lief es bis zum 28.08.2026:
+# plaintext-root ging 1.605 -> 1.607 -> 1.609 -> 1.611, plaintext-app 2.376 -> 2.378 -> 2.380,
+# plaintext-iot 1.330 -> 1.332 -> 1.334. Der SNAPSHOT gehoert deshalb auf die GERADE
+# veroeffentlichte Nummer; hochgezaehlt wird erst wieder beim naechsten Release.
+# Wer hier umbaut, laesst test-versionsschritt.sh laufen.
+compute_release_versions() {
+    local CURRENT="${1%-SNAPSHOT}"
+    local TYPE="${2:-2}"
+    local MAJOR MINOR PATCH
+
+    IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+    MAJOR="${MAJOR:-0}"
+    MINOR="${MINOR:-0}"
+    PATCH="${PATCH:-0}"
+
+    case "$TYPE" in
+        1) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+        3) PATCH=$((PATCH + 1)) ;;
+        *) MINOR=$((MINOR + 1)); PATCH=0 ;;
+    esac
+
+    local NEU="${MAJOR}.${MINOR}.${PATCH}"
+    echo "${NEU} ${NEU}-SNAPSHOT"
+}
+
 # Release build, $1=increment type or deploy flag, $2=optional deploy flag
 do_release() {
     echo -e "${YELLOW}=== Release Build ===${NC}"
-
-    CLEAN_VERSION="${CURRENT_VERSION%-SNAPSHOT}"
-
-    IFS='.' read -r -a VERSION_PARTS <<< "$CLEAN_VERSION"
-    MAJOR="${VERSION_PARTS[0]}"
-    MINOR="${VERSION_PARTS[1]}"
-    PATCH="${VERSION_PARTS[2]}"
 
     INCREMENT_TYPE="2"
     DEPLOY_REQUESTED=false
@@ -1469,28 +1494,13 @@ do_release() {
     fi
 
     case "$INCREMENT_TYPE" in
-        1)
-            MAJOR=$((MAJOR + 1))
-            MINOR=0
-            PATCH=0
-            echo -e "${YELLOW}Incrementing MAJOR version${NC}"
-            ;;
-        2)
-            MINOR=$((MINOR + 1))
-            PATCH=0
-            echo -e "${YELLOW}Incrementing MINOR version (default)${NC}"
-            ;;
-        3)
-            PATCH=$((PATCH + 1))
-            echo -e "${YELLOW}Incrementing PATCH version${NC}"
-            ;;
+        1) echo -e "${YELLOW}Incrementing MAJOR version${NC}" ;;
+        3) echo -e "${YELLOW}Incrementing PATCH version${NC}" ;;
+        *) echo -e "${YELLOW}Incrementing MINOR version (default)${NC}" ;;
     esac
 
-    NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+    read -r NEW_VERSION NEXT_SNAPSHOT_VERSION <<< "$(compute_release_versions "$CURRENT_VERSION" "$INCREMENT_TYPE")"
     echo -e "${BLUE}New release version: ${GREEN}${NEW_VERSION}${NC}"
-
-    NEXT_MINOR=$((MINOR + 1))
-    NEXT_SNAPSHOT_VERSION="${MAJOR}.${NEXT_MINOR}.0-SNAPSHOT"
     echo -e "${BLUE}Next SNAPSHOT version: ${GREEN}${NEXT_SNAPSHOT_VERSION}${NC}"
 
     # Karte 410 (M3): Kollisionspruefung VOR dem Build. Ist ${NEW_VERSION} im Release-Repo
