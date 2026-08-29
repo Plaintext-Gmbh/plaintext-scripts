@@ -370,7 +370,8 @@ deploy_lock_acquire() {
     local LOCK
     LOCK=$(deploy_lock_pfad "$ENV_NAME")
     case " ${DEPLOY_LOCK_HELD} " in *" ${ENV_NAME} "*) return 0 ;; esac
-    local INFO="${DEPLOY_LOCK_TOKEN} $(date +%s) ${NEW_VERSION:-${RELEASE_VERSION:-?}}${CI:+ ci}"
+    local INFO
+    INFO="${DEPLOY_LOCK_TOKEN} $(date +%s) ${NEW_VERSION:-${RELEASE_VERSION:-?}}${CI:+ ci}"
     local GEWARTET=0
     while true; do
         if ssh ${DEPLOY_SERVER} "mkdir '${LOCK}' 2>/dev/null && echo '${INFO}' > '${LOCK}/owner'" 2>/dev/null; then
@@ -2225,8 +2226,7 @@ lokal_release_testflag() {
                 echo -e "${BLUE}Tests: starte lokale DB (${RUNTIME} compose up -d)...${NC}"
                 $RUNTIME compose up -d >/dev/null 2>&1 || true
             fi
-            local I
-            for I in $(seq 1 20); do
+            for _ in $(seq 1 20); do
                 lokal_testdb_antwortet "$LOKAL_URL" && break
                 sleep 3
             done
@@ -2237,7 +2237,7 @@ lokal_release_testflag() {
                 local C
                 C=$($RUNTIME ps --format '{{.Names}}' 2>/dev/null | grep -i postgres | head -1)
                 if [ -n "$C" ]; then
-                    for I in $(seq 1 20); do
+                    for _ in $(seq 1 20); do
                         $RUNTIME exec "$C" pg_isready -U "${DB_NAME:-plaintext}" >/dev/null 2>&1 && break
                         sleep 3
                     done
@@ -2291,19 +2291,22 @@ lokal_release_ci_frei() {
         echo -e "${GREEN}✓ Keine CI-Laeufe aktiv${NC}"
         return 0
     fi
-    # Massnahme 5 (29.08.2026): der eigene Release-Push loest auf master einen Lauf aus, der wegen
-    # "[skip-ci]" im Betreff sofort endet — der blockierte frueher den EIGENEN Deploy. Kritisch sind
-    # nur Laeufe des Deploy-Workflows (Name passt auf DEPLOY_WORKFLOW_MUSTER) ohne [skip-ci].
+    # Massnahme 5 (29.08.2026): der eigene Release-Push loeste auf master einen Lauf aus, der wegen
+    # "[skip-ci]" im Betreff sofort endete — der blockierte frueher den EIGENEN Deploy. Kritisch sind
+    # nur Laeufe des Deploy-Workflows (Name passt auf DEPLOY_WORKFLOW_MUSTER) ohne Skip-Marker.
+    # Paket S (Zustandsbericht 29.08.2026): die Release-Commits tragen jetzt das native "[skip ci]",
+    # fuer das GitHub gar keinen Lauf mehr erzeugt. Beide Formen bleiben hier ausgenommen — fuer
+    # von Hand markierte Commits ("[skip-ci]", Rollen-Regel) und fuer Laeufe aus der Uebergangszeit.
     local KRITISCH
     KRITISCH=$(printf '%s\n' "$LAEUFE" | awk -F'\t' -v b="$BRANCH" -v m="${DEPLOY_WORKFLOW_MUSTER:-[Dd]eploy|[Rr]elease}" \
-        '($2 == b || $3 == "workflow_dispatch" || $3 == "schedule") && $4 ~ m && index($5, "[skip-ci]") == 0')
+        '($2 == b || $3 == "workflow_dispatch" || $3 == "schedule") && $4 ~ m && index($5, "[skip-ci]") == 0 && index($5, "[skip ci]") == 0')
     if [ -n "$KRITISCH" ]; then
         echo -e "${RED}✗ CI-Lauf auf ${BRANCH} aktiv — ein lokaler Deploy wuerde mit ihm kollidieren:${NC}"
         printf '%s\n' "$KRITISCH" | awk -F'\t' '{printf "    run %s  [%s, %s]  %s\n", $1, $2, $3, $4}'
         echo -e "${YELLOW}  Warten (gh run watch <id> -R ${REPO}) oder bewusst: LOKAL_RELEASE_IGNORIERE_CI=true${NC}"
         return 1
     fi
-    echo -e "${GREEN}✓ Nur Branch-/PR-/[skip-ci]-Laeufe aktiv (kollidieren nicht mit dem NAS):${NC}"
+    echo -e "${GREEN}✓ Nur Branch-/PR-/Skip-Marker-Laeufe aktiv (kollidieren nicht mit dem NAS):${NC}"
     printf '%s\n' "$LAEUFE" | awk -F'\t' '{printf "    run %s  [%s, %s]  %s\n", $1, $2, $3, $4}'
     return 0
 }

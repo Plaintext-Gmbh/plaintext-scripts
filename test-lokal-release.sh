@@ -55,9 +55,10 @@ pruefe "do_release: Default ' [skip ci]' (nativ, mit Leerzeichen)" "ja" \
     "$(koerper do_release | grep -q 'RELEASE_COMMIT_SUFFIX= \[skip ci\]' && echo ja || echo nein)"
 pruefe "SNAPSHOT-Commit traegt natives [skip ci]" "ja" \
     "$(koerper do_release | grep -q 'Prepare next development iteration .*\[skip ci\]"' && echo ja || echo nein)"
-# Kommentare duerfen die alte Form erklaeren; ausgefuehrter Code nicht.
-BINDESTRICH=$(grep -v '^\s*#' "$SKRIPT" | grep -c 'skip-ci' || true)
-pruefe "kein [skip-ci] (Bindestrich) mehr im Code" "0" "$BINDESTRICH"
+# Kommentare duerfen die alte Form erklaeren; die Commit-Erzeugung nicht. (lokal_release_ci_frei
+# kennt beide Formen absichtlich — deshalb nur die beiden Release-Funktionen.)
+BINDESTRICH=$({ koerper do_release; koerper do_local_release; } | grep -v '^\s*#' | grep -c 'skip-ci' || true)
+pruefe "kein [skip-ci] (Bindestrich) mehr in do_release/do_local_release" "0" "$BINDESTRICH"
 
 # 2. Der Default liegt NICHT im CI-Guard von do_release (sonst haette die CI keinen Marker)
 Z_R_CI_IF=$(zeile_in do_release 'if [ "${CI:-}" != "true" ]')
@@ -104,57 +105,56 @@ for fn in deploy_to_dev deploy_to_prod; do
         "$(koerper "$fn" | grep -q 'lokal_release_ci_frei' && echo ja || echo nein)"
 done
 
-# 7. Massnahmen 1-5 (29.08.2026, PROD 502 durch zwei parallele Lokal-Releases)
-fn_body() { awk "/^${1}\\(\\) \\{/,/^\\}/" "$SKRIPT"; }
+# 6. Massnahmen 1-5 (29.08.2026, PROD 502 durch zwei parallele Lokal-Releases)
 # M1: deploy_blue_green exportiert die Slots; die Aufrufer stoppen NUR diese; stop_slot schuetzt
 pruefe "M1: deploy_blue_green exportiert BG_ALT_SLOT/BG_NEU_SLOT" "ja" \
-    "$(fn_body deploy_blue_green | grep -q 'BG_ALT_SLOT="\$ACTIVE_SLOT"' && fn_body deploy_blue_green | grep -q 'BG_NEU_SLOT="\$INACTIVE_SLOT"' && echo ja || echo nein)"
+    "$(koerper deploy_blue_green | grep -q 'BG_ALT_SLOT="\$ACTIVE_SLOT"' && koerper deploy_blue_green | grep -q 'BG_NEU_SLOT="\$INACTIVE_SLOT"' && echo ja || echo nein)"
 pruefe "M1: deploy_to_prod uebernimmt BG_ALT_SLOT nach dem Deploy" "ja" \
-    "$(fn_body deploy_to_prod_gesperrt | grep -q 'ACTIVE_SLOT="\${BG_ALT_SLOT:-' && echo ja || echo nein)"
+    "$(koerper deploy_to_prod_gesperrt | grep -q 'ACTIVE_SLOT="\${BG_ALT_SLOT:-' && echo ja || echo nein)"
 pruefe "M1: deploy_to_dev uebernimmt BG_ALT_SLOT nach dem Deploy" "ja" \
-    "$(fn_body deploy_to_dev_gesperrt | grep -q 'OLD_SLOT="\${BG_ALT_SLOT:-' && echo ja || echo nein)"
+    "$(koerper deploy_to_dev_gesperrt | grep -q 'OLD_SLOT="\${BG_ALT_SLOT:-' && echo ja || echo nein)"
 pruefe "M1: alter PROD-Slot wird mit Versions-Schutz gestoppt" "ja" \
-    "$(fn_body deploy_to_prod_gesperrt | grep -q 'stop_slot "prod" "\$ACTIVE_SLOT" "\$RELEASE_VERSION"' && echo ja || echo nein)"
+    "$(koerper deploy_to_prod_gesperrt | grep -q 'stop_slot "prod" "\$ACTIVE_SLOT" "\$RELEASE_VERSION"' && echo ja || echo nein)"
 pruefe "M1: stop_slot verweigert den aktiven Slot (Marker)" "ja" \
-    "$(fn_body stop_slot | grep -q 'get_active_slot "\$ENV_NAME"' && fn_body stop_slot | grep -q 'VERWEIGERT' && echo ja || echo nein)"
+    "$(koerper stop_slot | grep -q 'get_active_slot "\$ENV_NAME"' && koerper stop_slot | grep -q 'VERWEIGERT' && echo ja || echo nein)"
 pruefe "M1: stop_slot verweigert Container mit der neuen Version" "ja" \
-    "$(fn_body stop_slot | grep -q 'nosec/version' && echo ja || echo nein)"
+    "$(koerper stop_slot | grep -q 'nosec/version' && echo ja || echo nein)"
 # M2: Deploy-Lock auf dem NAS um den ganzen Rollout, Freigabe auf jedem Pfad
 pruefe "M2: deploy_to_prod haelt den NAS-Deploy-Lock" "ja" \
-    "$(fn_body deploy_to_prod | grep -q 'deploy_lock_acquire "prod"' && fn_body deploy_to_prod | grep -q 'deploy_lock_release "prod"' && echo ja || echo nein)"
+    "$(koerper deploy_to_prod | grep -q 'deploy_lock_acquire "prod"' && koerper deploy_to_prod | grep -q 'deploy_lock_release "prod"' && echo ja || echo nein)"
 pruefe "M2: deploy_to_dev haelt den NAS-Deploy-Lock" "ja" \
-    "$(fn_body deploy_to_dev | grep -q 'deploy_lock_acquire "int"' && fn_body deploy_to_dev | grep -q 'deploy_lock_release "int"' && echo ja || echo nein)"
+    "$(koerper deploy_to_dev | grep -q 'deploy_lock_acquire "int"' && koerper deploy_to_dev | grep -q 'deploy_lock_release "int"' && echo ja || echo nein)"
 pruefe "M2: Staging-Kopie unter Lock" "ja" \
-    "$(fn_body stage_jar_to_nas | grep -q 'deploy_lock_acquire "staging"' && echo ja || echo nein)"
+    "$(koerper stage_jar_to_nas | grep -q 'deploy_lock_acquire "staging"' && echo ja || echo nein)"
 pruefe "M2: Lock wird nur vom Besitzer geloest" "ja" \
-    "$(fn_body deploy_lock_release | grep -q 'DEPLOY_LOCK_TOKEN' && echo ja || echo nein)"
+    "$(koerper deploy_lock_release | grep -q 'DEPLOY_LOCK_TOKEN' && echo ja || echo nein)"
 pruefe "M2: nginx-Sicherungskopie je Lauf eindeutig" "ja" \
     "$(grep -q 'upstream.conf.\${DEPLOY_LOCK_TOKEN}.bak' "$SKRIPT" && ! grep -q 'upstream.conf.bak' "$SKRIPT" && echo ja || echo nein)"
 # M3: pg_dump schnell + fail-fast, Backup nur bei Migration
 pruefe "M3: pg_dump ohne -Z 9, mit --lock-wait-timeout" "ja" \
-    "$(fn_body backup_prod_db | grep -q 'lock-wait-timeout' && ! fn_body backup_prod_db | grep -q -- '-Z 9 ' && echo ja || echo nein)"
+    "$(koerper backup_prod_db | grep -q 'lock-wait-timeout' && ! koerper backup_prod_db | grep -q -- '-Z 9 ' && echo ja || echo nein)"
 pruefe "M3: PROD-Backup nur wenn backup_noetig" "ja" \
-    "$(fn_body deploy_to_prod_gesperrt | grep -q 'if backup_noetig; then' && echo ja || echo nein)"
+    "$(koerper deploy_to_prod_gesperrt | grep -q 'if backup_noetig; then' && echo ja || echo nein)"
 pruefe "M3: backup_noetig ist fail-safe (unbekannt = sichern)" "ja" \
-    "$(fn_body backup_noetig | grep -q 'nicht ermittelbar' && echo ja || echo nein)"
+    "$(koerper backup_noetig | grep -q 'nicht ermittelbar' && echo ja || echo nein)"
 # M4: Tests im Lokal-Release, wenn eine DB da ist
 Z_TESTFLAG=$(zeile_in_lokal 'lokal_release_testflag')
 pruefe "M4: Test-Flag wird im Lokal-Release ermittelt (vor do_release)" "ja" \
     "$([ -n "${Z_TESTFLAG:-}" ] && [ -n "${Z_RELEASE:-}" ] && [ "$Z_TESTFLAG" -lt "$Z_RELEASE" ] && echo ja || echo nein)"
 pruefe "M4: mit DB laufen die Unit-Tests wie in der CI" "ja" \
-    "$(fn_body lokal_release_testflag | grep -q -- '-DskipITs -DexcludedGroups=quality-gate' && echo ja || echo nein)"
-# M5: CI-Sperre ignoriert [skip-ci]-Laeufe; Tag-Vorpruefung
-pruefe "M5: CI-Sperre ignoriert [skip-ci]-Laeufe" "ja" \
-    "$(fn_body lokal_release_ci_frei | grep -q 'index(\$5, "\[skip-ci\]") == 0' && echo ja || echo nein)"
+    "$(koerper lokal_release_testflag | grep -q -- '-DskipITs -DexcludedGroups=quality-gate' && echo ja || echo nein)"
+# M5: CI-Sperre ignoriert Laeufe mit Skip-Marker (beide Formen, Paket S); Tag-Vorpruefung
+pruefe "M5: CI-Sperre ignoriert [skip-ci]- UND [skip ci]-Laeufe" "ja" \
+    "$(koerper lokal_release_ci_frei | grep -q 'index(\$5, "\[skip-ci\]") == 0 && index(\$5, "\[skip ci\]") == 0' && echo ja || echo nein)"
 Z_TAG=$(zeile_in_lokal 'git ls-remote --tags origin')
 pruefe "M5: geplanter Tag wird VOR do_release auf origin geprueft" "ja" \
     "$([ -n "${Z_TAG:-}" ] && [ -n "${Z_RELEASE:-}" ] && [ "$Z_TAG" -lt "$Z_RELEASE" ] && echo ja || echo nein)"
 
-# 6. Rueckbau nimmt nur zurueck, was NICHT auf origin ist
+# 7. Rueckbau nimmt nur zurueck, was NICHT auf origin ist
 pruefe "Rueckbau prueft origin-Zugehoerigkeit" "ja" \
     "$(koerper lokal_release_rueckbau | grep -q 'merge-base --is-ancestor HEAD' && echo ja || echo nein)"
 
-# 7. GitHub-Release mit Notes: NACH dem Tag-Push, und nie fatal
+# 8. GitHub-Release mit Notes: NACH dem Tag-Push, und nie fatal
 Z_TAGPUSH=$(zeile_in do_release 'git push origin "refs/tags/')
 Z_NOTES=$(zeile_in do_release 'release_notes_erzeugen "${NEW_VERSION}"')
 pruefe "Release-Notes werden erzeugt" "ja" "$([ -n "${Z_NOTES:-}" ] && echo ja || echo nein)"
