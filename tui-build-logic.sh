@@ -1750,7 +1750,10 @@ do_local_release() {
         return 1
     fi
     echo -e "${BLUE}Git: origin nachziehen (fetch)...${NC}"
-    if ! git fetch origin --tags -q; then
+    # Bewusst OHNE --tags: lokale Tags, die vom Remote abweichen (plaintext-app: v56.x), lassen
+    # `git fetch --tags` mit "would clobber existing tag" scheitern — Release-Tags (n.n.n) kommen
+    # mit der Branch-Historie ohnehin mit, und do_release prueft den Tag-Push selbst.
+    if ! git fetch origin -q; then
         echo -e "${RED}✗ git fetch origin fehlgeschlagen — ohne Netz kein Release.${NC}"
         return 1
     fi
