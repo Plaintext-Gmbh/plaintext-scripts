@@ -31,6 +31,7 @@ pruefe() { if [ "$2" = "$3" ]; then printf '  ok   %s\n' "$1"
 AUSSCHNITT="$(mktemp)"
 trap 'rm -f "$AUSSCHNITT"' EXIT
 awk '/^compute_release_versions\(\) \{$/,/^\}$/' "$SKRIPT" > "$AUSSCHNITT"
+awk '/^hoechste_version\(\) \{$/,/^\}$/' "$SKRIPT" >> "$AUSSCHNITT"
 
 if ! grep -q 'compute_release_versions()' "$AUSSCHNITT"; then
     echo "  FEHL compute_release_versions() nicht im Skript gefunden" >&2
@@ -80,6 +81,19 @@ read -r R1 S1 <<< "$(compute_release_versions '1.616.0-SNAPSHOT' 1)"
 read -r R2 S2 <<< "$(compute_release_versions "$S1" 2)"
 read -r R3 _  <<< "$(compute_release_versions "$S2" 3)"
 pruefe "MAJOR -> MINOR -> PATCH" "2.0.0 2.1.0 2.1.1" "$R1 $R2 $R3"
+
+echo "== Massnahme 11: Basis = MAX(Tag, POM) ===================================="
+pruefe "Tag liegt vor der POM -> Tag"       "2.1710.0" "$(hoechste_version '2.1708.0-SNAPSHOT' '2.1710.0')"
+pruefe "POM liegt vor dem Tag -> POM"       "2.1711.0" "$(hoechste_version '2.1711.0-SNAPSHOT' '2.1710.0')"
+pruefe "gleich -> gleich"                    "2.1710.0" "$(hoechste_version '2.1710.0-SNAPSHOT' '2.1710.0')"
+pruefe "kein Tag -> POM"                     "1.0.0"    "$(hoechste_version '1.0.0-SNAPSHOT' '')"
+pruefe "numerisch, nicht lexikalisch"       "1.100.0"  "$(hoechste_version '1.99.0' '1.100.0')"
+pruefe "Folge-Release nach abgebrochenem Lauf (Tag 2.1710.0, POM 2.1709.0-SNAPSHOT) = 2.1711.0" \
+       "2.1711.0 2.1711.0-SNAPSHOT" "$(compute_release_versions "$(hoechste_version '2.1709.0-SNAPSHOT' '2.1710.0')" 2)"
+pruefe "do_release rechnet ab versionsbasis" "ja" \
+       "$(sed -n '/^do_release() {/,/^}/p' "$SKRIPT" | grep -q 'compute_release_versions "$(versionsbasis' && echo ja || echo nein)"
+pruefe "Lokal-Release-Plan rechnet ab versionsbasis" "ja" \
+       "$(sed -n '/^do_local_release() {/,/^}/p' "$SKRIPT" | grep -q 'compute_release_versions "$(versionsbasis' && echo ja || echo nein)"
 
 echo "== Regressionswaechter ===================================================="
 # Der alte Fehler in Reinform: die zweite Erhoehung auf der bereits erhoehten MINOR.
