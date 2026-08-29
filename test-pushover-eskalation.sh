@@ -59,19 +59,22 @@ export WERKSTATT_LOG="$WERKSTATT/log"; mkdir -p "$WERKSTATT_LOG"
 # Setzt das Alter eines Vorgangs kuenstlich hoch, damit die Frist ohne Warten greift.
 altern() { # altern <schluessel> <minuten>
     local d="$ESKALATION_STATE_DIR/$1.vorgang"
-    sed -i "1s/.*/$(( $(date +%s) - $2 * 60 ))/" "$d"
+    # Kein `sed -i` (BSD/GNU-Unterschied, siehe vorgang_status_setzen im Skript): Tmp-Datei + mv.
+    sed "1s/.*/$(( $(date +%s) - $2 * 60 ))/" "$d" > "$d.tmp" && mv "$d.tmp" "$d"
 }
+# `wc -l` auf macOS mit fuehrenden Leerzeichen ("       1") — fuer den Stringvergleich glaetten.
+zeilen() { tr -d ' ' < <(wc -l < "$1"); }
 
 echo "== Melden ================================================================="
 AUSGABE="$("$SKRIPT" melde "PROD-Web down" "Monitor meldet 502 seit 3 Minuten." "prod-web" 2>&1)"
 pruefe "melde liefert einen Beleg-Schluessel" "ja" "$([ -n "$AUSGABE" ] && echo ja || echo nein)"
-pruefe "genau eine Sendung" "1" "$(wc -l < "$WERKSTATT_LOG/sendungen")"
+pruefe "genau eine Sendung" "1" "$(zeilen "$WERKSTATT_LOG/sendungen")"
 pruefe "mit Emergency-Prioritaet" "ja" "$(grep -q -- "-p 2" "$WERKSTATT_LOG/sendungen" && echo ja || echo nein)"
 pruefe "Vorgang angelegt und offen" "offen" "$(sed -n '3p' "$ESKALATION_STATE_DIR/prod-web.vorgang" 2>/dev/null)"
 
 echo "== Zweiter Alarm zum selben Vorfall ======================================="
 "$SKRIPT" melde "PROD-Web down" "Nochmal dasselbe." "prod-web" >/dev/null 2>&1
-pruefe "kein zweiter Emergency zum offenen Vorgang" "1" "$(wc -l < "$WERKSTATT_LOG/sendungen")"
+pruefe "kein zweiter Emergency zum offenen Vorgang" "1" "$(zeilen "$WERKSTATT_LOG/sendungen")"
 
 echo "== Pruefen vor Ablauf der Frist ==========================================="
 "$SKRIPT" pruefen >/dev/null 2>&1
@@ -93,14 +96,14 @@ echo "== RUECKKOPPLUNGSTEST (Definition of Done) ===============================
 for _ in 1 2 3; do "$SKRIPT" pruefen >/dev/null 2>&1; done
 pruefe "auch nach drei weiteren Laeufen genau EIN Auftrag" "1" "$(grep -c AUFTRAG "$WERKSTATT_LOG/auftraege")"
 "$SKRIPT" melde "PROD-Web down" "Der Dienst wackelt erneut." "prod-web" >/dev/null 2>&1
-pruefe "erneuter Alarm in der Sperrzeit sendet nicht" "1" "$(wc -l < "$WERKSTATT_LOG/sendungen")"
+pruefe "erneuter Alarm in der Sperrzeit sendet nicht" "1" "$(zeilen "$WERKSTATT_LOG/sendungen")"
 pruefe "und erzeugt keinen zweiten Auftrag" "1" "$(grep -c AUFTRAG "$WERKSTATT_LOG/auftraege")"
 
 echo "== Entwarnung gibt den Vorfall wieder frei ================================"
 "$SKRIPT" ende prod-web >/dev/null 2>&1
 pruefe "Vorgang nach Entwarnung entfernt" "nein" "$([ -f "$ESKALATION_STATE_DIR/prod-web.vorgang" ] && echo ja || echo nein)"
 "$SKRIPT" melde "PROD-Web down" "Neuer Vorfall nach Entwarnung." "prod-web" >/dev/null 2>&1
-pruefe "nach Entwarnung wird wieder gesendet" "2" "$(wc -l < "$WERKSTATT_LOG/sendungen")"
+pruefe "nach Entwarnung wird wieder gesendet" "2" "$(zeilen "$WERKSTATT_LOG/sendungen")"
 
 echo "== Quittierter Alarm eskaliert nicht ======================================"
 : > "$WERKSTATT_LOG/auftraege"

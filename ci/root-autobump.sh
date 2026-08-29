@@ -22,6 +22,13 @@
 # Quelle NICHT: der Tag entsteht vor dem `mvn deploy`, ein Tag ohne publizierte Artefakte
 # wuerde einen unaufloesbaren Bump erzeugen.
 #
+# Und auch die <release>-Angabe der metadata reicht nicht (Massnahme 4, 29.08.2026): sie steht,
+# sobald der PARENT hochgeladen ist — die 24 Module folgen ueber rund 15 Minuten. Ein Bump in
+# diesem Fenster sieht ein halbes Release. Deshalb gilt eine Version erst als veroeffentlicht,
+# wenn JEDES Modul aus ihrem Parent-POM als <modul>-<version>.pom im Repo liegt
+# (ci/reposilite-release.sh). Fehlt eines, bumpt dieser Lauf nicht und sagt das (Exit 0, kein
+# Fehler) — der naechste Lauf sieht das fertige Release.
+#
 # PORTABEL: laeuft auf den Linux-Runnern UND lokal auf macOS (BSD-Werkzeuge). Deshalb kein
 # `sed -i` — GNU sed nimmt `-i` ohne Argument, BSD sed verlangt `-i ''`; die App-Kopien
 # scheiterten lokal genau daran. Ersetzt wird ueber eine Tmp-Datei (ersetze_in_pom).
@@ -29,7 +36,9 @@
 # Usage:
 #   root-autobump.sh detect   -> schreibt current/parent/latest/behind nach stdout (+ GITHUB_OUTPUT)
 #   root-autobump.sh apply    -> aendert pom.xml auf die neueste Version
-# Umgebung: POM_FILE (Default pom.xml), ROOT_MAVEN_REPO (Default https://maven.plaintext.ch/releases)
+# Umgebung: POM_FILE (Default pom.xml), ROOT_MAVEN_REPO (Default https://maven.plaintext.ch/releases),
+#           BUMP_IGNORIERE_MODULE (Leerzeichen-getrennt: Module, die absichtlich nie deployt werden
+#           und deshalb nicht auf die Vollstaendigkeit einzahlen; heute keines)
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -38,6 +47,12 @@ REPO_BASE="${ROOT_MAVEN_REPO:-https://maven.plaintext.ch/releases}"
 GROUP_PATH="ch/plaintext"
 
 die() { echo "::error::$*" >&2; exit 1; }
+
+# Vollstaendigkeitspruefung (Massnahme 4) — dieselben Funktionen wie die Selbstkontrolle des
+# Release-Jobs in tui-build-logic.sh. Liegt neben diesem Skript; ein App-Wrapper (README) zeigt
+# per exec hierher, der Checkout im Workflow bringt beide Dateien mit.
+# shellcheck source=ci/reposilite-release.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/reposilite-release.sh"
 
 # sed-Ersetzung in der pom ohne `-i` (BSD/GNU-Unterschied, siehe Kopf): Tmp-Datei + mv.
 ersetze_in_pom() {   # $1 = sed-Ausdruck
@@ -84,24 +99,41 @@ required_artifacts() {
   } | sort -u
 }
 
+# Neueste Version laut <release> der Parent-Metadata. NUR die Nummer — ob das Release schon
+# vollstaendig hochgeladen ist, sagt release_fehlend; ob es alles traegt, was DIESE pom braucht,
+# sagt pruefe_benoetigte_artefakte. Die Reihenfolge der beiden ist Absicht (siehe detect).
 latest_version() {
   local meta candidate
   meta="$(fetch_metadata plaintext-root-parent)"
   candidate="$(echo "$meta" | grep -o '<release>[^<]*</release>' | sed 's/.*<release>//;s/<.*//')"
   [ -n "$candidate" ] || die "kein <release> in der metadata von plaintext-root-parent"
+  echo "$candidate"
+}
 
-  # Safety: die Kandidatenversion muss fuer JEDES benoetigte Artefakt publiziert sein. Sonst
-  # wuerde ein halb durchgelaufener root-Deploy (Karte 361: kaputte Deploy-Pfade) einen Bump
-  # erzeugen, der gar nicht aufloesbar ist.
-  local a
+# Massnahme 4: Welche Module des root-Release $1 fehlen noch im Repo? stdout: Liste
+# (leer = vollstaendig); Rueckgabe wie reposilite_release_fehlend (0 vollstaendig, 1 unvollstaendig,
+# 2 Parent-POM nicht abrufbar, 3 Parent-POM ohne Module). Ein unvollstaendiges Release ist KEIN
+# Fehler dieses Skripts, sondern ein Zeitfenster — der Aufrufer wartet auf den naechsten Lauf.
+release_fehlend() {
+  reposilite_release_fehlend "$REPO_BASE" "$GROUP_PATH" plaintext-root-parent "$1" "${BUMP_IGNORIERE_MODULE:-}"
+}
+
+# Safety (seit Karte 361, kaputte Deploy-Pfade): die Version muss fuer JEDES Artefakt publiziert
+# sein, an dem diese pom haengt. Laeuft NACH release_fehlend — dann ist das Release vollstaendig,
+# und ein hier fehlendes Artefakt ist kein Zeitfenster mehr, sondern ein echtes Problem (Modul in
+# root umbenannt oder entfernt): harter Abbruch, damit es jemand sieht.
+pruefe_benoetigte_artefakte() {   # $1 = Version
+  local a fehlend
+  local -a benoetigt
+  benoetigt=()
   while read -r a; do
     [ -n "$a" ] || continue
-    if ! fetch_metadata "$a" | grep -q "<version>${candidate}</version>"; then
-      die "root-Release ${candidate} ist fuer Artefakt '${a}' NICHT publiziert — Bump abgebrochen (unvollstaendiger root-Deploy?)"
-    fi
+    benoetigt[${#benoetigt[@]}]="$a"
   done < <(required_artifacts)
-
-  echo "$candidate"
+  [ "${#benoetigt[@]}" -gt 0 ] || return 0
+  fehlend="$(reposilite_fehlende_artefakte "$REPO_BASE" "$GROUP_PATH" "$1" "${benoetigt[@]}" | tr '\n' ' ')" || true
+  [ -z "${fehlend% }" ] \
+    || die "root-Release $1 ist fuer Artefakt(e) ${fehlend% } NICHT publiziert, obwohl das Release vollstaendig ist — Bump abgebrochen (Modul in root umbenannt/entfernt?)"
 }
 
 # 1.631.0 < 1.635.0 ; verhindert Downgrades bei zurueckgezogenen Releases.
@@ -166,27 +198,53 @@ case "${1:-detect}" in
   detect)
     LATEST="$(latest_version)"
     BEHIND="$(count_behind "$CUR")"
-    echo "current=${CUR} parent=${PAR} latest=${LATEST} behind=${BEHIND}"
+    BUMP=false
+    if version_gt "$LATEST" "$CUR" || [ "$PAR" != "$LATEST" ]; then BUMP=true; fi
+
+    # Massnahme 4: nur ein VOLLSTAENDIGES Release wird vorgeschlagen. Die Pruefung laeuft nur,
+    # wenn ueberhaupt ein Bump anstuende — ein Repo auf dem neuesten Stand braucht keine 24 HEADs.
+    FEHLEND=""; VOLL=0
+    if [ "$BUMP" = true ]; then
+      FEHLEND="$(release_fehlend "$LATEST")" && VOLL=0 || VOLL=$?
+      if [ "$VOLL" -ne 0 ]; then
+        BUMP=false
+      else
+        pruefe_benoetigte_artefakte "$LATEST"
+      fi
+    fi
+
+    echo "current=${CUR} parent=${PAR} latest=${LATEST} behind=${BEHIND} vollstaendig=$([ "$VOLL" -eq 0 ] && echo ja || echo nein) bump=${BUMP}"
     if [ -n "${GITHUB_OUTPUT:-}" ]; then
       {
         echo "current=${CUR}"
         echo "parent=${PAR}"
         echo "latest=${LATEST}"
         echo "behind=${BEHIND}"
-        if version_gt "$LATEST" "$CUR" || [ "$PAR" != "$LATEST" ]; then
-          echo "bump=true"
-        else
-          echo "bump=false"
-        fi
+        echo "vollstaendig=$([ "$VOLL" -eq 0 ] && echo true || echo false)"
+        echo "fehlend=${FEHLEND}"
+        echo "bump=${BUMP}"
       } >> "$GITHUB_OUTPUT"
     fi
-    version_gt "$LATEST" "$CUR" || [ "$PAR" != "$LATEST" ]
+    if [ "$VOLL" -ne 0 ]; then
+      # Kein Fehler: das Release ist gerade im Upload (oder der Parent noch nicht da). Exit 0,
+      # damit der Lauf gruen bleibt und niemand einen kaputten Bump vermutet. Steht dieselbe
+      # Meldung ueber Stunden, ist es kein Zeitfenster mehr: dann fehlt ein Modul wirklich
+      # (Upload abgebrochen, maven.deploy.skip -> BUMP_IGNORIERE_MODULE).
+      echo "::notice title=Auto-Bump wartet::$(reposilite_fehlend_text "$VOLL" "$LATEST" "$FEHLEND"), naechster Lauf"
+      exit 0
+    fi
+    [ "$BUMP" = true ]
     ;;
   apply)
     LATEST="${2:-$(latest_version)}"
     version_gt "$LATEST" "$CUR" || [ "$PAR" != "$LATEST" ] \
       || die "kein Bump noetig (current=${CUR}, parent=${PAR}, latest=${LATEST})"
     version_gt "$CUR" "$LATEST" && die "Downgrade ${CUR} -> ${LATEST} verweigert"
+    # Auch hier (Massnahme 4): apply mit einer Version, die noch nicht ganz da ist, ist ein
+    # ausdruecklicher Auftrag, der nicht erfuellbar ist — anders als in detect deshalb ein Fehler.
+    FEHLEND="$(release_fehlend "$LATEST")" && VOLL=0 || VOLL=$?
+    [ "$VOLL" -eq 0 ] || die "$(reposilite_fehlend_text "$VOLL" "$LATEST" "$FEHLEND") — kein Bump"
+    pruefe_benoetigte_artefakte "$LATEST"
     apply_pom "$CUR" "$LATEST"
     echo "pom.xml: plaintext-root ${CUR} -> ${LATEST} (parent ${PAR} -> ${LATEST})"
     ;;

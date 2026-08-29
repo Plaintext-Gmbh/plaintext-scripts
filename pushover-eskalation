@@ -180,6 +180,16 @@ EOF
     echo "datei:$ablage"
 }
 
+# Zeile 3 der Vorgangsdatei (Status) setzen — OHNE `sed -i`. GNU sed nimmt -i ohne Argument,
+# BSD sed (macOS — laut Kopf laeuft dieser Dienst auf der Arbeitsstation) verlangt -i '' und
+# las hier den Dateinamen als Skript ("invalid command code"). Der Status blieb auf macOS damit
+# immer "offen": jeder Lauf von `pruefen` legte einen weiteren Auftrag an — genau die
+# Rueckkopplung, die der Dienst verhindern soll (29.08.2026, test-pushover-eskalation.sh rot).
+# Tmp-Datei + mv, dasselbe Muster wie ersetze_in_pom in ci/root-autobump.sh.
+vorgang_status_setzen() {   # $1 = Vorgangsdatei, $2 = Status
+    sed "3s/.*/$2/" "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+
 pruefen() {
     mkdir -p "$STATE_DIR"
     local gefunden=0
@@ -197,7 +207,7 @@ pruefen() {
 
         # Quittiert? Dann ist der Alarm angekommen — Vorgang schliessen, nichts eskalieren.
         if "$PUSHOVER" --quittiert "$receipt" >/dev/null 2>&1; then
-            sed -i '3s/.*/quittiert/' "$datei"
+            vorgang_status_setzen "$datei" quittiert
             log "pruefen: '$sk' wurde quittiert (nach ${alt} Min) — keine Eskalation"
             continue
         fi
@@ -206,7 +216,7 @@ pruefen() {
             continue
         fi
         local weg; weg="$(auftrag_anlegen "$sk" "$titel" "$text" "$receipt" "$alt")"
-        sed -i '3s/.*/eskaliert/' "$datei"
+        vorgang_status_setzen "$datei" eskaliert
         log "pruefen: '$sk' nach ${alt} Min unquittiert — Auftrag angelegt ueber: $weg"
         echo "ESKALIERT: $sk (${alt} Min unquittiert) — Auftrag: $weg"
     done

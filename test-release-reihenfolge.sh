@@ -47,6 +47,17 @@ pruefe "Release-Push steht NACH dem Tag" "ja" \
 pruefe "SNAPSHOT-Push steht NACH mvn deploy" "ja" \
        "$([ "${PUSH_SNAPSHOT:-0}" -gt "${DEPLOY:-0}" ] 2>/dev/null && echo ja || echo nein)"
 
+# Massnahme 4 (29.08.2026): die Selbstkontrolle "liegt jedes Modul im Release-Repo?" gehoert
+# unmittelbar HINTER mvn deploy und VOR den SNAPSHOT-Push — sie prueft das Ergebnis des Deploys,
+# nicht den Zustand davor, und darf den Release nicht verzoegern (nie fatal, test-root-autobump.sh).
+SELBST=$(zeile 'release_vollstaendig_pruefen "${NEW_VERSION}"')
+pruefe "Selbstkontrolle (release_vollstaendig_pruefen) vorhanden" "ja" \
+       "$([ -n "$SELBST" ] && echo ja || echo nein)"
+pruefe "Selbstkontrolle steht NACH mvn deploy" "ja" \
+       "$([ "${SELBST:-0}" -gt "${DEPLOY:-0}" ] 2>/dev/null && echo ja || echo nein)"
+pruefe "Selbstkontrolle steht VOR dem SNAPSHOT-Push" "ja" \
+       "$([ "${SELBST:-0}" -lt "${PUSH_SNAPSHOT:-0}" ] 2>/dev/null && echo ja || echo nein)"
+
 echo "== Fehlerverhalten ========================================================"
 # Scheitert der Release-Push, ist nichts veroeffentlicht -> harter Abbruch ist richtig.
 NACH_PUSH=$(sed -n "${PUSH_RELEASE},$((PUSH_RELEASE + 14))p" "$SKRIPT" 2>/dev/null)

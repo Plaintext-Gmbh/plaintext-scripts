@@ -11,6 +11,9 @@
 # Source common functions for config loading
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPTS_DIR/common-functions.sh"
+# Massnahme 4 (29.08.2026): Vollstaendigkeit eines Multi-Modul-Release im Release-Repo —
+# dieselben Funktionen, mit denen der Auto-Bump der Consumer (ci/root-autobump.sh) wartet.
+source "$SCRIPTS_DIR/ci/reposilite-release.sh"
 
 if ! load_build_conf "$SCRIPT_DIR"; then
     echo "ERROR: build-conf.txt not found (checked plaintext-config and $SCRIPT_DIR)" >&2
@@ -1729,6 +1732,56 @@ release_notes_erzeugen() {   # $1 = Tag/Version
     return 0
 }
 
+# ── Selbstkontrolle nach mvn deploy: liegt jedes Modul der Version im Release-Repo? ───────
+# Massnahme 4 (Zustandsbericht 29.08.2026), Gegenstueck zur Wartepruefung im Auto-Bump
+# (ci/root-autobump.sh) — beide nutzen ci/reposilite-release.sh. Dort WARTET der Bump, solange
+# ein Modul fehlt; hier wird sichtbar, WENN ein Release nach gruenem `mvn deploy` unvollstaendig
+# bleibt (Modul mit maven.deploy.skip, abgebrochener Upload, Reposilite-Fehler) — sonst stuende
+# der Auto-Bump aller Consumer still, und die Meldung "naechster Lauf" dort klaenge nach Zeit.
+#
+# NIE FATAL: mvn deploy war gruen, Release-Commit und Tag sind draussen (Karte 518). Ein Abbruch
+# hier liesse nur den SNAPSHOT-Commit aus und machte das Release um nichts vollstaendiger.
+# Deshalb rote Zeile im Log, in der CI zusaetzlich eine ::warning-Annotation, immer return 0.
+# Nur fuer Multi-Modul-Projekte (<module> im Parent-POM); Einzelmodul-Projekte: nichts zu tun.
+release_vollstaendig_pruefen() {   # $1 = Version
+    local VERSION="$1" BASIS GRUPPE ARTEFAKT MODULE M A FEHLEND RC
+    local -a IDS
+    IDS=()
+    [ "${MVN_RELEASE_DEPLOY:-false}" = "true" ] || return 0
+    grep -q '<module>' pom.xml 2>/dev/null || return 0
+    BASIS="${RELEASE_REPO_URL:-https://maven.plaintext.ch/releases}"
+    GRUPPE="${REL_GROUP:-}"; ARTEFAKT="${REL_ARTIFACT:-}"
+    if [ -z "$GRUPPE" ] || [ -z "$ARTEFAKT" ]; then
+        echo -e "${YELLOW}⚠ Maven-Koordinaten nicht ermittelbar — Vollstaendigkeitspruefung uebersprungen.${NC}"
+        return 0
+    fi
+    MODULE="$(reposilite_module_liste "$BASIS" "$GRUPPE" "$ARTEFAKT" "$VERSION")" && RC=0 || RC=$?
+    if [ "$RC" -ne 0 ] || [ -z "$MODULE" ]; then
+        echo -e "${RED}✗ Parent-POM ${ARTEFAKT}-${VERSION}.pom nicht im Release-Repo (${BASIS}) — mvn deploy war gruen?${NC}"
+        [ "${CI:-}" = "true" ] && echo "::warning title=Release ${VERSION} unvollstaendig::Parent-POM ${ARTEFAKT} fehlt in ${BASIS}"
+        return 0
+    fi
+    # <module> ist ein Verzeichnis; die artifactId steht in <modul>/pom.xml (ausserhalb von <parent>).
+    # Fehlt die Datei (Modul nicht ausgecheckt), gilt der Verzeichnisname — in root sind beide gleich.
+    while read -r M; do
+        [ -n "$M" ] || continue
+        A="$(awk '/<parent>/{p=1} /<\/parent>/{p=0} !p && /<artifactId>/{gsub(/.*<artifactId>|<\/artifactId>.*/,""); print; exit}' "$M/pom.xml" 2>/dev/null)"
+        IDS[${#IDS[@]}]="${A:-$M}"
+    done <<< "$MODULE"
+    [ "${#IDS[@]}" -gt 0 ] || return 0
+    FEHLEND="$(reposilite_fehlende_artefakte "$BASIS" "$GRUPPE" "$VERSION" "${IDS[@]}" | tr '\n' ' ')"
+    FEHLEND="${FEHLEND% }"
+    if [ -z "$FEHLEND" ]; then
+        echo -e "${GREEN}✓ Release ${VERSION} vollstaendig im Release-Repo (${#IDS[@]} Module).${NC}"
+    else
+        echo -e "${RED}✗ Release ${VERSION} im Release-Repo UNVOLLSTAENDIG — es fehlt: ${FEHLEND}${NC}"
+        echo -e "${RED}  Der Auto-Bump der Consumer wartet, bis jedes Modul da ist (ci/root-autobump.sh) —"
+        echo -e "  Upload pruefen bzw. Modul erneut deployen; absichtlich nicht deployte Module: BUMP_IGNORIERE_MODULE.${NC}"
+        [ "${CI:-}" = "true" ] && echo "::warning title=Release ${VERSION} unvollstaendig::fehlt in ${BASIS}: ${FEHLEND}"
+    fi
+    return 0
+}
+
 # Release build, $1=increment type or deploy flag, $2=optional deploy flag
 do_release() {
     echo -e "${YELLOW}=== Release Build ===${NC}"
@@ -1901,6 +1954,8 @@ Includes:
             echo -e "${RED}✗ Maven build failed!${NC}"
             return 1
         fi
+        # Massnahme 4: Selbstkontrolle — liegt jedes Modul der Version im Release-Repo? Nie fatal.
+        release_vollstaendig_pruefen "${NEW_VERSION}"
     else
         echo -e "${BLUE}Maven: Building version ${GREEN}${NEW_VERSION}${NC} (${TEST_FLAG}, cache-frei)"
         if ! mvn clean package ${TEST_FLAG} ${RELEASE_MVN_FLAGS} -B; then
