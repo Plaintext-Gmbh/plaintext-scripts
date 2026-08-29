@@ -1608,7 +1608,11 @@ Includes:
         echo -e "${YELLOW}  Naechster Schritt: git pull --rebase, dann den Release erneut starten.${NC}"
         return 1
     fi
-    if ! git push --tags; then
+    # NUR den neuen Tag pushen — `git push --tags` schiebt ALLE lokalen Tags und scheitert an
+    # alten, vom Remote abweichenden Tags (plaintext-app: v56.x, dieselbe Falle wie beim
+    # `fetch --tags` im Vorflug). Am 29.08.2026 brach so ein Lokal-Release nach Commit+Tag ab,
+    # obwohl der Tag laengst draussen war (2.1708.0: Tag ohne Artefakt).
+    if ! git push origin "refs/tags/${NEW_VERSION}"; then
         echo -e "${RED}✗ Tag-Push fehlgeschlagen — Tag ${NEW_VERSION} fehlt auf dem Remote.${NC}"
         echo -e "${RED}  Es wurde NICHTS veroeffentlicht; erst den Tag klaeren, dann erneut.${NC}"
         return 1
