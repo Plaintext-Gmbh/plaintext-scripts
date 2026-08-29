@@ -159,6 +159,12 @@ show_usage() {
     echo -e "    ${YELLOW}2${NC} = Minor version (default) (x.X.0)"
     echo -e "    ${YELLOW}3${NC} = Patch version (x.x.X)"
     echo -e "  ${GREEN}./build deploy-prod${NC}        - Deploy last release to PROD"
+    echo ""
+    echo -e "${BLUE}Lokal-Release (zweiter Weg neben CI/CD; Wrapper muss ihn verdrahten, plaintext-app: ./build 8):${NC}"
+    echo -e "  ${GREEN}./build local-release [1|2|3] [prod|dev-prod]${NC}"
+    echo -e "    Release + Tag + Push (Commit mit [skip-ci]) + Build + Blue-Green-Deploy von dieser Maschine"
+    echo -e "    ${YELLOW}prod${NC} = direkt PROD (Default), ${YELLOW}dev-prod${NC} = erst DEV, dann PROD"
+    echo -e "    Nur Vorflug: ${YELLOW}LOKAL_RELEASE_NUR_VORFLUG=true${NC}   CI-Sperre uebergehen: ${YELLOW}LOKAL_RELEASE_IGNORIERE_CI=true${NC}"
 }
 
 # NAS remote temp path for image transfer
@@ -1538,7 +1544,11 @@ do_release() {
     echo -e "${YELLOW}Changes to be committed:${NC}"
     git --no-pager diff --cached --name-status || echo "No changes"
 
-    COMMIT_MSG="Release version ${NEW_VERSION}
+    # RELEASE_COMMIT_SUFFIX: leer im CI-Lauf. Der Lokal-Release (do_local_release) setzt
+    # " [skip-ci]" — der Push dieses Commits auf master wuerde sonst die CI-Pipeline
+    # (release-all) starten, die parallel zum lokalen Deploy einen ZWEITEN Release rechnet.
+    # Die skip-pruefung der App-Pipeline fuehrt "Release version" als Automatik-Commit.
+    COMMIT_MSG="Release version ${NEW_VERSION}${RELEASE_COMMIT_SUFFIX:-}
 
 Includes:
 - Version update to ${NEW_VERSION}
@@ -1680,6 +1690,282 @@ Includes:
             exit 1
         fi
     fi
+}
+
+# ── Lokal-Release: zweiter Weg neben CI/CD ─────────────────────────────────────
+# Release (Version, Commit, Tag, Push) + Build + Blue-Green-Deploy — komplett von dieser
+# Maschine aus, ohne GitHub Actions. Aufruf ueber den Wrapper:
+#   plaintext-app: ./build 8   bzw.   ./build local-release [1|2|3] [prod|dev-prod]
+#   $1 = Increment-Typ (1=MAJOR, 2=MINOR (Default), 3=PATCH)
+#   $2 = Ziel: "prod" (Default: direkt PROD) | "dev-prod" (erst DEV, dann PROD — wie CI release-all)
+#
+# WARUM NICHT EINFACH ./build 56?
+#   1. Der Push des Release-Commits loest die CI aus (push auf master -> release-all). Die
+#      wuerde parallel zum lokalen Deploy einen ZWEITEN Release rechnen und gegen dieselben
+#      Slots und dasselbe Staging-Jar deployen. Deshalb traegt der lokale Release-Commit
+#      "[skip-ci]" (RELEASE_COMMIT_SUFFIX); die skip-pruefung der App-Pipeline fuehrt
+#      "Release version" als Automatik-Commit, damit kein Pushover-Alarm ausgeloest wird.
+#   2. do_release macht `git add -A`: alles Ungespeicherte wanderte in den Release. Hier ist
+#      ein sauberer, auf origin nachgezogener master Pflicht — sonst Abbruch VOR dem Tag.
+#   3. Lokal fehlen typischerweise die Reposilite-Zugangsdaten (server-id aus
+#      distributionManagement). `mvn deploy` scheiterte dann NACH Tag+Push -> Tag ohne
+#      Artefakt. Deshalb Vorpruefung: ohne Zugangsdaten wird nur gebaut (mvn package).
+#   4. Der Tag darf erst entstehen, wenn das NAS erreichbar ist — sonst Tag ohne Deploy.
+#   5. Scheitert der Push des Release-Commits, werden lokaler Commit und Tag zurueckgenommen
+#      (auf origin ist dann nichts angekommen, der Lauf laesst sich einfach wiederholen).
+#
+# Tests: standardmaessig wie bei jedem lokalen Build ohne (MVN_TEST_FLAG=-DskipTests) — die
+# DB-gestuetzten Tests brauchen die CI-Datenbank. Wer lokal eine Test-DB hat:
+#   MVN_TEST_FLAG="-DskipITs -DexcludedGroups=quality-gate" ./build 8
+#
+# Nur Vorflug, ohne Seiteneffekte:   LOKAL_RELEASE_NUR_VORFLUG=true ./build 8
+# CI-Sperre uebergehen (mit Grund):  LOKAL_RELEASE_IGNORIERE_CI=true ./build 8
+do_local_release() {
+    local INCREMENT_TYPE="${1:-2}"
+    local ZIEL="${2:-prod}"
+    local BRANCH="${RELEASE_BRANCH:-master}"
+
+    echo -e "${YELLOW}=== Lokal-Release: Release + Tag + Blue-Green ${ZIEL} (ohne CI) ===${NC}"
+
+    case "$INCREMENT_TYPE" in
+        1|2|3) ;;
+        *) echo -e "${RED}✗ Ungueltiger Increment-Typ '${INCREMENT_TYPE}' (1=MAJOR, 2=MINOR, 3=PATCH)${NC}"; return 1 ;;
+    esac
+    case "$ZIEL" in
+        prod|dev-prod) ;;
+        *) echo -e "${RED}✗ Ungueltiges Ziel '${ZIEL}' (prod | dev-prod)${NC}"; return 1 ;;
+    esac
+
+    # ── Vorflug 1: Git ────────────────────────────────────────────────────────
+    local AKTUELLER_BRANCH
+    AKTUELLER_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    if [ "$AKTUELLER_BRANCH" != "$BRANCH" ]; then
+        echo -e "${RED}✗ Lokal-Release nur auf '${BRANCH}' (aktuell: '${AKTUELLER_BRANCH}').${NC}"
+        return 1
+    fi
+    if [ -n "$(git status --porcelain)" ]; then
+        echo -e "${RED}✗ Arbeitsbaum nicht sauber — der Release wuerde ALLES Ungespeicherte mitnehmen (git add -A).${NC}"
+        git --no-pager status --short
+        echo -e "${YELLOW}  Erst committen/stashen, dann erneut.${NC}"
+        return 1
+    fi
+    echo -e "${BLUE}Git: origin nachziehen (fetch)...${NC}"
+    if ! git fetch origin --tags -q; then
+        echo -e "${RED}✗ git fetch origin fehlgeschlagen — ohne Netz kein Release.${NC}"
+        return 1
+    fi
+    local LOKAL REMOTE BASIS
+    LOKAL=$(git rev-parse HEAD)
+    REMOTE=$(git rev-parse "origin/${BRANCH}")
+    BASIS=$(git merge-base HEAD "origin/${BRANCH}")
+    if [ "$LOKAL" = "$REMOTE" ]; then
+        echo -e "${GREEN}✓ ${BRANCH} ist auf dem Stand von origin${NC}"
+    elif [ "$LOKAL" = "$BASIS" ]; then
+        echo -e "${YELLOW}${BRANCH} liegt hinter origin — ziehe nach (fast-forward)...${NC}"
+        if ! git pull -q --ff-only origin "$BRANCH"; then
+            echo -e "${RED}✗ Fast-forward nicht moeglich.${NC}"
+            return 1
+        fi
+        echo -e "${GREEN}✓ Nachgezogen auf $(git log --oneline -1)${NC}"
+    elif [ "$REMOTE" = "$BASIS" ]; then
+        local VORAUS
+        VORAUS=$(git rev-list --count "origin/${BRANCH}..HEAD")
+        echo -e "${YELLOW}⚠ ${VORAUS} lokale Commit(s) sind noch nicht auf origin — sie gehen mit dem Release raus:${NC}"
+        git --no-pager log --oneline "origin/${BRANCH}..HEAD"
+    else
+        echo -e "${RED}✗ ${BRANCH} und origin/${BRANCH} sind divergiert — erst git pull --rebase, dann erneut.${NC}"
+        return 1
+    fi
+    # Versionen NACH dem Nachziehen neu lesen: do_release rechnet aus CURRENT_VERSION.
+    init_versions
+
+    # ── Vorflug 2: laufende CI-Rollouts ──────────────────────────────────────
+    if ! lokal_release_ci_frei "$BRANCH"; then
+        return 1
+    fi
+
+    # ── Vorflug 3: Maven-Zugangsdaten fuers Release-Repo ─────────────────────
+    lokal_release_maven_zugangsdaten
+
+    # ── Vorflug 4: NAS erreichbar — VOR dem Tag ──────────────────────────────
+    if ! ensure_nas_reachable; then
+        echo -e "${RED}✗ NAS nicht erreichbar — es wird KEIN Release angelegt (kein Tag ohne Deploy).${NC}"
+        return 1
+    fi
+
+    # ── Plan ─────────────────────────────────────────────────────────────────
+    local PLAN_NEU
+    read -r PLAN_NEU _ <<< "$(compute_release_versions "$CURRENT_VERSION" "$INCREMENT_TYPE")"
+    echo ""
+    echo -e "${BLUE}Plan:${NC}"
+    echo -e "  Version:   ${CURRENT_VERSION} -> ${GREEN}${PLAN_NEU}${NC} (Tag ${PLAN_NEU}, Commit mit [skip-ci])"
+    echo -e "  Build:     mvn clean $([ "${MVN_RELEASE_DEPLOY:-false}" == "true" ] && echo deploy || echo package) ${MVN_TEST_FLAG:--DskipTests}"
+    echo -e "  Transport: $([ "${JAR_VOLUME_DEPLOY}" == "true" ] && echo "Jar -> NAS-Staging (M3)" || echo "Image -> NAS-Registry")"
+    echo -e "  Deploy:    Blue-Green $([ "$ZIEL" == "dev-prod" ] && echo "DEV (int) -> PROD" || echo "PROD direkt") mit Healthcheck"
+    echo ""
+    if [ "${LOKAL_RELEASE_NUR_VORFLUG:-false}" == "true" ]; then
+        echo -e "${GREEN}=== Nur Vorflug (LOKAL_RELEASE_NUR_VORFLUG=true) — nichts veraendert. ===${NC}"
+        return 0
+    fi
+
+    # ── Release: Version, Commit [skip-ci], Tag, Push, Build, Staging ─────────
+    local START_SHA
+    START_SHA=$(git rev-parse HEAD)
+    RELEASE_COMMIT_SUFFIX=" [skip-ci]"
+    if ! do_release "$INCREMENT_TYPE"; then
+        RELEASE_COMMIT_SUFFIX=""
+        lokal_release_rueckbau "$START_SHA" "$BRANCH"
+        lokal_release_melde 1 "Release ${NEW_VERSION:-?} abgebrochen (Release-Phase). Details im Terminal."
+        return 1
+    fi
+    RELEASE_COMMIT_SUFFIX=""
+
+    # Der Tag ist die Quelle fuer deploy_to_prod (get_release_version). Er MUSS die eben
+    # gebaute Version sein — sonst wuerde ein fremder Stand ausgerollt.
+    local TAG_VERSION
+    TAG_VERSION=$(get_release_version)
+    if [ "$TAG_VERSION" != "$NEW_VERSION" ]; then
+        echo -e "${RED}✗ Juengster Release-Tag ist '${TAG_VERSION}', gebaut wurde '${NEW_VERSION}' — kein Deploy.${NC}"
+        lokal_release_melde 1 "Release ${NEW_VERSION}: Tag-Mismatch (${TAG_VERSION}), Deploy nicht gestartet."
+        return 1
+    fi
+
+    # ── Deploy: Blue-Green ───────────────────────────────────────────────────
+    if [ "$ZIEL" == "dev-prod" ]; then
+        if ! deploy_to_dev "${NEW_VERSION}" "true"; then
+            echo -e "${RED}=== Lokal-Release ${NEW_VERSION}: DEV-Deploy FEHLGESCHLAGEN — PROD nicht angefasst ===${NC}"
+            lokal_release_melde 1 "Release ${NEW_VERSION}: DEV-Deploy fehlgeschlagen, PROD unveraendert."
+            return 1
+        fi
+    fi
+    if ! deploy_to_prod "true"; then
+        echo -e "${RED}=== Lokal-Release ${NEW_VERSION}: PROD-Deploy FEHLGESCHLAGEN (siehe Rollback-Meldungen oben) ===${NC}"
+        lokal_release_melde 1 "Release ${NEW_VERSION}: PROD-Deploy fehlgeschlagen. Rollback-Status im Terminal pruefen."
+        return 1
+    fi
+
+    echo ""
+    echo -e "${GREEN}=== Lokal-Release ${NEW_VERSION} ausgerollt (${ZIEL}, Blue-Green) ===${NC}"
+    echo -e "${GREEN}    Tag ${NEW_VERSION} und Release-Commit sind auf origin/${BRANCH}; CI wurde bewusst uebersprungen.${NC}"
+    lokal_release_melde 0 "Release ${NEW_VERSION} lokal gebaut und per Blue-Green auf ${ZIEL} ausgerollt."
+    return 0
+}
+
+# Blockiert, solange in diesem Repo ein CI-Lauf auf dem Release-Branch aktiv ist: der wuerde
+# dieselben NAS-Slots und dasselbe Staging-Jar anfassen. PR-/Branch-Laeufe (GitHub-Runner,
+# ci-only) sind unkritisch und werden nur angezeigt. Ohne `gh` oder ohne Netz: Warnung, kein
+# Abbruch — ein spaeterer `git push` scheitert dann ohnehin, bevor etwas veroeffentlicht ist.
+lokal_release_ci_frei() {
+    local BRANCH="${1:-master}"
+    if [ "${LOKAL_RELEASE_IGNORIERE_CI:-false}" == "true" ]; then
+        echo -e "${YELLOW}⚠ CI-Pruefung uebersprungen (LOKAL_RELEASE_IGNORIERE_CI=true).${NC}"
+        return 0
+    fi
+    if ! command -v gh >/dev/null 2>&1; then
+        echo -e "${YELLOW}⚠ 'gh' nicht installiert — laufende CI-Rollouts koennen nicht geprueft werden.${NC}"
+        return 0
+    fi
+    local REPO
+    REPO=$(git remote get-url origin 2>/dev/null | sed -E 's#^.*[:/]([^/]+/[^/]+)$#\1#; s#\.git$##')
+    if [ -z "$REPO" ]; then
+        echo -e "${YELLOW}⚠ origin-Repository nicht ermittelbar — CI-Pruefung uebersprungen.${NC}"
+        return 0
+    fi
+    echo -e "${BLUE}CI: aktive Laeufe in ${REPO} pruefen...${NC}"
+    local LAEUFE
+    if ! LAEUFE=$( { gh run list -R "$REPO" --status in_progress --limit 30 --json databaseId,name,headBranch,event \
+                        --jq '.[] | "\(.databaseId)\t\(.headBranch)\t\(.event)\t\(.name)"';
+                     gh run list -R "$REPO" --status queued --limit 30 --json databaseId,name,headBranch,event \
+                        --jq '.[] | "\(.databaseId)\t\(.headBranch)\t\(.event)\t\(.name)"'; } 2>/dev/null ); then
+        echo -e "${YELLOW}⚠ gh run list fehlgeschlagen (Netz/Auth?) — CI-Pruefung uebersprungen.${NC}"
+        return 0
+    fi
+    if [ -z "$LAEUFE" ]; then
+        echo -e "${GREEN}✓ Keine CI-Laeufe aktiv${NC}"
+        return 0
+    fi
+    local KRITISCH
+    KRITISCH=$(printf '%s\n' "$LAEUFE" | awk -F'\t' -v b="$BRANCH" '$2 == b || $3 == "workflow_dispatch" || $3 == "schedule"')
+    if [ -n "$KRITISCH" ]; then
+        echo -e "${RED}✗ CI-Lauf auf ${BRANCH} aktiv — ein lokaler Deploy wuerde mit ihm kollidieren:${NC}"
+        printf '%s\n' "$KRITISCH" | awk -F'\t' '{printf "    run %s  [%s, %s]  %s\n", $1, $2, $3, $4}'
+        echo -e "${YELLOW}  Warten (gh run watch <id> -R ${REPO}) oder bewusst: LOKAL_RELEASE_IGNORIERE_CI=true${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}✓ Nur Branch-/PR-Laeufe aktiv (kollidieren nicht mit dem NAS):${NC}"
+    printf '%s\n' "$LAEUFE" | awk -F'\t' '{printf "    run %s  [%s, %s]  %s\n", $1, $2, $3, $4}'
+    return 0
+}
+
+# MVN_RELEASE_DEPLOY=true verlangt Zugangsdaten fuer die server-id aus <distributionManagement>
+# (Reposilite, maven.plaintext.ch). Fehlen sie in der settings.xml, scheiterte `mvn deploy` erst
+# NACH Tag+Push. Dann lieber nur bauen: das Artefakt geht nicht ins Release-Repo, Tag, Commit
+# und Container-Deploy sind davon unabhaengig (die Kollisionspruefung im CI kennt die Version
+# dann nicht — sie rechnet ohnehin aus der POM von master weiter).
+lokal_release_maven_zugangsdaten() {
+    if [ "${MVN_RELEASE_DEPLOY:-false}" != "true" ]; then
+        return 0
+    fi
+    local REPO_ID
+    REPO_ID=$(mvn -q -N help:evaluate -Dexpression=project.distributionManagement.repository.id -DforceStdout 2>/dev/null)
+    if [ -z "$REPO_ID" ] || [ "$REPO_ID" == "null object or invalid expression" ]; then
+        REPO_ID=$(sed -n '/<distributionManagement>/,/<\/distributionManagement>/p' pom.xml 2>/dev/null \
+            | grep -m1 '<id>' | sed 's/.*<id>//;s/<\/id>.*//' | tr -d ' ')
+    fi
+    local SETTINGS="${MAVEN_SETTINGS:-$HOME/.m2/settings.xml}"
+    if [ -n "$REPO_ID" ] && grep -q "<id>[[:space:]]*${REPO_ID}[[:space:]]*</id>" "$SETTINGS" 2>/dev/null; then
+        echo -e "${GREEN}✓ Maven: Zugangsdaten fuer '${REPO_ID}' in ${SETTINGS} vorhanden — Artefakt wird veroeffentlicht.${NC}"
+        return 0
+    fi
+    echo -e "${YELLOW}⚠ Maven: keine Zugangsdaten fuer '${REPO_ID:-<distributionManagement>}' in ${SETTINGS}.${NC}"
+    echo -e "${YELLOW}  Es wird nur gebaut (mvn package), das Artefakt geht NICHT ins Release-Repo.${NC}"
+    echo -e "${YELLOW}  Fuer Gleichstand mit der CI in ${SETTINGS} eintragen:${NC}"
+    echo -e "${YELLOW}    <server><id>${REPO_ID:-plaintext-nas}</id><username>ci</username><password>Reposilite CI-Token (Vault)</password></server>${NC}"
+    MVN_RELEASE_DEPLOY=false
+    return 0
+}
+
+# Nach einem Abbruch in do_release: Ist der Release-Commit NICHT auf origin angekommen, dann
+# lokalen Commit und Tag zuruecknehmen — der Zustand ist danach exakt der von vor dem Lauf und
+# der naechste Versuch rechnet dieselbe Nummer. Ist der Commit schon draussen (Abbruch spaeter,
+# z.B. im Maven-Build), bleibt alles stehen: die Nummer ist verbraucht, der naechste Lauf
+# rechnet korrekt weiter (siehe Karte 518 in do_release).
+lokal_release_rueckbau() {
+    local START_SHA="$1"
+    local BRANCH="${2:-master}"
+    local V="${NEW_VERSION:-}"
+    [ -n "$V" ] || return 0
+    if git merge-base --is-ancestor HEAD "origin/${BRANCH}" 2>/dev/null; then
+        echo -e "${YELLOW}Release-Commit ${V} ist auf origin — nichts zurueckzunehmen; naechster Lauf rechnet weiter.${NC}"
+        return 0
+    fi
+    if [ "$(git rev-parse HEAD)" == "$START_SHA" ]; then
+        # Abbruch vor dem Commit (z.B. Kollisionspruefung) — es gibt nichts zurueckzubauen.
+        git tag -d "$V" >/dev/null 2>&1 || true
+        return 0
+    fi
+    echo -e "${YELLOW}Release-Commit ${V} ist NICHT auf origin — nehme lokalen Commit und Tag zurueck...${NC}"
+    git tag -d "$V" >/dev/null 2>&1 || true
+    if git reset -q --hard "$START_SHA"; then
+        echo -e "${GREEN}✓ Zurueck auf $(git log --oneline -1) — der Lauf kann wiederholt werden.${NC}"
+    else
+        echo -e "${RED}✗ git reset --hard ${START_SHA} fehlgeschlagen — bitte manuell pruefen.${NC}"
+    fi
+}
+
+# Pushover, best effort: Zugangsdaten kommen aus der Umgebung oder ~/.pushover (siehe ./pushover).
+# Ohne Zugangsdaten passiert nichts — ein fehlender Kanal darf den Release nicht rot faerben.
+lokal_release_melde() {
+    local STATUS="$1"
+    local TEXT="$2"
+    local PO="${SCRIPTS_DIR}/pushover"
+    [ -x "$PO" ] || return 0
+    if [ "$STATUS" == "0" ]; then
+        "$PO" -p 0 -t "Lokal-Release ${IMAGE_NAME}" "$TEXT" >/dev/null 2>&1 || true
+    else
+        "$PO" -p 1 -t "Lokal-Release ${IMAGE_NAME} FEHLGESCHLAGEN" "$TEXT" >/dev/null 2>&1 || true
+    fi
+    return 0
 }
 
 # ── SonarQube Analysis ──────────────────────────────────────

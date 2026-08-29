@@ -140,6 +140,34 @@ the guard off entirely.
 | `./build 5` | Minor release + deploy DEV (with health check) |
 | `./build 6` | Deploy last release to PROD (with health check) |
 | `./build 56` | Release + deploy DEV + PROD (multi-command) |
+| `./build 8` | Lokal-Release: Release + Tag + Blue-Green **PROD direkt**, ohne CI (nur wo der Wrapper es verdrahtet, z.B. plaintext-app) |
+
+### Lokal-Release (zweiter Weg neben CI/CD)
+
+`./build local-release [1|2|3] [prod|dev-prod]` (plaintext-app: `./build 8`) macht den kompletten
+Release von der Entwicklermaschine aus: Versionsschritt, Release-Commit, Git-Tag, Push, Build,
+Jar/Image aufs NAS und Blue-Green-Deploy mit Healthcheck — ohne GitHub Actions. Die CI bleibt
+der Standardweg (push/PR-merge auf master); der Lokal-Release ist fuer den Fall, dass die
+Runner belegt sind oder ein Release bewusst von Hand ausgerollt werden soll.
+
+Was ihn vom blossen `./build 56` unterscheidet:
+
+- Der Release-Commit traegt `[skip-ci]` in der Betreffzeile — sonst startet der Push die
+  CI-Pipeline, die parallel einen zweiten Release deployt. Die `skip-pruefung` der App-Pipeline
+  fuehrt `Release version` als Automatik-Commit (kein Pushover-Alarm).
+- Vorflug vor dem Tag: Branch = master, Arbeitsbaum sauber, origin nachgezogen (fast-forward),
+  kein aktiver CI-Lauf auf master (`gh run list`), NAS erreichbar. Scheitert etwas, entsteht
+  kein Tag.
+- Fehlen die Reposilite-Zugangsdaten (server-id aus `distributionManagement` in
+  `~/.m2/settings.xml`), wird nur gebaut (`mvn package`) statt veroeffentlicht — der Deploy
+  haengt nicht davon ab.
+- Scheitert der Push des Release-Commits, werden lokaler Commit und Tag zurueckgenommen.
+- Tests: wie bei jedem lokalen Build standardmaessig `-DskipTests`; mit lokaler Test-DB
+  `MVN_TEST_FLAG="-DskipITs -DexcludedGroups=quality-gate" ./build 8`.
+
+Trockenlauf ohne Seiteneffekte: `LOKAL_RELEASE_NUR_VORFLUG=true ./build 8`.
+CI-Sperre bewusst uebergehen: `LOKAL_RELEASE_IGNORIERE_CI=true ./build 8`.
+Sicherungen bewacht `./test-lokal-release.sh`.
 
 ## GitHub Actions
 
@@ -292,6 +320,7 @@ A **Glass sound** plays whenever Claude Code finishes a response. Detection work
 |------|-------------|
 | `tui-common.sh` | Terminal UI primitives (colors, box drawing, menu rendering) |
 | `tui-build-logic.sh` | Build, release, deploy, and version management logic |
+| `test-lokal-release.sh` | Guards for the local-release path (skip-ci subject, preflight order, rollback) |
 | `tui-start-logic.sh` | Dev runner logic (start app, kill, logs, clean install) |
 | `tui-modules-logic.sh` | Module toggle logic for multi-module projects |
 | `start-postgres.sh` | Start PostgreSQL container (reads config from `build-conf.txt`) |
