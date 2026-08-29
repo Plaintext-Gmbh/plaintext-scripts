@@ -137,6 +137,13 @@ jobs:
       # schon 1.579.0 veroeffentlicht hatte. Der Schritt kostet nur einen HTTP-Abruf gegen
       # maven.plaintext.ch; er darf deshalb immer laufen. Die Guards haengen umgekehrt jetzt an
       # seinem Ergebnis: ist gar kein Bump faellig, entfaellt auch jede API-Abfrage.
+      #
+      # Massnahme 4 (29.08.2026): das Skript schlaegt eine Version nur vor, wenn JEDES Modul aus
+      # ihrem Parent-POM als <modul>-<version>.pom im Repo liegt. root laedt 24 Module ueber
+      # rund 15 Minuten hoch, die <release>-Angabe der Metadata steht aber schon nach dem
+      # Parent — ein Bump in diesem Fenster sah ein halbes Release (Verify rot, unaufloesbarer
+      # PR). Ist das Release noch im Upload, meldet das Skript `vollstaendig=false` + `fehlend`
+      # und bump=false, Exit 0: kein Fehler, naechster Lauf. Der Cron des Aufrufers kommt wieder.
       - name: Neueste root-Version ermitteln
         id: detect
         run: bash .plaintext-scripts/ci/root-autobump.sh detect || true
@@ -450,6 +457,7 @@ jobs:
             echo "| parent | \`${{ steps.detect.outputs.parent || 'n/a' }}\` |"
             echo "| neueste | \`${{ steps.detect.outputs.latest || 'n/a' }}\` |"
             echo "| Rueckstand | \`${{ steps.detect.outputs.behind || 'n/a' }}\` Release(s) |"
+            echo "| Release vollstaendig | \`${{ steps.detect.outputs.vollstaendig || 'n/a' }}\`${{ steps.detect.outputs.fehlend && format(' — fehlt: {0}', steps.detect.outputs.fehlend) || '' }} |"
             echo "| Bump noetig | \`${{ steps.detect.outputs.bump || 'nein' }}\` |"
             echo "| Guard NAS-Last | \`${{ steps.load.outputs.skip == 'true' && 'gebremst' || steps.load.outcome }}\` |"
             echo "| Guard laufender Deploy | \`${{ steps.busy.outputs.skip == 'true' && 'gebremst' || steps.busy.outcome }}\` |"

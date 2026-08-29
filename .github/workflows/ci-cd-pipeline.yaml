@@ -74,6 +74,18 @@ on:
         required: false
         type: string
         default: '["ubuntu-latest"]'
+      verify-prod-runner:
+        # Massnahme 3, Rest (Zustandsbericht 29.08.2026): verify-prod belegt sonst bis zu 7,5 min
+        # Poll + E2E einen der vier NAS-Runner, die nach einem Blue-Green-Deploy knapp sind — und
+        # prueft dabei nur das LAN. Von einem GitHub-Runner aus laeuft die Pruefung durch
+        # Cloudflare, so wie die Nutzer die App sehen. Bedingung ist eine OEFFENTLICHE prod-url;
+        # der Job bricht auf einem GitHub-Runner mit einer LAN-Adresse sofort ab, statt 7,5 min
+        # ins Leere zu pollen (Stand 29.08.2026 geben alle Aufrufer http://192.168.1.224:<port>).
+        # Leer = wie `runner`, damit kein Aufrufer sich ohne Zutun aendert.
+        description: 'Runner-Labels (JSON-Array) NUR fuer verify-prod, z. B. ["ubuntu-latest"] — nur mit oeffentlicher prod-url (https://app.plaintext.ch, nicht http://192.168.1.224:1112). Leer = wie `runner`.'
+        required: false
+        type: string
+        default: ''
       postgres-port:
         description: 'Host-Port für Postgres-Service-Container. Bei mehreren self-hosted Callern auf demselben Docker-Daemon: unique Port pro Caller (5434, 5435, ...)'
         required: false
@@ -1246,10 +1258,19 @@ jobs:
     # zu verifizieren. Ohne diesen Ausschluss wuerde der Verify-Schritt eine stillgelegte
     # Umgebung anpingen und den ansonsten gelungenen Release rot faerben.
     if: inputs.deploy-target != 'ci-only' && inputs.deploy-target != 'release-only' && inputs.dev-url != ''
+    # Bleibt auf `runner` (NAS): dev-url ist bei allen Aufrufern eine LAN-Adresse
+    # (http://192.168.1.224:<port>), DEV hat keinen oeffentlichen Hostnamen. Anders als PROD
+    # (verify-prod-runner) gibt es hier nichts, was ein GitHub-Runner erreichen koennte.
     runs-on: ${{ fromJSON(inputs.runner) }}
 
     steps:
-      - name: Connect to Twingate
+      # EHRLICH MARKIERT (Zustandsbericht 29.08.2026, Massnahme 3): dieser Schritt ist in der
+      # sichtbaren Historie NIE gelaufen — alle Aufrufer setzen runner=[self-hosted, nas], und
+      # root nimmt ubuntu-latest nur fuer pull_request, wo verify-dev uebersprungen wird. Ob
+      # der Service-Key (22.03.2026) 192.168.1.224 freigibt, ist von hier nicht pruefbar. Wer
+      # verify-dev auf einen GitHub-Runner setzt, betritt einen unverifizierten Pfad; scheitert
+      # Twingate still, endet der Poll unten nach 7,5 min mit up=false und einer Warnung.
+      - name: Connect to Twingate (unverifizierter Pfad, siehe Kommentar)
         if: runner.environment != 'self-hosted'
         uses: twingate/github-action@v1
         with:
@@ -1378,14 +1399,31 @@ jobs:
     # Unabhaengig von Verify DEV: ein flaky DEV-Verify darf die PROD-Verifikation nicht ueberspringen.
     needs: deploy
     if: inputs.deploy-target == 'release-all' && inputs.prod-url != ''
-    runs-on: ${{ fromJSON(inputs.runner) }}
+    # Massnahme 3, Rest (29.08.2026): `verify-prod-runner` erlaubt dem Aufrufer, NUR diesen Job
+    # auf einen GitHub-Runner zu legen — mit einer oeffentlichen prod-url. Alle vier PROD-
+    # Instanzen sind durch Cloudflare erreichbar (app.plaintext.ch, guild.plaintext.ch bzw.
+    # app.guild42.ch, iot.plaintext.ch, schuelerturnier.plaintext.ch; /nosec/version liefert
+    # dieselbe Nummer wie die LAN-Adresse, geprueft 29.08.2026). Von aussen geprueft heisst: so,
+    # wie die Nutzer die App sehen — ein kaputter Cloudflare-Tunnel faellt im LAN nicht auf.
+    # Leer = `runner` (heutiges Verhalten); die Aufrufer stellen um, wenn sie prod-url tauschen.
+    runs-on: ${{ fromJSON(inputs.verify-prod-runner || inputs.runner) }}
 
     steps:
-      - name: Connect to Twingate
+      # Kein Twingate mehr in diesem Job: der GitHub-Runner-Pfad ist hier "oeffentliche URL",
+      # nicht "LAN ueber Tunnel". Der fruehere Twingate-Schritt lief in der sichtbaren Historie
+      # nie (alle Aufrufer self-hosted) und haette im Fehlerfall STILL versagt — Poll 7,5 min,
+      # Warnung, up=false. Stattdessen faellt eine Fehlkonfiguration hier sofort und laut auf.
+      - name: prod-url von aussen erreichbar?
         if: runner.environment != 'self-hosted'
-        uses: twingate/github-action@v1
-        with:
-          service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
+        env:
+          PROD_URL: ${{ inputs.prod-url }}
+        run: |
+          case "$PROD_URL" in
+            *://192.168.*|*://10.*|*://172.1[6-9].*|*://172.2[0-9].*|*://172.3[01].*|*://localhost*|*://127.*|*.local:*|*.local/*|*.local)
+              echo "::error title=Verify PROD::prod-url '$PROD_URL' ist eine LAN-Adresse, der Job laeuft aber auf einem GitHub-Runner (verify-prod-runner). Entweder eine oeffentliche prod-url (z. B. https://app.plaintext.ch) setzen oder verify-prod-runner leer lassen."
+              exit 1 ;;
+          esac
+          echo "prod-url $PROD_URL ist keine LAN-Adresse — Verify von aussen, durch Cloudflare, wie die Nutzer die App sehen."
 
       - name: Version Check PROD
         id: verify_prod

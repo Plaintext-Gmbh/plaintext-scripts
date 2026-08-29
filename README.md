@@ -262,9 +262,49 @@ jobs:
 
 Alle Inputs (`deploy-target`, `project-name`, `database-name`, `java-version`, `dev-url`,
 `prod-url`, `playwright-enabled`, `integration-tests-enabled`, `sonar-enabled`,
-`quality-analysis`, `sonar-url`, `runner`, `postgres-port`, `scripts-ref`) und Secrets sind im
-`workflow_call`-Block der Pipeline beschrieben. `deploy-target`: `ci-only`, `snapshot-dev`,
-`release-dev`, `release-all`, `release-only`, `prod-single`.
+`quality-analysis`, `sonar-url`, `runner`, `verify-prod-runner`, `postgres-port`,
+`scripts-ref`) und Secrets sind im `workflow_call`-Block der Pipeline beschrieben.
+`deploy-target`: `ci-only`, `snapshot-dev`, `release-dev`, `release-all`, `release-only`,
+`prod-single`.
+
+#### `verify-prod` von aussen (`verify-prod-runner`, Massnahme 3 Rest, 29.08.2026)
+
+`verify-dev`/`verify-prod` pollen `<url>/nosec/version` und fahren optional E2E-Tests. Beide
+liefen bisher auf dem NAS-Runner — zwangslaeufig, denn **alle vier Aufrufer geben LAN-Adressen**
+(`http://192.168.1.224:<port>`) als `dev-url` UND `prod-url`. Der Twingate-Schritt fuer
+GitHub-Runner ist in der sichtbaren Historie nie gelaufen (alle Aufrufer `self-hosted`; root nimmt
+`ubuntu-latest` nur fuer `pull_request`, dort ist `deploy-target=ci-only` und beide Verify-Jobs
+werden uebersprungen).
+
+Fuer PROD gibt es aber oeffentliche Hostnamen — und `/nosec/version` liefert dort dieselbe
+Nummer wie im LAN (vom Mac geprueft, DNS zeigt auf Cloudflare 188.114.x, 29.08.2026):
+
+| App | LAN (`prod-url` heute) | oeffentlich | `/nosec/version` |
+|-----|------------------------|-------------|------------------|
+| plaintext-app | `http://192.168.1.224:1112` | `https://app.plaintext.ch` | 2.1717.0 = 2.1717.0 |
+| plaintext-guild | `http://192.168.1.224:1152` | `https://guild.plaintext.ch`, `https://app.guild42.ch` | 1.433.0 = 1.433.0 |
+| plaintext-iot | `http://192.168.1.224:1122` | `https://iot.plaintext.ch` | 1.342.0 = 1.342.0 |
+| plaintext-schuetu | `http://192.168.1.224:1132` | `https://schuelerturnier.plaintext.ch` | 1.584.0 = 1.584.0 |
+
+DEV hat keinen oeffentlichen Hostnamen; `verify-dev` bleibt deshalb auf dem NAS-Runner.
+
+Entscheidung: `verify-prod` wird **nicht pauschal** auf `ubuntu-latest` gestellt — die Pipeline
+wird `@master` konsumiert, ein harter Wechsel haette beim naechsten Release aller vier Apps gegen
+die LAN-Adresse gepollt. Stattdessen der Input `verify-prod-runner` (JSON-Array, leer = wie
+`runner`). Ein Aufrufer stellt um, indem er **beides** setzt:
+
+```yaml
+      prod-url: 'https://app.plaintext.ch'
+      verify-prod-runner: '["ubuntu-latest"]'
+```
+
+Auf einem GitHub-Runner prueft der Job zuerst, dass `prod-url` keine LAN-Adresse ist, und bricht
+sonst sofort mit `::error` ab — statt 7,5 Minuten ins Leere zu pollen und dann nur zu warnen.
+Der Twingate-Schritt ist aus `verify-prod` entfernt (der GitHub-Runner-Pfad heisst dort
+"oeffentliche URL", nicht "LAN ueber Tunnel"); in `verify-dev` bleibt er, ist aber als
+unverifiziert markiert. Gewinn der Umstellung: ein NAS-Runner weniger belegt in der Phase nach
+dem Blue-Green-Deploy, und die Verifikation sieht die App so, wie die Nutzer sie sehen (ein
+kaputter Cloudflare-Tunnel faellt im LAN nicht auf).
 
 Die Release-Commits der Pipeline (`Release version …`, `Prepare next development iteration …`,
 `chore(quality): Quality-Gate-Status …`) tragen das **native `[skip ci]`** — GitHub erzeugt fuer
@@ -421,12 +461,39 @@ Muster wie beim `build`-Wrapper:
 exec "${PLAINTEXT_SCRIPTS_DIR:-$HOME/codeplain/plaintext-scripts}/ci/root-autobump.sh" "$@"
 ```
 
-Aufruf: `root-autobump.sh detect` (stdout + `GITHUB_OUTPUT`: current/parent/latest/behind/bump)
-bzw. `root-autobump.sh apply [version]`. Umgebung: `POM_FILE` (Default `pom.xml`),
-`ROOT_MAVEN_REPO` (Default `https://maven.plaintext.ch/releases`). Ein Interfaces-Pin
+Aufruf: `root-autobump.sh detect` (stdout + `GITHUB_OUTPUT`: current/parent/latest/behind/
+vollstaendig/fehlend/bump) bzw. `root-autobump.sh apply [version]`. Umgebung: `POM_FILE`
+(Default `pom.xml`), `ROOT_MAVEN_REPO` (Default `https://maven.plaintext.ch/releases`),
+`BUMP_IGNORIERE_MODULE` (s. u.). Ein Interfaces-Pin
 `<plaintext-root-interfaces.version>${plaintext-root.version}</...>` gilt als **gekoppelt**
 (folgt dem Bump von selbst); nur ein abweichendes Literal wird als „entkoppelt" gemeldet und
 nicht angefasst.
+
+**Nur vollstaendige Releases (Massnahme 4, 29.08.2026 — „halbes Release sichtbar").**
+`mvn deploy` von root laedt 24 Module ueber rund 15 Minuten hoch; die `<release>`-Angabe der
+Parent-Metadata steht aber schon nach dem Parent. Ein Bump in diesem Fenster sah ein halbes
+Release (Verify rot, unaufloesbarer PR). `deployAtEnd=true` im root-POM war der erste Versuch
+und ist gescheitert (zwei Deploy-Ausfuehrungen GitHub Packages + Reposilite → doppelter Upload
+→ 409). Deshalb prueft `detect` jetzt das LESEN: Parent-POM der Kandidatenversion laden, jedes
+`<module>` (oberste Ebene, ohne Kommentare und `<profiles>`) per HTTP HEAD auf
+`…/ch/plaintext/<modul>/<v>/<modul>-<v>.pom`. Fehlt eines: `vollstaendig=false`,
+`fehlend=<Liste>`, `bump=false`, Meldung „Release `<v>` noch unvollstaendig (fehlt: …),
+naechster Lauf", **Exit 0** — kein Fehler, der Cron kommt wieder. `apply` mit einer
+unvollstaendigen Version wird verweigert (Exit 1). Nicht pruefbar (5xx, Netz) zaehlt wie
+fehlend. Bleibt dieselbe Meldung ueber Stunden, ist es kein Zeitfenster: ein Modul, das
+absichtlich nie deployt wird (`maven.deploy.skip`), nimmt `BUMP_IGNORIERE_MODULE="a b"` aus der
+Pruefung. Erst NACH der Vollstaendigkeit prueft das Skript, ob jedes von der pom benoetigte
+Artefakt in der Version existiert — dort ist ein Fehlen kein Zeitfenster mehr, sondern ein
+umbenanntes/entferntes Modul, und der Lauf bricht hart ab.
+
+Die Funktionen liegen in `ci/reposilite-release.sh` (reine Funktionen, bash 3.2-tauglich,
+`file://`-Repos fuer Tests). Dieselbe Bibliothek nutzt `tui-build-logic.sh` als
+**Selbstkontrolle des Release-Jobs**: `release_vollstaendig_pruefen <version>` laeuft in
+`do_release` direkt nach `mvn clean deploy` (nur bei `MVN_RELEASE_DEPLOY=true` und
+`<module>` in der pom), bildet `<modul>/pom.xml` auf die echte artifactId ab und meldet
+„Release `<v>` vollstaendig im Release-Repo (24 Module)" bzw. rot „UNVOLLSTAENDIG — es fehlt:
+…" plus `::warning`-Annotation in der CI. Nie fatal: Tag und Release-Commit sind da
+draussen, ein Abbruch liesse nur den SNAPSHOT-Commit aus. Tests: `./test-root-autobump.sh`.
 
 ### Selbstpruefung dieses Repos
 
@@ -438,7 +505,11 @@ nicht angefasst.
 
 Lokal: `./quality/shellcheck.sh` (mit `brew install shellcheck`; ohne shellcheck nur
 `bash -n`) und `./quality/namespace-lint.sh .`; Workflows mit `actionlint`
-(`.github/actionlint.yaml` kennt die NAS-Runner-Labels).
+(`.github/actionlint.yaml` kennt die NAS-Runner-Labels). Die Testskripte (`test-*.sh`, ohne
+Netz, ohne Attrappen fuer curl — Repo-Attrappen liegen als `file://` im Dateisystem):
+`./test-versionsschritt.sh`, `./test-release-reihenfolge.sh`, `./test-lokal-release.sh`,
+`./test-root-autobump.sh`, `./test-backup-prod-db.sh tui-build-logic.sh`,
+`./test-pushover.sh`, `./test-pushover-eskalation.sh`.
 
 ## Voice-to-Claude
 
@@ -557,7 +628,9 @@ A **Glass sound** plays whenever Claude Code finishes a response. Detection work
 | `tui-common.sh` | Terminal UI primitives (colors, box drawing, menu rendering) |
 | `tui-build-logic.sh` | Build, release, deploy, and version management logic |
 | `test-lokal-release.sh` | Guards for the release path (native `[skip ci]` subject, preflight order, rollback, release notes) |
+| `test-root-autobump.sh` | Vollstaendigkeitspruefung (Massnahme 4): halbes Release, komplett, Parent fehlt, Ausnahmen, Selbstkontrolle |
 | `ci/root-autobump.sh` | Kanonisches Auto-Bump-Skript fuer die App-Repos (siehe oben) |
+| `ci/reposilite-release.sh` | Bibliothek: ist ein Multi-Modul-Release im Maven-Repo vollstaendig? (Auto-Bump + Release-Selbstkontrolle) |
 | `quality/shellcheck.sh` | `bash -n` + shellcheck ueber alle Bash-Skripte (CI: `shellcheck.yaml`) |
 | `quality/namespace-lint.sh` | Leitplanke gegen den alten Namespace (CI: `namespace-lint.yaml` und Pipeline-Job) |
 | `tui-start-logic.sh` | Dev runner logic (start app, kill, logs, clean install) |
