@@ -8,7 +8,7 @@ This repository provides a reusable TUI-based build system and developer tools:
 
 **Build & Deploy**
 - **Maven builds** (SNAPSHOT and release)
-- **Semantic versioning** (major, minor, patch) with auto-increment
+- **Versionsschema MAJOR.MINOR.PATCH** — MINOR zaehlt Releases hoch; kein SemVer-Kompatibilitaetsversprechen (siehe „Versionierung")
 - **Docker image builds** (Podman on macOS, Docker on Linux)
 - **Blue-green deployments** to a Synology NAS with zero downtime
 - **Health checks** with automatic rollback on failure
@@ -20,46 +20,61 @@ This repository provides a reusable TUI-based build system and developer tools:
 
 ## Installation
 
-The `build` script in your project automatically clones this repository to `~/.plaintext-scripts` on first run. No manual installation required.
-
-To update manually:
+Das Repo wird **nicht automatisch geklont**. Die `build`-Wrapper der Projekte sourcen die
+Bibliothek fest aus `$HOME/codeplain/plaintext-scripts` (so steht es in plaintext-app, -iot,
+-schuetu, -guild und -root); die CI-Pipeline kopiert ihren Checkout an dieselbe Stelle
+(Schritt „Install plaintext-scripts" in `ci-cd-pipeline.yaml`).
 
 ```bash
-git -C ~/.plaintext-scripts pull
+git clone git@github.com:Plaintext-Gmbh/plaintext-scripts.git ~/codeplain/plaintext-scripts
 ```
 
-Or set `PLAINTEXT_SCRIPTS_UPDATE=true` before running `./build` for a one-time auto-update.
+Aktualisieren:
+
+```bash
+git -C ~/codeplain/plaintext-scripts pull
+```
+
+> Bis zum Zustandsbericht 29.08.2026 stand hier `~/.plaintext-scripts` samt Auto-Clone beim
+> ersten `./build` und einer Variable `PLAINTEXT_SCRIPTS_UPDATE` — beides gab es im Code nie
+> (0 Treffer in `*.sh` und in den `build`-Wrappern der Projekte).
 
 ## Project Setup
 
-### 1. Create a `build` script in your project root
+### 1. `build`-Wrapper im Projekt-Root anlegen
 
 ```bash
 #!/bin/bash
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-SCRIPTS_DIR="$HOME/.plaintext-scripts"
-if [ ! -d "$SCRIPTS_DIR/.git" ]; then
-    git clone git@github.com:Plaintext-Gmbh/plaintext-scripts.git "$SCRIPTS_DIR"
-fi
-source "$SCRIPTS_DIR/tui-common.sh"
-source "$SCRIPTS_DIR/tui-build-logic.sh"
+# Bibliothek: fester Pfad, kein Auto-Clone (siehe Installation)
+source "$HOME/codeplain/plaintext-scripts/tui-common.sh"
+source "$HOME/codeplain/plaintext-scripts/tui-build-logic.sh"
 
 init_versions
 
-# ... TUI menu and command dispatch (see plaintext-root for a full example)
+# ... TUI-Menue und Befehls-Dispatch (vollstaendiges Beispiel: plaintext-app/build)
 ```
 
-### 2. Create `build-conf.txt`
+### 2. `build-conf.txt` anlegen — in `plaintext-config`, nicht im Projekt
 
-Copy the template and adjust to your project:
+Die Konfiguration der Plaintext-Projekte liegt zentral im privaten Repo `plaintext-config`
+unter `plaintext-config/<projektname>/build-conf.txt` (daneben `compose.yaml`,
+`modules-conf.txt`, `deploy/`, `config/`). `load_build_conf()` leitet `<projektname>` aus dem
+Verzeichnisnamen des Projekts ab (`basename`) und sucht zuerst dort — `$PLAINTEXT_CONFIG_DIR`,
+Default `$HOME/codeplain/plaintext-config`; die CI-Pipeline checkt `plaintext-config` an genau
+diese Stelle aus.
 
 ```bash
-cp ~/.plaintext-scripts/build-conf.txt.template ./build-conf.txt
+git clone git@github.com:Plaintext-Gmbh/plaintext-config.git ~/codeplain/plaintext-config
+cp ~/codeplain/plaintext-scripts/build-conf.txt.template \
+   ~/codeplain/plaintext-config/<projektname>/build-conf.txt
 ```
 
-Add `build-conf.txt` to your `.gitignore` if it contains environment-specific values.
+Eine `build-conf.txt` **im Projektverzeichnis** ist nur der Rueckfall fuer Projekte ausserhalb
+von `plaintext-config`; sie gehoert dann in `.gitignore`, sobald sie umgebungsspezifische Werte
+traegt.
 
 > **Der Dateiname ist nicht frei waehlbar.** `load_build_conf()` sucht ausschliesslich nach
 > `build-conf.txt`. Bis zur Karte 961 stand hier `plaintext-build.cfg` — diesen Namen hat nie
@@ -142,6 +157,19 @@ the guard off entirely.
 | `./build 56` | Release + deploy DEV + PROD (multi-command) |
 | `./build 8` | Lokal-Release: Release + Tag + Blue-Green **PROD direkt**, ohne CI (nur wo der Wrapper es verdrahtet, z.B. plaintext-app) |
 
+### Versionierung — was die Nummern bedeuten
+
+Das Schema ist `MAJOR.MINOR.PATCH`, aber **kein SemVer**: die Nummer sagt nichts ueber
+Kompatibilitaet. Der Standard-Release (`./build 3`, `5`, `56` und jeder CI-Release auf
+`master`) zaehlt **MINOR um eins hoch** — die Nummer ist ein Release-Zaehler (plaintext-app
+steht bei 2.17xx.0, plaintext-root bei 1.6xx.0). `./build 4` zaehlt PATCH hoch, `./build 2`
+MAJOR (setzt MINOR und PATCH auf 0); beides wird von Hand gewaehlt, nicht aus dem Inhalt
+abgeleitet. Nach dem Release steht die POM auf `<gerade veroeffentlicht>-SNAPSHOT`;
+hochgezaehlt wird erst beim naechsten Release (`compute_release_versions`, bewacht von
+`test-versionsschritt.sh`). Pro Release entstehen ein Git-Tag `<version>` und — seit dem
+Zustandsbericht 29.08.2026 — ein GitHub-Release mit generierten Notes (`gh release create
+--generate-notes`, best-effort: ohne `gh` oder ohne Token nur ein Hinweis, nie ein Abbruch).
+
 ### Lokal-Release (zweiter Weg neben CI/CD)
 
 `./build local-release [1|2|3] [prod|dev-prod]` (plaintext-app: `./build 8`) macht den kompletten
@@ -152,9 +180,12 @@ Runner belegt sind oder ein Release bewusst von Hand ausgerollt werden soll.
 
 Was ihn vom blossen `./build 56` unterscheidet:
 
-- Der Release-Commit traegt `[skip-ci]` in der Betreffzeile — sonst startet der Push die
-  CI-Pipeline, die parallel einen zweiten Release deployt. Die `skip-pruefung` der App-Pipeline
-  fuehrt `Release version` als Automatik-Commit (kein Pushover-Alarm).
+- Der Release-Commit traegt das native `[skip ci]` in der Betreffzeile — sonst startet der Push
+  die CI-Pipeline, die parallel einen zweiten Release deployt. Seit dem Zustandsbericht
+  29.08.2026 gilt das fuer JEDEN Release-Commit, auch in der CI (vorher `[skip-ci]` mit
+  Bindestrich, das GitHub nicht kennt: es erzeugte Laeufe, die auf einem NAS-Runner nur
+  uebersprungen oder per Concurrency abgebrochen wurden). Die `skip-pruefung` der App-Pipeline
+  fuehrt `Release version` zusaetzlich als Automatik-Commit (kein Pushover-Alarm).
 - Vorflug vor dem Tag: Branch = master, Arbeitsbaum sauber, origin nachgezogen (fast-forward),
   kein aktiver CI-Lauf auf master (`gh run list`), NAS erreichbar. Scheitert etwas, entsteht
   kein Tag.
@@ -166,7 +197,7 @@ Was ihn vom blossen `./build 56` unterscheidet:
   `MVN_TEST_FLAG="-DskipITs -DexcludedGroups=quality-gate" ./build 8`.
 
 Dieselben Sicherungen gelten fuer JEDEN lokalen Release-Lauf (`./build 3/4/5/56/7`, Erkennung
-ueber `CI != true`): Vorflug vor dem Versionsschritt, `[skip-ci]` im Release-Commit, und
+ueber `CI != true`): Vorflug vor dem Versionsschritt, `[skip ci]` im Release-Commit, und
 `deploy_to_dev`/`deploy_to_prod` sperren, solange ein CI-Rollout auf master laeuft. Ungespeicherte
 Aenderungen bewusst mitnehmen (altes `git add -A`-Verhalten): `LOKAL_RELEASE_MIT_AENDERUNGEN=true`.
 
@@ -176,38 +207,238 @@ Sicherungen bewacht `./test-lokal-release.sh`.
 
 ## GitHub Actions
 
-This repository provides a reusable workflow. Call it from your project:
+### CI/CD-Pipeline (`ci-cd-pipeline.yaml`)
+
+Der zentrale reusable Workflow ist `.github/workflows/ci-cd-pipeline.yaml` (bis zum
+Zustandsbericht 29.08.2026 stand hier ein nicht existierendes `maven-build-deploy.yaml` mit
+ebenso nicht existierenden Inputs). Jobs: `namespace-lint` (ubuntu-latest) → `ci` (Build+Test,
+nur ci-only/Sonar) → `sonar` → `deploy` → `verify-dev` / `verify-prod`. Das Ereignis des
+Aufrufers bestimmt das Ziel; die Build-Konfiguration kommt aus `plaintext-config`, nicht aus
+dem Aufruf. Gekuerztes Beispiel nach `plaintext-app/.github/workflows/ci-cd.yaml`:
 
 ```yaml
-name: Deploy to NAS
+name: Build And Deploy
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 1 * * *'    # Nightly ci-only — hier laeuft seit Paket S auch das Quality-Gate mit
+    - cron: '0 4 * * 1'    # Wochenlauf mit Sonar/OWASP (je Repo gestaffelt, Karte 889)
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  pipeline:
+    uses: Plaintext-Gmbh/plaintext-scripts/.github/workflows/ci-cd-pipeline.yaml@master
+    with:
+      deploy-target: >-
+        ${{ github.event_name == 'schedule' && 'ci-only'
+         || github.event_name == 'pull_request' && 'ci-only'
+         || (github.ref == 'refs/heads/master' && 'release-all' || 'snapshot-dev') }}
+      project-name: plaintext-app
+      database-name: plaintext
+      dev-url: 'http://192.168.1.224:1111'
+      prod-url: 'http://192.168.1.224:1112'
+      sonar-enabled: ${{ (github.event_name == 'schedule' && !endsWith(github.event.schedule, '* * *')) || github.event_name == 'workflow_dispatch' }}
+      quality-analysis: ${{ (github.event_name == 'schedule' && !endsWith(github.event.schedule, '* * *')) || github.event_name == 'workflow_dispatch' }}
+      runner: '["self-hosted", "nas"]'
+      postgres-port: '5436'
+    secrets:
+      TWINGATE_SERVICE_KEY: ${{ secrets.TWINGATE_SERVICE_KEY }}
+      MVN_DEPLOY_TOKEN: ${{ secrets.MVN_DEPLOY_TOKEN }}
+      MAVEN_NAS_TOKEN: ${{ secrets.MAVEN_NAS_TOKEN }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+      PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
+      PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+```
+
+Alle Inputs (`deploy-target`, `project-name`, `database-name`, `java-version`, `dev-url`,
+`prod-url`, `playwright-enabled`, `integration-tests-enabled`, `sonar-enabled`,
+`quality-analysis`, `sonar-url`, `runner`, `postgres-port`, `scripts-ref`) und Secrets sind im
+`workflow_call`-Block der Pipeline beschrieben. `deploy-target`: `ci-only`, `snapshot-dev`,
+`release-dev`, `release-all`, `release-only`, `prod-single`.
+
+Die Release-Commits der Pipeline (`Release version …`, `Prepare next development iteration …`,
+`chore(quality): Quality-Gate-Status …`) tragen das **native `[skip ci]`** — GitHub erzeugt fuer
+diese Pushes keinen Lauf. Die `skip-pruefung` in den App-Repos liest weiterhin `[skip-ci]`
+(Bindestrich) fuer von Hand markierte Commits; sie sollte kuenftig beide Formen kennen.
+
+### Reusable Workflows fuer die App-Repos (Paket S)
+
+Drei Workflows lagen viermal kopiert in app, iot, schuetu und guild. Sie liegen jetzt hier
+als `workflow_call`; ein App-Repo behaelt nur den Aufrufer mit Zeitplan und seinen Werten.
+Gemeinsame Regeln:
+
+- `github.repository`, `github.token`, `GITHUB_SHA` und ein `actions/checkout` ohne
+  `repository:` gehoeren im aufgerufenen Workflow dem **Aufrufer** — gearbeitet wird also im
+  App-Repo.
+- Die `permissions` muss der Aufrufer gewaehren; der aufgerufene Workflow kann nie mehr haben.
+- `concurrency` steht im aufgerufenen Workflow auf Job-Ebene; der Aufrufer setzt seine
+  Workflow-Gruppe zusaetzlich (wie bisher).
+- Secrets explizit durchreichen (kein `secrets: inherit`, Karte 717).
+
+#### `root-autobump.yaml` — root-Version per PR nachziehen (Karte 322)
+
+| Input | Pflicht | Default | Bedeutung |
+|-------|---------|---------|-----------|
+| `pgport` | ja | — | Host-Port des Test-Postgres; Schema ci-Port + 200 (app 5636, iot 5635, schuetu 5637, guild 5639) |
+| `db-name` | ja | — | Test-DB (`plaintext`, `plaintext_iot`, `plaintext_schuetu`, `plaintext_guild`) |
+| `java-version` | nein | `25` | JDK des Verify-Builds |
+| `dry-run` | nein | `false` | nur pruefen und bauen, kein PR |
+| `scripts-ref` | nein | `master` | Ref von plaintext-scripts fuer `ci/root-autobump.sh` |
+| `bump-branch` | nein | `chore/root-autobump` | Branch des Bump-PR |
+
+Secrets: `MVN_DEPLOY_TOKEN` (Pflicht), `MAVEN_NAS_TOKEN` (Pflicht), `AUTOBUMP_TOKEN`
+(optional, sonst `github.token` mit Freigabepflicht), `PUSHOVER_APP_TOKEN`,
+`PUSHOVER_USER_KEY` (optional). Runner: `[self-hosted, nas]` (maven.plaintext.ch ist LAN-only).
+
+```yaml
+name: Root Auto-Bump
+
+on:
+  schedule:
+    - cron: '15 23 * * *'   # Fensteranfaenge, nicht Uhrzeiten (Karte 792)
+    - cron: '15 7 * * *'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Nur pruefen und bauen, keinen PR erstellen'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: root-autobump-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  autobump:
+    uses: Plaintext-Gmbh/plaintext-scripts/.github/workflows/root-autobump.yaml@master
+    with:
+      pgport: '5636'
+      db-name: plaintext
+      dry-run: ${{ inputs.dry-run || false }}
+    secrets:
+      MVN_DEPLOY_TOKEN: ${{ secrets.MVN_DEPLOY_TOKEN }}
+      MAVEN_NAS_TOKEN: ${{ secrets.MAVEN_NAS_TOKEN }}
+      AUTOBUMP_TOKEN: ${{ secrets.AUTOBUMP_TOKEN }}
+      PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
+      PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+```
+
+#### `publish-root-pin.yaml` — benutzte root-Version nach plaintext-mvn melden (Karte 942)
+
+| Input | Pflicht | Default | Bedeutung |
+|-------|---------|---------|-----------|
+| `heartbeat-days` | nein | `7` | nach so vielen Tagen auch ohne Aenderung neu schreiben |
+| `mvn-repo` | nein | `Plaintext-Gmbh/plaintext-mvn` | Ziel-Repo |
+| `pin-branch` | nein | `pins` | Datenbranch drueben (nicht master) |
+
+Secrets: `AUTOBUMP_TOKEN` (Pflicht), `PUSHOVER_APP_TOKEN`, `PUSHOVER_USER_KEY` (optional).
+Runner: ubuntu-latest. Der Wochentag im Cron bleibt je Repo verschieden (app Mo, iot Di,
+schuetu Mi, guild Do).
+
+```yaml
+name: root-Pin veroeffentlichen
+
+on:
+  push:
+    branches: [master]
+    paths: ['pom.xml']
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-root-pin-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  pin:
+    uses: Plaintext-Gmbh/plaintext-scripts/.github/workflows/publish-root-pin.yaml@master
+    secrets:
+      AUTOBUMP_TOKEN: ${{ secrets.AUTOBUMP_TOKEN }}
+      PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
+      PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+```
+
+#### `housekeeping.yml` — alte Workflow-Laeufe loeschen
+
+Input `task` (Pflicht): `deleteLogs5` (je Workflow die letzten 5 behalten) oder `deleteLogAll`.
+Keine Secrets; `github.token` des Aufrufers braucht `actions: write`. Der Workflow laeuft in
+plaintext-scripts selbst weiterhin per `workflow_dispatch`.
+
+```yaml
+name: housekeeping
 
 on:
   workflow_dispatch:
     inputs:
-      build-command:
+      task:
+        description: 'Task to run'
+        required: true
+        default: 'deleteLogs5'
         type: choice
-        options: ['5', '6', '56']
-        default: '56'
+        options: [deleteLogs5, deleteLogAll]
+
+permissions:
+  actions: write
+  contents: read
 
 jobs:
-  deploy:
-    uses: Plaintext-Gmbh/plaintext-scripts/.github/workflows/maven-build-deploy.yaml@master
+  run:
+    uses: Plaintext-Gmbh/plaintext-scripts/.github/workflows/housekeeping.yml@master
     with:
-      build-command: ${{ inputs.build-command }}
-      build-config: |
-        IMAGE_NAME=myproject
-        WEBAPP_MODULE=myproject-webapp
-        TUI_TITLE=MY PROJECT BUILD SYSTEM
-        DEPLOY_PATH=/volume1/docker/myproject
-        DB_NAME=myproject
-        DB_CONTAINER_PREFIX=myproject
-        DEV_PORT=1121
-        MVN_RELEASE_DEPLOY=true
-    secrets:
-      TWINGATE_SERVICE_KEY: ${{ secrets.TWINGATE_SERVICE_KEY }}
-      MVN_DEPLOY_TOKEN: ${{ secrets.MVN_DEPLOY_TOKEN }}
-      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      task: ${{ inputs.task }}
 ```
+
+### `ci/root-autobump.sh` — kanonisches Bump-Skript
+
+Das Skript hinter dem Auto-Bump liegt nur noch hier (`ci/root-autobump.sh`, BSD-/GNU-tauglich:
+kein `sed -i`). Der reusable Workflow ruft es aus seinem Checkout von plaintext-scripts auf;
+ein App-Repo braucht keine Kopie mehr. Wer es lokal aufrufen will (`detect` zeigt den
+Rueckstand, `apply` setzt die pom.xml), legt hoechstens einen duennen Wrapper an — dasselbe
+Muster wie beim `build`-Wrapper:
+
+```bash
+#!/usr/bin/env bash
+# .github/scripts/root-autobump.sh — Wrapper, die Logik liegt in plaintext-scripts/ci/root-autobump.sh
+exec "${PLAINTEXT_SCRIPTS_DIR:-$HOME/codeplain/plaintext-scripts}/ci/root-autobump.sh" "$@"
+```
+
+Aufruf: `root-autobump.sh detect` (stdout + `GITHUB_OUTPUT`: current/parent/latest/behind/bump)
+bzw. `root-autobump.sh apply [version]`. Umgebung: `POM_FILE` (Default `pom.xml`),
+`ROOT_MAVEN_REPO` (Default `https://maven.plaintext.ch/releases`). Ein Interfaces-Pin
+`<plaintext-root-interfaces.version>${plaintext-root.version}</...>` gilt als **gekoppelt**
+(folgt dem Bump von selbst); nur ein abweichendes Literal wird als „entkoppelt" gemeldet und
+nicht angefasst.
+
+### Selbstpruefung dieses Repos
+
+| Workflow | Prueft | Runner |
+|----------|--------|--------|
+| `namespace-lint.yaml` | keine funktionale Referenz auf den alten Namespace (`quality/namespace-lint.sh`) | ubuntu-latest |
+| `shellcheck.yaml` | `bash -n` + `shellcheck -S warning` ueber jede Datei mit Bash-Shebang (`quality/shellcheck.sh`) | ubuntu-latest |
+| `quality-dashboard.yaml` | woechentliche Uebersicht aller Projekte auf GitHub Pages | self-hosted |
+
+Lokal: `./quality/shellcheck.sh` (mit `brew install shellcheck`; ohne shellcheck nur
+`bash -n`) und `./quality/namespace-lint.sh .`; Workflows mit `actionlint`
+(`.github/actionlint.yaml` kennt die NAS-Runner-Labels).
 
 ## Voice-to-Claude
 
@@ -325,7 +556,10 @@ A **Glass sound** plays whenever Claude Code finishes a response. Detection work
 |------|-------------|
 | `tui-common.sh` | Terminal UI primitives (colors, box drawing, menu rendering) |
 | `tui-build-logic.sh` | Build, release, deploy, and version management logic |
-| `test-lokal-release.sh` | Guards for the local-release path (skip-ci subject, preflight order, rollback) |
+| `test-lokal-release.sh` | Guards for the release path (native `[skip ci]` subject, preflight order, rollback, release notes) |
+| `ci/root-autobump.sh` | Kanonisches Auto-Bump-Skript fuer die App-Repos (siehe oben) |
+| `quality/shellcheck.sh` | `bash -n` + shellcheck ueber alle Bash-Skripte (CI: `shellcheck.yaml`) |
+| `quality/namespace-lint.sh` | Leitplanke gegen den alten Namespace (CI: `namespace-lint.yaml` und Pipeline-Job) |
 | `tui-start-logic.sh` | Dev runner logic (start app, kill, logs, clean install) |
 | `tui-modules-logic.sh` | Module toggle logic for multi-module projects |
 | `start-postgres.sh` | Start PostgreSQL container (reads config from `build-conf.txt`) |
