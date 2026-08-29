@@ -153,9 +153,17 @@ jobs:
   # Der Job haengt bewusst an KEINEM anderen und blockiert nichts: er faerbt den Lauf rot
   # (auf dem PR sichtbar, bevor gemergt wird), haelt aber keinen Deploy auf. Kosten:
   # zwei Checkouts und ein grep.
+  #
+  # ubuntu-latest statt inputs.runner (Zustandsbericht 29.08.2026, Paket S): fuer zwei Checkouts
+  # und ein grep belegte der Job bisher einen der vier NAS-Runner — genau die, die waehrend
+  # eines Blue-Green-Deploys knapp sind. Er braucht weder LAN noch Maven-Cache noch Docker und
+  # ist auf einem GitHub-Runner in unter einer Minute durch. Die Minuten der privaten Repos
+  # gehen ins Inklusivkontingent des Free-Plans (2000 min/Monat); bei ~1 min je Lauf bleibt
+  # das auch mit allen Repos zusammen weit darunter. publish-root-pin laeuft aus demselben
+  # Grund schon laenger auf GitHub-Runnern.
   namespace-lint:
     name: Namespace-Lint
-    runs-on: ${{ fromJSON(inputs.runner) }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -321,8 +329,23 @@ jobs:
         # wöchentlichen Sonar-/CVE-Gate-Stand (quality/quality-gate.properties) und färbt sonst JEDEN Code-PR
         # rot, obwohl der PR-Code sauber baut/testet. Der Gate-Stand wird separat im wöchentlichen
         # quality-analysis-Lauf (Cron) bewertet + committet das Statusfile — nicht hier bei jedem PR.
-        run: mvn clean install -B -DskipITs -DexcludedGroups=quality-gate
+        #
+        # Zustandsbericht 29.08.2026 (Paket S): bei SCHEDULE-Laeufen (Nightly, Montags-Wochenlauf)
+        # laeuft der Waechter MIT. Bis dahin war er ueberall ausgeschlossen — hier, im deploy-Job
+        # und im sonar-Job — waehrend der Kommentar am deploy-Job behauptete, er liefe "in
+        # nightly/PR/lokal voll mit". Tat er nicht: der Nightly ist ci-only und landet genau hier.
+        # Ein rotes Gate war damit in KEINEM CI-Lauf sichtbar. Jetzt faerbt es den Nightly rot;
+        # PR-Laeufe (pull_request) und Rollouts (push/workflow_dispatch -> deploy-Job) bleiben
+        # ausgenommen, damit ein Hotfix trotz rotem Gate rausgehen kann.
+        # `github.event_name` ist im aufgerufenen Workflow das Ereignis des AUFRUFERS (der
+        # github-Kontext gehoert immer dem Caller) — ein zusaetzlicher Input ist nicht noetig.
+        # Montags (sonar-enabled) laeuft der sonar-Job per `!cancelled()` auch nach einem roten
+        # Gate weiter und kann es wieder auf OK bringen — kein Catch-22.
+        # Ausdruck bewusst als `!= 'schedule' && FLAG || ''`: die Form `== 'schedule' && '' || FLAG`
+        # liefert IMMER das Flag, weil ein leerer String in GitHub-Ausdruecken falsy ist.
+        run: mvn clean install -B -DskipITs ${QUALITY_GATE_FLAG}
         env:
+          QUALITY_GATE_FLAG: ${{ github.event_name != 'schedule' && '-DexcludedGroups=quality-gate' || '' }}
           # env.PGPORT statt inputs.postgres-port (Karte 906): der Port wird im Start-Schritt aus der
           # run-id berechnet und dort nach GITHUB_ENV geschrieben. Gleiches Muster wie im deploy-Job,
           # der env.DEPLOY_PGPORT schon so liest.
@@ -823,7 +846,10 @@ jobs:
         run: |
           if git status --porcelain quality/quality-gate.properties | grep -q .; then
             git add quality/quality-gate.properties
-            git commit -m "chore(quality): Quality-Gate-Status ${{ steps.gate.outputs.breached == 'true' && 'BREACHED' || 'OK' }} [skip-ci]"
+            # Natives "[skip ci]" (Zustandsbericht 29.08.2026): GitHub erzeugt fuer diesen Push gar
+            # keinen Lauf. Die Bindestrich-Form erzeugte einen, der erst auf einem NAS-Runner von
+            # der skip-pruefung uebersprungen wurde. Der Commit aendert nur das Statusfile.
+            git commit -m "chore(quality): Quality-Gate-Status ${{ steps.gate.outputs.breached == 'true' && 'BREACHED' || 'OK' }} [skip ci]"
             git push origin HEAD:${{ github.ref_name }} || {
               echo "push rejected – rebase & retry"; git pull --rebase --autostash origin ${{ github.ref_name }}; git push origin HEAD:${{ github.ref_name }};
             }
@@ -1128,8 +1154,11 @@ jobs:
           # M1: Unit-Tests laufen im einzigen Build mit (ITs separat) -> Test-DB nötig.
           # Fast-Mode: Commit-Marker [fast] in der Message überspringt ALLE Tests (-DskipTests).
           # -DexcludedGroups=quality-gate: der Quality-Gate-Wächter (QualityGateTest) darf den DEPLOY
-          # NICHT blockieren (Hotfix muss trotz aktivem Alert-File rausgehen können). Er läuft dafür in
-          # nightly/PR/lokal voll mit und färbt dort rot -> Handlungsbedarf bleibt sichtbar.
+          # NICHT blockieren (Hotfix muss trotz aktivem Alert-File rausgehen können).
+          # Bis zum Zustandsbericht 29.08.2026 stand hier "er läuft dafür in nightly/PR/lokal voll
+          # mit" — das stimmte nicht: der Nightly ist ci-only und schloss ihn im ci-Job ebenfalls
+          # aus, lokal ist -DskipTests der Default. Seit Paket S laeuft er im ci-Job bei
+          # schedule-Laeufen mit (siehe dort); PR und Deploy bleiben ausgenommen.
           MVN_TEST_FLAG: ${{ contains(github.event.head_commit.message, '[fast]') && '-DskipTests' || '-DskipITs -DexcludedGroups=quality-gate' }}
           SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:${{ env.DEPLOY_PGPORT }}/${{ inputs.database-name }}
           SPRING_DATASOURCE_USERNAME: plaintext

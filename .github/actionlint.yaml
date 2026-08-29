@@ -1,0 +1,7 @@
+# actionlint-Konfiguration (Zustandsbericht 29.08.2026, Paket S): die Labels der self-hosted
+# NAS-Runner, damit `actionlint` lokal die Workflows pruefen kann, ohne an "label nas is
+# unknown" haengenzubleiben. Stand: plaintext-dockercompose tri/github-runners.
+self-hosted-runner:
+  labels:
+    - nas
+    - twingate

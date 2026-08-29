@@ -138,7 +138,7 @@ draw() {
             prev_grp="$grp"
         fi
         DLIST_TYPE+=("i")
-        DLIST_IDX+=($i)
+        DLIST_IDX+=("$i")
         DLIST_LABEL+=("${TOGGLE_DISPLAY[$i]}")
         if [[ $CURSOR -eq $i ]]; then
             cursor_dline=$dline

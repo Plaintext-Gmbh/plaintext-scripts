@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2034  # Farben, DEPLOY_SERVER, IMAGE_NAME, DB_NAME liest die per eval geladene backup_prod_db()
 # Testaufbau fuer backup_prod_db() aus tui-build-logic.sh (Karte 955).
 # Aufruf: ./test-backup-prod-db.sh tui-build-logic.sh
 # ssh und docker sind Attrappen; das ssh-Kommando wird lokal in einer Shell ausgefuehrt, damit
@@ -31,7 +32,7 @@ eval "$(sed -n '/^backup_prod_db() {/,/^}/p' "$1")"
 lauf() {
     local name=$1 modus=$2 erwartet_rc=$3
     export DOCKER_MODUS=$modus
-    local pfad; pfad=$(backup_prod_db 2>/dev/null); local rc=$?
+    ( backup_prod_db ) >/dev/null 2>&1; local rc=$?   # Subshell wie das fruehere $(...): die Funktion darf den Test nicht veraendern
     local n; n=$(ls -1 "$DEPLOY_PATH"/backups/backup-*.sql.gz 2>/dev/null | wc -l)
     local urteil="FEHLER"
     [ "$rc" = "$erwartet_rc" ] && urteil="ok"

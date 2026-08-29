@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2034  # Farbpalette: gelesen von den Skripten, die diese Datei sourcen (build, modules, start)
 # ═══════════════════════════════════════════════════════════════
 #  TUI Common Library
 #  Shared drawing primitives, colors, and terminal management.
