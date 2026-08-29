@@ -1969,6 +1969,28 @@ lokal_release_maven_zugangsdaten() {
     fi
     local SETTINGS="${MAVEN_SETTINGS:-$HOME/.m2/settings.xml}"
     if [ -n "$REPO_ID" ] && grep -q "<id>[[:space:]]*${REPO_ID}[[:space:]]*</id>" "$SETTINGS" 2>/dev/null; then
+        # Vorhanden reicht nicht — der Token muss auch GELTEN. Am 29.08.2026 lief ein Lokal-Release
+        # mit einem veralteten Reposilite-Token bis nach Commit+Tag+Push und starb erst im
+        # `mvn deploy` (401): Tag 2.1709.0 ohne Artefakt. Darum hier ein Probe-Login gegen
+        # Reposilite (/api/auth/me), bevor irgendetwas unumkehrbar wird.
+        local REPO_URL AUTH_URL USER PASS CODE
+        REPO_URL=$(sed -n '/<distributionManagement>/,/<\/distributionManagement>/p' pom.xml 2>/dev/null \
+            | grep -m1 '<url>' | sed 's/.*<url>//;s/<\/url>.*//' | tr -d ' ')
+        USER=$(awk -v id="$REPO_ID" 'BEGIN{RS="</server>"} $0 ~ "<id>[[:space:]]*"id"[[:space:]]*</id>" {match($0,/<username>[^<]*<\/username>/); print substr($0,RSTART+10,RLENGTH-21); exit}' "$SETTINGS")
+        PASS=$(awk -v id="$REPO_ID" 'BEGIN{RS="</server>"} $0 ~ "<id>[[:space:]]*"id"[[:space:]]*</id>" {match($0,/<password>[^<]*<\/password>/); print substr($0,RSTART+10,RLENGTH-21); exit}' "$SETTINGS")
+        if [[ "$REPO_URL" =~ ^https?://[^/]+ ]] && [ -n "$USER" ] && [ -n "$PASS" ]; then
+            AUTH_URL="${BASH_REMATCH[0]}/api/auth/me"
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -u "${USER}:${PASS}" "$AUTH_URL" 2>/dev/null || echo 000)
+            case "$CODE" in
+                200) echo -e "${GREEN}✓ Maven: Zugangsdaten fuer '${REPO_ID}' gueltig (${AUTH_URL} -> 200) — Artefakt wird veroeffentlicht.${NC}"; return 0 ;;
+                401|403)
+                    echo -e "${RED}✗ Maven: Zugangsdaten fuer '${REPO_ID}' in ${SETTINGS} werden abgelehnt (${AUTH_URL} -> ${CODE}).${NC}"
+                    echo -e "${RED}  Abbruch VOR Commit/Tag — sonst entsteht ein Release-Tag ohne Artefakt.${NC}"
+                    echo -e "${YELLOW}  Gueltiger Token: REPOSILITE_OPTS des reposilite-Containers auf dem NAS bzw. Vault 'Reposilite CI-Token (maven.plaintext.ch)'.${NC}"
+                    return 1 ;;
+                *)   echo -e "${YELLOW}⚠ Maven: Probe-Login gegen ${AUTH_URL} nicht moeglich (HTTP ${CODE}) — Zugangsdaten unverifiziert, Veroeffentlichung wird versucht.${NC}"; return 0 ;;
+            esac
+        fi
         echo -e "${GREEN}✓ Maven: Zugangsdaten fuer '${REPO_ID}' in ${SETTINGS} vorhanden — Artefakt wird veroeffentlicht.${NC}"
         return 0
     fi
