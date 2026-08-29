@@ -247,12 +247,16 @@ stage_jar_to_nas() {
     # stage_jar_to_nas()-Laeufe fuer dieselbe App wuerden sich sonst denselben Tmp-Pfad teilen und
     # sich gegenseitig ueberschreiben/verstuemmeln (Race Condition, #16/fleetd Haertung).
     local TMP_NAME="app.jar.tmp.$$.$(date +%s 2>/dev/null || echo 0)"
+    # Massnahme 2: die Kopie selbst unter Lock — zwei Laeufe ueberschreiben sich sonst gegenseitig.
+    deploy_lock_acquire "staging" || return 1
     ssh "${DEPLOY_SERVER}" "mkdir -p ${STAGING}"
     if ! cat "${JAR}" | ssh "${DEPLOY_SERVER}" "cat > ${STAGING}/${TMP_NAME} && chmod 644 ${STAGING}/${TMP_NAME} && mv -f ${STAGING}/${TMP_NAME} ${STAGING}/app.jar"; then
         ssh "${DEPLOY_SERVER}" "rm -f ${STAGING}/${TMP_NAME}" 2>/dev/null
         echo -e "${RED}✗ M3: Jar-Transfer auf NAS fehlgeschlagen${NC}"
+        deploy_lock_release "staging"
         return 1
     fi
+    deploy_lock_release "staging"
     echo -e "${GREEN}✓ M3: Jar im Staging (${STAGING}/app.jar)${NC}"
 }
 
@@ -277,10 +281,13 @@ backup_prod_db() {
     # pg_dump nichts liefert (es schreibt ein leeres Archiv von 20 Byte und meldet 0).
     # Zusammen mit einem falschen DB_CONTAINER_PREFIX ergab das 611 leere Sicherungen, jede
     # als "Database backup created" gemeldet, fuenf Monate lang unbemerkt.
-    # "pg_dump -Z 9" komprimiert selbst; damit ist $? wieder der Status von docker exec.
+    # "pg_dump -Z" komprimiert selbst; damit ist $? wieder der Status von docker exec.
+    # Massnahme 3: -Z 1 statt 9 (2 GB Mail-Anhaenge: Minuten statt Sekunden Unterschied, Datei
+    # kaum groesser) und --lock-wait-timeout: haengt ein ALTER TABLE eines anderen Laufs, bricht
+    # der Dump nach 30 s sauber ab statt beide zu blockieren.
     # Am lebenden System belegt: falscher Container -> alt rc=0/20 Byte, neu rc=1/0 Byte.
     ssh ${DEPLOY_SERVER} "mkdir -p '${REMOTE_BACKUP_DIR}' && \
-        sudo docker exec ${_DB_CONTAINER} pg_dump -U plaintext -Z 9 ${_DB_NAME} > '${REMOTE_BACKUP_PATH}'"
+        sudo docker exec ${_DB_CONTAINER} pg_dump -U plaintext -Z ${BACKUP_GZIP_LEVEL:-1} --lock-wait-timeout=${BACKUP_LOCK_WAIT:-30s} ${_DB_NAME} > '${REMOTE_BACKUP_PATH}'"
     local _RC=$?
 
     if [ ${_RC} -ne 0 ]; then
@@ -338,6 +345,117 @@ restore_prod_db() {
         echo -e "${RED}✗ Database restore failed!${NC}"
         return 1
     fi
+}
+
+# ── Deploy-Lock auf dem NAS (Massnahme 2, 29.08.2026) ──────────────────────────────────
+# Zwei Rollouts desselben Projekts (zwei lokale Sessions, lokal + CI) teilen sich Staging-Jar,
+# Slots, nginx-Upstream und DB. Die CI hat dafuer ihre Concurrency-Gruppe — die kennt aber den
+# lokalen Lauf nicht. Der Lock lebt deshalb auf dem NAS, wo sich ALLE Laeufe treffen:
+# ein Verzeichnis (mkdir ist atomar) mit Besitzer-Datei "token zeit version". Verwaiste Locks
+# (abgebrochener Lauf) werden nach DEPLOY_LOCK_STALE Sekunden uebernommen.
+DEPLOY_LOCK_WAIT="${DEPLOY_LOCK_WAIT:-1800}"      # max. Wartezeit auf einen fremden Lauf (s)
+DEPLOY_LOCK_STALE="${DEPLOY_LOCK_STALE:-3600}"    # aelter als das = verwaist
+DEPLOY_LOCK_TOKEN="$(hostname -s 2>/dev/null || hostname)-$$-$(date +%s)"
+DEPLOY_LOCK_HELD=""
+
+deploy_lock_pfad() { echo "${DEPLOY_PATH}/.deploy-lock-${1}"; }
+
+deploy_lock_acquire() {
+    local ENV_NAME="$1"
+    local LOCK
+    LOCK=$(deploy_lock_pfad "$ENV_NAME")
+    case " ${DEPLOY_LOCK_HELD} " in *" ${ENV_NAME} "*) return 0 ;; esac
+    local INFO="${DEPLOY_LOCK_TOKEN} $(date +%s) ${NEW_VERSION:-${RELEASE_VERSION:-?}}${CI:+ ci}"
+    local GEWARTET=0
+    while true; do
+        if ssh ${DEPLOY_SERVER} "mkdir '${LOCK}' 2>/dev/null && echo '${INFO}' > '${LOCK}/owner'" 2>/dev/null; then
+            DEPLOY_LOCK_HELD="${DEPLOY_LOCK_HELD} ${ENV_NAME}"
+            echo -e "${GREEN}✓ Deploy-Lock ${ENV_NAME} gesetzt (${DEPLOY_LOCK_TOKEN})${NC}"
+            return 0
+        fi
+        local OWNER
+        OWNER=$(ssh ${DEPLOY_SERVER} "cat '${LOCK}/owner' 2>/dev/null" 2>/dev/null)
+        local TS
+        TS=$(printf '%s' "$OWNER" | awk '{print $2}' | tr -dc '0-9')
+        if [ -n "$TS" ] && [ $(( $(date +%s) - TS )) -gt "$DEPLOY_LOCK_STALE" ]; then
+            echo -e "${YELLOW}⚠ Verwaister Deploy-Lock ${ENV_NAME} (${OWNER}) — wird uebernommen.${NC}"
+            ssh ${DEPLOY_SERVER} "rm -rf '${LOCK}'" 2>/dev/null
+            continue
+        fi
+        if [ -z "$OWNER" ] && ! ssh ${DEPLOY_SERVER} "[ -d '${LOCK}' ]" 2>/dev/null; then
+            # mkdir scheiterte, aber es gibt keinen Lock: SSH/Rechte-Problem, nicht Konkurrenz.
+            echo -e "${RED}✗ Deploy-Lock ${ENV_NAME} kann nicht angelegt werden (${LOCK}) — SSH/Rechte pruefen.${NC}"
+            return 1
+        fi
+        if [ "$GEWARTET" -ge "$DEPLOY_LOCK_WAIT" ]; then
+            echo -e "${RED}✗ Deploy-Lock ${ENV_NAME} seit ${GEWARTET}s belegt von: ${OWNER} — Abbruch.${NC}"
+            echo -e "${YELLOW}  Haengt der andere Lauf wirklich? Dann: ssh ${DEPLOY_SERVER} rm -rf '${LOCK}'${NC}"
+            return 1
+        fi
+        if [ "$GEWARTET" -eq 0 ]; then
+            echo -e "${YELLOW}⏳ Deploy-Lock ${ENV_NAME} belegt von: ${OWNER} — warte (max ${DEPLOY_LOCK_WAIT}s)...${NC}"
+        fi
+        sleep 15
+        GEWARTET=$((GEWARTET + 15))
+    done
+}
+
+deploy_lock_release() {
+    local ENV_NAME="$1"
+    local LOCK
+    LOCK=$(deploy_lock_pfad "$ENV_NAME")
+    case " ${DEPLOY_LOCK_HELD} " in *" ${ENV_NAME} "*) ;; *) return 0 ;; esac
+    # Nur den eigenen Lock loesen (Token in der Besitzer-Datei).
+    if ssh ${DEPLOY_SERVER} "grep -q '^${DEPLOY_LOCK_TOKEN} ' '${LOCK}/owner' 2>/dev/null && rm -rf '${LOCK}'" 2>/dev/null; then
+        echo -e "${GREEN}✓ Deploy-Lock ${ENV_NAME} freigegeben${NC}"
+    fi
+    local REST="" W
+    for W in ${DEPLOY_LOCK_HELD}; do [ "$W" != "$ENV_NAME" ] && REST="${REST} ${W}"; done
+    DEPLOY_LOCK_HELD="$REST"
+}
+
+# ── Deploy-Backup nur bei anstehender Migration (Massnahme 3, 29.08.2026) ────────────────
+# Der pg_dump vor jedem PROD-Deploy (2 GB, davon 1.4 GB Mail-Anhaenge) kostete 3-4 Minuten und
+# blockierte parallel laufende Flyway-ALTERs. Ohne neue Migration im Release kann nichts
+# unumkehrbares passieren — dann reicht die Nightly-Sicherung des Backup-Containers.
+# Hoechste Flyway-Version im Staging-Jar (inkl. der Modul-Jars unter BOOT-INF/lib).
+jar_max_migration() {
+    ssh ${DEPLOY_SERVER} "T=\$(mktemp -d) && cd \"\$T\" && unzip -q -o '${DEPLOY_PATH}/jars/staging/app.jar' 'BOOT-INF/lib/plaintext-*.jar' 'BOOT-INF/classes/db/migration/*' >/dev/null 2>&1; { ls BOOT-INF/classes/db/migration/ 2>/dev/null; for j in BOOT-INF/lib/plaintext-*.jar; do [ -f \"\$j\" ] && unzip -Z1 \"\$j\" 'db/migration/*' 2>/dev/null; done; } | sed -nE 's#.*V([0-9]+)__.*#\\1#p' | sort -n | tail -1; cd /; rm -rf \"\$T\"" 2>/dev/null | tr -dc '0-9'
+}
+# Hoechste numerische Flyway-Version in der DB des Environments.
+db_max_migration() {
+    local ENV_NAME="$1"
+    local _DB_CONTAINER="${DB_CONTAINER_PREFIX:-${IMAGE_NAME}}-db-${ENV_NAME}"
+    local _DB_NAME="${DB_NAME:-${IMAGE_NAME}}"
+    ssh -o ConnectTimeout=8 ${DEPLOY_SERVER} \
+        "sudo docker exec ${_DB_CONTAINER} psql -U plaintext -d ${_DB_NAME} -tAc \"SELECT COALESCE(MAX(version::numeric),0) FROM flyway_schema_history WHERE version ~ '^[0-9]+\$'\" 2>/dev/null" \
+        2>/dev/null | tr -dc '0-9'
+}
+# 0 = Backup machen, 1 = entfaellt. Fail-safe: wenn der Stand nicht ermittelbar ist, wird gesichert.
+backup_noetig() {
+    if [ "${BACKUP_ALWAYS:-false}" == "true" ]; then
+        echo -e "${BLUE}Deploy-Backup erzwungen (BACKUP_ALWAYS=true).${NC}"
+        return 0
+    fi
+    if [ "${JAR_VOLUME_DEPLOY:-false}" != "true" ]; then
+        return 0
+    fi
+    local J D
+    J=$(jar_max_migration)
+    D=$(db_max_migration "prod")
+    if [ -z "$J" ] || [ -z "$D" ]; then
+        echo -e "${YELLOW}⚠ Migrationsstand nicht ermittelbar (Jar='${J}', DB='${D}') — Deploy-Backup wird gemacht.${NC}"
+        return 0
+    fi
+    if [ "$J" -gt "$D" ]; then
+        echo -e "${BLUE}Neue Migration im Release (Jar V${J} > DB V${D}) — Deploy-Backup wird erstellt.${NC}"
+        return 0
+    fi
+    echo -e "${BLUE}Keine neue Migration (Jar V${J}, DB V${D}) — Deploy-Backup entfaellt (erzwingen: BACKUP_ALWAYS=true).${NC}"
+    return 1
+}
+backup_bezeichnung() {
+    if [ -n "${BACKUP_PATH:-}" ]; then basename "${BACKUP_PATH}"; else echo "keines (keine Migration — Nightly-Sicherung des Backup-Containers)"; fi
 }
 
 # ── Blue-Green Configuration ─────────────────────────────────
@@ -503,14 +621,14 @@ switch_active() {
     # `resolver` + Variable löst nginx beim Test nicht mehr auf -- dafür ist die Slot-Prüfung oben
     # zuständig, nicht dieser `nginx -t`.
     ssh ${DEPLOY_SERVER} "
-        cp ${BG_NGINX_CONF_DIR}/${ENV_NAME}-upstream.conf /tmp/${ENV_NAME}-upstream.conf.bak 2>/dev/null || true
+        cp ${BG_NGINX_CONF_DIR}/${ENV_NAME}-upstream.conf /tmp/${ENV_NAME}-upstream.conf.${DEPLOY_LOCK_TOKEN}.bak 2>/dev/null || true
         cp ${BG_NGINX_TEMPLATES_DIR}/${ENV_NAME}-${NEW_COLOR}.conf ${BG_NGINX_CONF_DIR}/${ENV_NAME}-upstream.conf || exit 1
         if sudo docker exec ${BG_NGINX_CONTAINER} nginx -t; then
             echo '${NEW_COLOR}' > ${DEPLOY_PATH}/active-${ENV_NAME}
             sudo docker exec ${BG_NGINX_CONTAINER} nginx -s reload
         else
             echo 'nginx -t fehlgeschlagen - stelle vorherige upstream-Config wieder her, Marker unveraendert'
-            cp /tmp/${ENV_NAME}-upstream.conf.bak ${BG_NGINX_CONF_DIR}/${ENV_NAME}-upstream.conf 2>/dev/null || true
+            cp /tmp/${ENV_NAME}-upstream.conf.${DEPLOY_LOCK_TOKEN}.bak ${BG_NGINX_CONF_DIR}/${ENV_NAME}-upstream.conf 2>/dev/null || true
             exit 1
         fi
     "
@@ -771,6 +889,12 @@ deploy_blue_green() {
     local INACTIVE_SLOT
     INACTIVE_SLOT=$(get_inactive_slot "$ENV_NAME")
     local CONTAINER_NAME="${IMAGE_NAME}-${ENV_NAME}-${INACTIVE_SLOT}"
+    # Massnahme 1 (PROD 502, 29.08.2026): die HIER ermittelten Slots sind fuer den Aufrufer die
+    # Wahrheit. deploy_to_prod/deploy_to_dev hatten den aktiven Slot VOR Backup+Deploy gelesen und
+    # ~15 Minuten spaeter gestoppt — bei zwei parallelen Laeufen war das der frisch umgeschaltete
+    # Slot des anderen. Globals statt Rueckgabewert, weil die Funktion ihren Exit-Code braucht.
+    BG_ALT_SLOT="$ACTIVE_SLOT"
+    BG_NEU_SLOT="$INACTIVE_SLOT"
 
     # Detect compose service name: long (IMAGE_NAME-env-slot) or short (env-slot)
     local LONG_SVC="${IMAGE_NAME}-${ENV_NAME}-${INACTIVE_SLOT}"
@@ -898,9 +1022,32 @@ deploy_blue_green() {
 
 # Stoppt einen Slot (alten Container) eines Environments. Erkennt Lang-/Kurz-Service-Namen wie
 # deploy_blue_green. Wird vom Aufrufer NACH erfolgreichem externem Healthcheck genutzt (s. o.).
+# stop_slot ENV SLOT [NEUE_VERSION]
+# Massnahme 1: zwei Sicherungen gegen das Stoppen des falschen Slots (PROD 502, 29.08.2026):
+#   a) nie den Slot stoppen, der laut Marker gerade Traffic traegt (ein paralleler Lauf hat
+#      inzwischen umgeschaltet);
+#   b) mit NEUE_VERSION: nie einen Container stoppen, der bereits die neue Version meldet
+#      (dann ist es der frisch deployte Slot, nicht der alte).
+# Beim Rollback (fehlgeschlagener NEUER Slot stoppen) NEUE_VERSION weglassen.
 stop_slot() {
     local ENV_NAME="$1"
     local SLOT="$2"
+    local NEUE_VERSION="${3:-}"
+    local AKTIV
+    AKTIV=$(get_active_slot "$ENV_NAME")
+    if [ -n "$AKTIV" ] && [ "$AKTIV" == "$SLOT" ]; then
+        echo -e "${RED}✗ stop_slot ${ENV_NAME}-${SLOT} VERWEIGERT: dieser Slot ist laut Marker AKTIV (traegt Traffic).${NC}"
+        echo -e "${YELLOW}  Vermutlich hat ein paralleler Deploy inzwischen umgeschaltet — der Slot bleibt laufen.${NC}"
+        return 1
+    fi
+    if [ -n "$NEUE_VERSION" ] && [ "$NEUE_VERSION" != "latest" ]; then
+        local LAEUFT
+        LAEUFT=$(ssh ${DEPLOY_SERVER} "sudo docker exec ${IMAGE_NAME}-${ENV_NAME}-${SLOT} wget -qO- http://localhost:8080/nosec/version 2>/dev/null || echo ''" 2>/dev/null | tr -d '\r\n ')
+        if [ -n "$LAEUFT" ] && [ "$LAEUFT" == "$NEUE_VERSION" ]; then
+            echo -e "${RED}✗ stop_slot ${ENV_NAME}-${SLOT} VERWEIGERT: der Container meldet bereits die NEUE Version ${LAEUFT} — das ist kein alter Slot.${NC}"
+            return 1
+        fi
+    fi
     local SVC
     SVC=$(ssh ${DEPLOY_SERVER} "cd ${DEPLOY_PATH} && \
         if grep -qE '^\s+${IMAGE_NAME}-${ENV_NAME}-${SLOT}:' ${COMPOSE_FILE} 2>/dev/null; then echo '${IMAGE_NAME}-${ENV_NAME}-${SLOT}'; \
@@ -1140,6 +1287,21 @@ deploy_to_dev() {
     if [ "${CI:-}" != "true" ] && ! lokal_release_ci_frei "${RELEASE_BRANCH:-master}"; then
         return 1
     fi
+    if ! ensure_nas_reachable; then
+        echo -e "${RED}✗ Cannot deploy - NAS not reachable${NC}"
+        return 1
+    fi
+    # Massnahme 2: Rollout unter dem NAS-Deploy-Lock (int), Freigabe auf jedem Pfad.
+    deploy_lock_acquire "int" || return 1
+    deploy_to_dev_gesperrt "$IMAGE_TAG" "$WITH_HEALTH_CHECK"
+    local RC=$?
+    deploy_lock_release "int"
+    return $RC
+}
+
+deploy_to_dev_gesperrt() {
+    local IMAGE_TAG=$1
+    local WITH_HEALTH_CHECK=${2:-false}
 
     # Ensure NAS is reachable
     if ! ensure_nas_reachable; then
@@ -1158,6 +1320,9 @@ deploy_to_dev() {
         echo -e "${RED}=== DEV Blue-Green Deployment FAILED ===${NC}"
         return 1
     fi
+    # Massnahme 1: ab hier gelten die Slots, die deploy_blue_green tatsaechlich benutzt hat.
+    OLD_SLOT="${BG_ALT_SLOT:-$OLD_SLOT}"
+    NEW_SLOT="${BG_NEU_SLOT:-$NEW_SLOT}"
 
     # Additional external health check via nginx port
     if [ "$WITH_HEALTH_CHECK" == "true" ]; then
@@ -1180,8 +1345,8 @@ deploy_to_dev() {
         fi
     fi
 
-    # Externer Check ok (oder nicht gefordert): JETZT erst den alten Slot stoppen.
-    stop_slot "int" "$OLD_SLOT"
+    # Externer Check ok (oder nicht gefordert): JETZT erst den alten Slot stoppen (mit Versions-Schutz).
+    stop_slot "int" "$OLD_SLOT" "$IMAGE_TAG"
 
     # Erfolgreicher, extern bestätigter INT-Deploy: Migrationsstand-Marker aktualisieren (best effort).
     write_migration_marker "int"
@@ -1208,6 +1373,18 @@ deploy_to_prod() {
         return 1
     fi
 
+    # Massnahme 2: Backup -> Slot -> Switch -> Stop laufen unter dem NAS-Deploy-Lock; der Lock
+    # wird auf JEDEM Pfad (Erfolg, Rollback, Abbruch) wieder freigegeben.
+    deploy_lock_acquire "prod" || return 1
+    deploy_to_prod_gesperrt "$WITH_HEALTH_CHECK"
+    local RC=$?
+    deploy_lock_release "prod"
+    return $RC
+}
+
+deploy_to_prod_gesperrt() {
+    local WITH_HEALTH_CHECK=${1:-false}
+
     local RELEASE_VERSION
     RELEASE_VERSION=$(get_release_version)
     if [[ -z "$RELEASE_VERSION" || "$RELEASE_VERSION" == "0.0.0" ]]; then
@@ -1221,23 +1398,24 @@ deploy_to_prod() {
     ACTIVE_SLOT=$(get_active_slot "prod")
     echo -e "${BLUE}Current active slot: ${GREEN}${ACTIVE_SLOT}${NC}"
 
-    # Database backup
+    # Database backup — Massnahme 3: nur, wenn das Release eine neue Migration mitbringt.
     echo ""
-    BACKUP_PATH=$(backup_prod_db)
-    BACKUP_RESULT=$?
-
-    if [ $BACKUP_RESULT -ne 0 ]; then
-        echo -e "${RED}=== Database backup failed! Aborting deployment. ===${NC}"
-        return 1
+    BACKUP_PATH=""
+    if backup_noetig; then
+        BACKUP_PATH=$(backup_prod_db)
+        BACKUP_RESULT=$?
+        if [ $BACKUP_RESULT -ne 0 ]; then
+            echo -e "${RED}=== Database backup failed! Aborting deployment. ===${NC}"
+            return 1
+        fi
+        echo -e "${GREEN}✓ Backup created: $(basename $BACKUP_PATH)${NC}"
     fi
-
-    echo -e "${GREEN}✓ Backup created: $(basename $BACKUP_PATH)${NC}"
     echo ""
 
     # Deploy to inactive PROD slot
     if ! deploy_blue_green "prod" "$RELEASE_VERSION"; then
         echo -e "${RED}=== PROD Blue-Green Deployment FAILED ===${NC}"
-        echo -e "${YELLOW}Active slot (${ACTIVE_SLOT}) unchanged (Traffic).${NC}"
+        echo -e "${YELLOW}Active slot (${BG_ALT_SLOT:-$ACTIVE_SLOT}) unchanged (Traffic).${NC}"
         # Der neue Slot bootete VOR seinem internen Healthcheck und kann dabei bereits Migrationen gegen
         # die geteilte DB gefahren haben, obwohl kein Traffic umgeschaltet wurde -> nicht falsch entwarnen.
         local _MARKER _CUR
@@ -1250,8 +1428,14 @@ deploy_to_prod() {
         else
             echo -e "${YELLOW}Keine neue Migration erkannt. No rollback needed.${NC}"
         fi
-        echo -e "${GREEN}Backup available at: $(basename $BACKUP_PATH)${NC}"
+        echo -e "${GREEN}Backup available at: $(backup_bezeichnung)${NC}"
         return 1
+    fi
+    # Massnahme 1: ab hier gelten die Slots, die deploy_blue_green tatsaechlich benutzt hat.
+    ACTIVE_SLOT="${BG_ALT_SLOT:-$ACTIVE_SLOT}"
+    local NEW_SLOT="${BG_NEU_SLOT:-}"
+    if [ -z "$NEW_SLOT" ]; then
+        if [ "$ACTIVE_SLOT" == "blue" ]; then NEW_SLOT="green"; else NEW_SLOT="blue"; fi
     fi
 
     # External health check via nginx port
@@ -1269,7 +1453,7 @@ deploy_to_prod() {
                 echo -e "${YELLOW}  1) Forward-Fix als neuen Release deployen (empfohlen), ODER${NC}"
                 echo -e "${YELLOW}  2) DB restore + manueller Rollback:${NC}"
                 echo -e "${YELLOW}       restore_prod_db '${BACKUP_PATH}'  &&  switch_active prod ${ACTIVE_SLOT}${NC}"
-                echo -e "${YELLOW}DB backup available at: $(basename $BACKUP_PATH)${NC}"
+                echo -e "${YELLOW}DB backup available at: $(backup_bezeichnung)${NC}"
                 echo -e "${YELLOW}(Guard umgehen: MIGRATION_GUARD_STRICT=false ändert nichts hier; für erzwungenen Blind-Rollback manuell switch_active nutzen.)${NC}"
                 return 1
             fi
@@ -1279,20 +1463,19 @@ deploy_to_prod() {
             switch_active "prod" "$ACTIVE_SLOT"
 
             # Fehlgeschlagenen neuen Slot stoppen (keine zwei Instanzen auf derselben DB).
-            local NEW_SLOT
-            if [ "$ACTIVE_SLOT" == "blue" ]; then NEW_SLOT="green"; else NEW_SLOT="blue"; fi
             stop_slot "prod" "$NEW_SLOT"
 
             echo -e "${YELLOW}=== ROLLBACK COMPLETED ===${NC}"
             echo -e "${YELLOW}PROD back on ${ACTIVE_SLOT}${NC}"
-            echo -e "${YELLOW}DB backup available at: $(basename $BACKUP_PATH)${NC}"
+            echo -e "${YELLOW}DB backup available at: $(backup_bezeichnung)${NC}"
             echo -e "${YELLOW}For DB restore: restore_prod_db '${BACKUP_PATH}'${NC}"
             return 1
         fi
     fi
 
-    # Externer Check ok (oder nicht gefordert): JETZT erst den alten Slot stoppen.
-    stop_slot "prod" "$ACTIVE_SLOT"
+    # Externer Check ok (oder nicht gefordert): JETZT erst den alten Slot stoppen — mit
+    # Versions-Schutz: ein Container, der schon die neue Version meldet, wird nie gestoppt.
+    stop_slot "prod" "$ACTIVE_SLOT" "$RELEASE_VERSION"
 
     # Erfolgreicher, extern bestätigter Deploy: aktuellen DB-Migrationsstand als "letzter guter" Marker
     # festhalten (dient dem Rollback-Guard des NÄCHSTEN Deploys). Best effort.
@@ -1300,7 +1483,7 @@ deploy_to_prod() {
 
     echo -e "${GREEN}=== PROD Deployment completed! ===${NC}"
     echo -e "${GREEN}Deployed version: ${RELEASE_VERSION}${NC}"
-    echo -e "${GREEN}Backup available at: $(basename $BACKUP_PATH)${NC}"
+    echo -e "${GREEN}Backup available at: $(backup_bezeichnung)${NC}"
     return 0
 }
 
@@ -1775,9 +1958,19 @@ do_local_release() {
         return 1
     fi
 
-    # ── Plan ─────────────────────────────────────────────────────────────────
+    # ── Vorflug 5: der geplante Tag darf auf origin noch nicht existieren (Massnahme 5) ─
     local PLAN_NEU
     read -r PLAN_NEU _ <<< "$(compute_release_versions "$CURRENT_VERSION" "$INCREMENT_TYPE")"
+    if git ls-remote --tags origin "refs/tags/${PLAN_NEU}" 2>/dev/null | grep -q .; then
+        echo -e "${RED}✗ Tag ${PLAN_NEU} existiert bereits auf origin — POM-Version und Tags passen nicht zusammen.${NC}"
+        echo -e "${YELLOW}  git fetch --tags; git tag --sort=-v:refname | head; POM-Version pruefen — erst dann erneut.${NC}"
+        return 1
+    fi
+
+    # ── Vorflug 6: Unit-Tests im Release-Build, wenn eine Test-DB da ist (Massnahme 4) ──
+    lokal_release_testflag
+
+    # ── Plan ─────────────────────────────────────────────────────────────────
     echo ""
     echo -e "${BLUE}Plan:${NC}"
     echo -e "  Version:   ${CURRENT_VERSION} -> ${GREEN}${PLAN_NEU}${NC} (Tag ${PLAN_NEU}, Commit mit [skip-ci])"
@@ -1906,6 +2099,80 @@ lokal_vorflug() {
     return 0
 }
 
+# Massnahme 4 (29.08.2026): Lokal-Releases liefen grundsaetzlich mit -DskipTests — 800+ Modultests
+# blind uebersprungen, weil auf dem Dev-Rechner keine Test-DB vorausgesetzt werden konnte.
+# Jetzt: MVN_TEST_FLAG explizit gesetzt -> gilt. Sonst: SPRING_DATASOURCE_URL gesetzt und
+# erreichbar -> Unit-Tests (wie die CI: -DskipITs -DexcludedGroups=quality-gate). Sonst wird die
+# lokale Wegwerf-DB des Projekts gestartet (start-postgres.sh, podman/docker). Erst wenn auch das
+# nicht geht: -DskipTests mit lauter Warnung. LOKAL_RELEASE_OHNE_TESTS=true ueberspringt bewusst.
+lokal_testdb_antwortet() {
+    local URL="$1" HOST PORT
+    if [[ "$URL" =~ ^jdbc:postgresql://([^:/]+):?([0-9]*)/ ]]; then
+        HOST="${BASH_REMATCH[1]}"; PORT="${BASH_REMATCH[2]:-5432}"
+    else
+        return 1
+    fi
+    nc -z -w 2 "$HOST" "$PORT" >/dev/null 2>&1
+}
+lokal_release_testflag() {
+    if [ -n "${MVN_TEST_FLAG:-}" ]; then
+        echo -e "${BLUE}Tests: MVN_TEST_FLAG='${MVN_TEST_FLAG}' (explizit vorgegeben)${NC}"
+        return 0
+    fi
+    if [ "${LOKAL_RELEASE_OHNE_TESTS:-false}" == "true" ]; then
+        export MVN_TEST_FLAG="-DskipTests"
+        echo -e "${YELLOW}⚠ Tests bewusst uebersprungen (LOKAL_RELEASE_OHNE_TESTS=true).${NC}"
+        return 0
+    fi
+    local URL="${SPRING_DATASOURCE_URL:-}"
+    if [ -z "$URL" ] || ! lokal_testdb_antwortet "$URL"; then
+        # Lokale DB des Projekts (compose.yaml, Port 5432): start-postgres.sh des Projekts, sonst
+        # direkt compose up. Der Exit-Code des Starters ist egal (die Warteschleife unten zaehlt).
+        local LOKAL_URL="jdbc:postgresql://localhost:${LOKAL_TEST_DB_PORT:-5432}/${DB_NAME:-plaintext}"
+        local RUNTIME=""
+        command -v podman >/dev/null 2>&1 && RUNTIME=podman
+        [ -z "$RUNTIME" ] && command -v docker >/dev/null 2>&1 && RUNTIME=docker
+        if ! lokal_testdb_antwortet "$LOKAL_URL"; then
+            if [ -x "./start-postgres.sh" ]; then
+                echo -e "${BLUE}Tests: starte lokale DB (./start-postgres.sh)...${NC}"
+                ./start-postgres.sh >/dev/null 2>&1 || true
+            elif [ -n "$RUNTIME" ] && [ -f "./compose.yaml" ]; then
+                echo -e "${BLUE}Tests: starte lokale DB (${RUNTIME} compose up -d)...${NC}"
+                $RUNTIME compose up -d >/dev/null 2>&1 || true
+            fi
+            local I
+            for I in $(seq 1 20); do
+                lokal_testdb_antwortet "$LOKAL_URL" && break
+                sleep 3
+            done
+        fi
+        if lokal_testdb_antwortet "$LOKAL_URL"; then
+            # Port offen heisst noch nicht bereit: pg_isready im Container, wenn wir ihn finden.
+            if [ -n "$RUNTIME" ]; then
+                local C
+                C=$($RUNTIME ps --format '{{.Names}}' 2>/dev/null | grep -i postgres | head -1)
+                if [ -n "$C" ]; then
+                    for I in $(seq 1 20); do
+                        $RUNTIME exec "$C" pg_isready -U "${DB_NAME:-plaintext}" >/dev/null 2>&1 && break
+                        sleep 3
+                    done
+                fi
+            fi
+            URL="$LOKAL_URL"
+        fi
+    fi
+    if [ -n "$URL" ] && lokal_testdb_antwortet "$URL"; then
+        export SPRING_DATASOURCE_URL="$URL"
+        export MVN_TEST_FLAG="-DskipITs -DexcludedGroups=quality-gate"
+        echo -e "${GREEN}✓ Test-DB erreichbar (${URL}) — Unit-Tests laufen im Release-Build (${MVN_TEST_FLAG})${NC}"
+        return 0
+    fi
+    export MVN_TEST_FLAG="-DskipTests"
+    echo -e "${RED}⚠⚠ KEINE Test-DB erreichbar — der Release-Build laeuft OHNE Tests (-DskipTests).${NC}"
+    echo -e "${YELLOW}   Abhilfe: SPRING_DATASOURCE_URL=jdbc:postgresql://host:port/db setzen oder ./start-postgres.sh im Projekt bereitstellen.${NC}"
+    return 0
+}
+
 # Blockiert, solange in diesem Repo ein CI-Lauf auf dem Release-Branch aktiv ist: der wuerde
 # dieselben NAS-Slots und dasselbe Staging-Jar anfassen. PR-/Branch-Laeufe (GitHub-Runner,
 # ci-only) sind unkritisch und werden nur angezeigt. Ohne `gh` oder ohne Netz: Warnung, kein
@@ -1928,10 +2195,10 @@ lokal_release_ci_frei() {
     fi
     echo -e "${BLUE}CI: aktive Laeufe in ${REPO} pruefen...${NC}"
     local LAEUFE
-    if ! LAEUFE=$( { gh run list -R "$REPO" --status in_progress --limit 30 --json databaseId,name,headBranch,event \
-                        --jq '.[] | "\(.databaseId)\t\(.headBranch)\t\(.event)\t\(.name)"';
-                     gh run list -R "$REPO" --status queued --limit 30 --json databaseId,name,headBranch,event \
-                        --jq '.[] | "\(.databaseId)\t\(.headBranch)\t\(.event)\t\(.name)"'; } 2>/dev/null ); then
+    if ! LAEUFE=$( { gh run list -R "$REPO" --status in_progress --limit 30 --json databaseId,name,headBranch,event,displayTitle \
+                        --jq '.[] | "\(.databaseId)\t\(.headBranch)\t\(.event)\t\(.name)\t\(.displayTitle)"';
+                     gh run list -R "$REPO" --status queued --limit 30 --json databaseId,name,headBranch,event,displayTitle \
+                        --jq '.[] | "\(.databaseId)\t\(.headBranch)\t\(.event)\t\(.name)\t\(.displayTitle)"'; } 2>/dev/null ); then
         echo -e "${YELLOW}⚠ gh run list fehlgeschlagen (Netz/Auth?) — CI-Pruefung uebersprungen.${NC}"
         return 0
     fi
@@ -1939,15 +2206,19 @@ lokal_release_ci_frei() {
         echo -e "${GREEN}✓ Keine CI-Laeufe aktiv${NC}"
         return 0
     fi
+    # Massnahme 5 (29.08.2026): der eigene Release-Push loest auf master einen Lauf aus, der wegen
+    # "[skip-ci]" im Betreff sofort endet — der blockierte frueher den EIGENEN Deploy. Kritisch sind
+    # nur Laeufe des Deploy-Workflows (Name passt auf DEPLOY_WORKFLOW_MUSTER) ohne [skip-ci].
     local KRITISCH
-    KRITISCH=$(printf '%s\n' "$LAEUFE" | awk -F'\t' -v b="$BRANCH" '$2 == b || $3 == "workflow_dispatch" || $3 == "schedule"')
+    KRITISCH=$(printf '%s\n' "$LAEUFE" | awk -F'\t' -v b="$BRANCH" -v m="${DEPLOY_WORKFLOW_MUSTER:-[Dd]eploy|[Rr]elease}" \
+        '($2 == b || $3 == "workflow_dispatch" || $3 == "schedule") && $4 ~ m && index($5, "[skip-ci]") == 0')
     if [ -n "$KRITISCH" ]; then
         echo -e "${RED}✗ CI-Lauf auf ${BRANCH} aktiv — ein lokaler Deploy wuerde mit ihm kollidieren:${NC}"
         printf '%s\n' "$KRITISCH" | awk -F'\t' '{printf "    run %s  [%s, %s]  %s\n", $1, $2, $3, $4}'
         echo -e "${YELLOW}  Warten (gh run watch <id> -R ${REPO}) oder bewusst: LOKAL_RELEASE_IGNORIERE_CI=true${NC}"
         return 1
     fi
-    echo -e "${GREEN}✓ Nur Branch-/PR-Laeufe aktiv (kollidieren nicht mit dem NAS):${NC}"
+    echo -e "${GREEN}✓ Nur Branch-/PR-/[skip-ci]-Laeufe aktiv (kollidieren nicht mit dem NAS):${NC}"
     printf '%s\n' "$LAEUFE" | awk -F'\t' '{printf "    run %s  [%s, %s]  %s\n", $1, $2, $3, $4}'
     return 0
 }
