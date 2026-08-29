@@ -1744,6 +1744,19 @@ Includes:
 #
 # Nur Vorflug, ohne Seiteneffekte:   LOKAL_RELEASE_NUR_VORFLUG=true ./build 8
 # CI-Sperre uebergehen (mit Grund):  LOKAL_RELEASE_IGNORIERE_CI=true ./build 8
+#
+# SCHNELL-VARIANTE (./build 9, Wunsch Daniel 29.08.2026): wie 8, aber OHNE Publizieren ins
+# Maven-Repo (MVN_RELEASE_DEPLOY=false -> `mvn clean package` statt `deploy`). Fuer einen
+# reinen PROD-Rollout braucht es das Artefakt im Repo nicht — es dient nur den Consumer-Apps,
+# und der naechste CI-Release liefert es nach. Spart den Upload UND umgeht den Fall, dass die
+# lokalen Maven-Zugangsdaten nur Lese-Rechte auf maven.plaintext.ch haben (401 beim deploy,
+# gemessen 29.08.). Tests sind ohnehin schon aus (MVN_TEST_FLAG=-DskipTests), Playwright
+# laeuft nur in der CI.
+# Schnell-Variante von do_local_release: kein Maven-Publish (siehe Kommentar oben).
+do_local_release_schnell() {
+    MVN_RELEASE_DEPLOY=false do_local_release "$@"
+}
+
 do_local_release() {
     local INCREMENT_TYPE="${1:-2}"
     local ZIEL="${2:-prod}"
