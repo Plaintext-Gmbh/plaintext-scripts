@@ -7,6 +7,16 @@ name: housekeeping
 #
 # Currently-running and queued runs are always left alone.
 # Add new tasks by extending the `task` choice and the corresponding step.
+#
+# Zustandsbericht 29.08.2026 (Paket S): zusaetzlich `workflow_call`. Derselbe Workflow lag
+# byte-identisch (bis auf die ubuntu-Version) in app, iot, schuetu und root — vier Kopien,
+# die niemand gemeinsam pflegt. Die App-Repos rufen kuenftig diesen hier auf (Beispiel im
+# README unter "Reusable Workflows"); `inputs.task` kommt dann aus dem Aufruf statt aus dem
+# Dropdown. Der Aufrufer muss `actions: write` gewaehren — ein aufgerufener Workflow kann
+# nie mehr Rechte haben als der aufrufende.
+#
+# `github.repository` ist im aufgerufenen Workflow das Repo des AUFRUFERS — die Laeufe werden
+# also dort geloescht, wo der Aufruf herkommt, nicht in plaintext-scripts.
 
 on:
   workflow_dispatch:
@@ -19,6 +29,12 @@ on:
         options:
           - deleteLogs5
           - deleteLogAll
+  workflow_call:
+    inputs:
+      task:
+        description: 'deleteLogs5 | deleteLogAll'
+        required: true
+        type: string
 
 permissions:
   actions: write
@@ -27,7 +43,8 @@ permissions:
 jobs:
   run:
     name: ${{ inputs.task }}
-    runs-on: ubuntu-22.04
+    # ubuntu-latest: der Job braucht nur `gh api`; ubuntu-22.04 laeuft bei GitHub aus.
+    runs-on: ubuntu-latest
     steps:
       - name: deleteLogs5 — keep latest 5 runs per workflow
         if: inputs.task == 'deleteLogs5'

@@ -1,0 +1,206 @@
+name: root-Pin veroeffentlichen
+
+# ---------------------------------------------------------------------------
+# Karte 942 — meldet nach Plaintext-Gmbh/plaintext-mvn, welche root-Version das aufrufende
+# Repo gerade benutzt.
+#
+# REUSABLE (Zustandsbericht 29.08.2026, Paket S): der Workflow lag viermal identisch in app,
+# iot, schuetu und guild — einziger Unterschied war der Wochentag im Cron. Die Logik liegt
+# jetzt hier (`workflow_call`); der Aufrufer behaelt Trigger (push master mit paths pom.xml,
+# Wochen-Schedule, workflow_dispatch) und Concurrency. Beispiel im README unter
+# "Reusable Workflows".
+#
+# WOZU:
+# Der Aufraeum-Workflow in plaintext-mvn (housekeeping / prunePackages) duennt die
+# publizierten Maven-Paketversionen aus. Damit er dabei keine Version loescht, die eine
+# App noch braucht, muss er wissen, worauf die Apps gepinnt sind. Diese Information steht
+# in der pom.xml — und die App-Repos sind PRIVAT. plaintext-mvn ist oeffentlich; sein
+# GITHUB_TOKEN kommt dort nicht herein, und ein PAT dafuer wollen wir nicht pflegen.
+#
+# Deshalb die Richtung umgedreht: nicht der Aufraeumer holt, sondern die App schiebt. Der
+# Schreibzugriff existiert bereits — AUTOBUMP_TOKEN gehoert dem Write-Collaborator
+# Plaintext-User, der auch auf plaintext-mvn pushen darf. Es war kein neues Token noetig.
+#
+# Geschrieben wird auf den Branch `pins`, nicht auf `master`: `master` ist dort geschuetzt
+# ("Changes must be made through a pull request") und laesst nur Administratoren direkt
+# durch. Ein Admin-Token hier zu hinterlegen, um eine Vier-Zeilen-Datei abzulegen, waere
+# mehr Recht als noetig — und `master` ist das ausgelieferte Maven-Repository, in dessen
+# Historie taegliche Bot-Commits nichts verloren haben.
+#
+# WANN (steuert der Aufrufer):
+#  * bei jedem Push auf master, der die pom.xml beruehrt — also insbesondere beim Merge
+#    eines Auto-Bump-PR. Der Pin entsteht damit erst, wenn der Bump WIRKLICH auf master
+#    liegt, nicht schon beim Oeffnen des PR: ein nie gemergter Bump wuerde sonst die alte,
+#    noch benutzte Version aus dem Schutz nehmen. Release-Commits ("Release version …",
+#    "Prepare next development iteration …") tragen seit Paket S das native [skip ci] und
+#    loesen den Push-Trigger NICHT mehr aus — unkritisch, denn sie aendern nur die
+#    Projektversion, nie den root-Pin; den Heartbeat unten gibt es genau dafuer.
+#  * woechentlich als Heartbeat, auch wenn sich nichts geaendert hat. Nur dadurch ist ein
+#    veralteter Pin drueben ein erkennbarer DEFEKT und nicht bloss "hier war laenger Ruhe".
+#    Der Aufraeumer bricht ab, wenn ein Pin aelter als 30 Tage ist.
+#
+# Der Lauf ist absichtlich klein und laeuft auf einem GitHub-Runner, nicht auf dem NAS:
+# er braucht weder Maven noch das LAN, und er soll den vier NAS-Runnern waehrend eines
+# Blue-Green-Deploys nichts wegnehmen.
+#
+# KONTEXT IM AUFGERUFENEN WORKFLOW: `github.repository`, `GITHUB_SHA` und der Checkout ohne
+# `repository:` gehoeren dem AUFRUFER — gemeldet wird der Pin des App-Repos.
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_call:
+    inputs:
+      heartbeat-days:
+        description: 'Nach so vielen Tagen wird auch ohne Aenderung neu geschrieben (Heartbeat).'
+        required: false
+        type: string
+        default: '7'
+      mvn-repo:
+        description: 'Ziel-Repo, in das der Pin geschrieben wird.'
+        required: false
+        type: string
+        default: 'Plaintext-Gmbh/plaintext-mvn'
+      pin-branch:
+        description: 'Datenbranch drueben — NICHT master (siehe Kopfkommentar).'
+        required: false
+        type: string
+        default: 'pins'
+    secrets:
+      AUTOBUMP_TOKEN:
+        description: 'Token des Write-Collaborators mit Push-Recht auf das Ziel-Repo.'
+        required: true
+      PUSHOVER_APP_TOKEN:
+        required: false
+      PUSHOVER_USER_KEY:
+        required: false
+
+jobs:
+  pin:
+    name: root-Pin nach plaintext-mvn schreiben
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # Job-Ebene, weil das im aufgerufenen Workflow sicher greift; der Aufrufer setzt
+    # zusaetzlich seine Workflow-Gruppe.
+    concurrency:
+      group: publish-root-pin-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      MVN_REPO: ${{ inputs.mvn-repo }}
+      PIN_BRANCH: ${{ inputs.pin-branch }}
+      HEARTBEAT_DAYS: ${{ inputs.heartbeat-days }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Pin ermitteln und schreiben
+        id: pin
+        env:
+          GH_TOKEN: ${{ secrets.AUTOBUMP_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::AUTOBUMP_TOKEN fehlt — ohne Schreibrecht auf ${MVN_REPO} kann der Pin nicht gemeldet werden."
+            exit 1
+          fi
+
+          REPO_NAME="${GITHUB_REPOSITORY##*/}"
+          TARGET="pins/${REPO_NAME}.env"
+
+          # ── Welche Versionen dieses Repos zeigen auf Artefakte in plaintext-mvn? ──
+          # Die <parent>-Version plus jede <plaintext-root*.version>-Property. Properties,
+          # die auf eine andere Property verweisen (${...}), fallen durch den Regex-Filter
+          # heraus — sie sind keine eigene Angabe. Bewusst generisch: plaintext-guild hatte
+          # den Interfaces-Pin schon einmal entkoppelt, und der naechste Sonderfall soll
+          # dieses Skript nicht brauchen.
+          PARENT="$(awk '/<parent>/{p=1} p&&/<version>/{gsub(/.*<version>|<\/version>.*/,""); print; exit}' pom.xml)"
+          PROPS="$(grep -o '<plaintext-root[a-z-]*\.version>[^<]*' pom.xml | sed 's/.*>//' || true)"
+          VERS="$(printf '%s\n%s\n' "$PARENT" "$PROPS" \
+                  | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -Vu | tr '\n' ' ')"
+          VERS="${VERS% }"
+
+          if [ -z "$VERS" ]; then
+            echo "::error::In der pom.xml steht keine aufloesbare root-Version (parent='${PARENT}')."
+            echo "::error::Es wird NICHTS geschrieben — ein leerer Pin wuerde drueben als Freigabe zum Loeschen gelesen."
+            exit 1
+          fi
+          echo "gefunden: ${VERS}"
+
+          # ── Aktuellen Stand drueben lesen ────────────────────────────────────────
+          RESP="$(gh api "/repos/${MVN_REPO}/contents/${TARGET}?ref=${PIN_BRANCH}" 2>/dev/null || true)"
+          SHA="$(printf '%s' "$RESP" | jq -r '.sha // empty' 2>/dev/null || true)"
+          OLD="$(printf '%s' "$RESP" | jq -r '.content // empty' 2>/dev/null | tr -d '\n' | base64 -d 2>/dev/null || true)"
+          OLD_VERS="$(printf '%s' "$OLD" | sed -n 's/^versions=//p' | head -1)"
+          OLD_UPD="$(printf '%s' "$OLD" | sed -n 's/^updated=//p' | head -1)"
+          OLD_TS="$(date -u -d "${OLD_UPD:-1970-01-01T00:00:00Z}" +%s 2>/dev/null || echo 0)"
+          AGE_D=$(( ( $(date -u +%s) - OLD_TS ) / 86400 ))
+
+          if [ "$OLD_VERS" = "$VERS" ] && [ "$AGE_D" -lt "${HEARTBEAT_DAYS}" ]; then
+            echo "::notice::${TARGET} steht bereits auf '${VERS}' und ist ${AGE_D} Tage alt — nichts zu tun."
+            echo "geschrieben=nein" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          GRUND="Pin geaendert (${OLD_VERS:-neu} -> ${VERS})"
+          [ "$OLD_VERS" = "$VERS" ] && GRUND="Heartbeat (${AGE_D} Tage seit dem letzten Schreiben)"
+
+          # ── Schreiben, mit Wiederholung ──────────────────────────────────────────
+          # Die Contents-API arbeitet optimistisch ueber die Blob-SHA. Kollisionen sind
+          # unwahrscheinlich (jedes Repo schreibt seine EIGENE Datei, nie eine gemeinsame),
+          # aber plaintext-mvn bekommt bei jedem root-Release einen Push — schlaegt der
+          # Aufruf fehl, wird die SHA neu gelesen und erneut versucht.
+          # Der Commit drueben traegt das native [skip ci] (Paket S) — plaintext-mvn soll fuer
+          # einen Pin-Commit keinen eigenen Lauf starten.
+          ok=false
+          for attempt in 1 2 3 4 5; do
+            NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            CONTENT="$(printf 'repo=%s\nversions=%s\nupdated=%s\ncommit=%s\n' \
+                        "$REPO_NAME" "$VERS" "$NOW" "${GITHUB_SHA:0:9}" | base64 -w0)"
+            ARGS=(-X PUT "/repos/${MVN_REPO}/contents/${TARGET}"
+                  -f "branch=${PIN_BRANCH}"
+                  -f "message=chore(pins): ${REPO_NAME} benutzt ${VERS} [skip ci]"
+                  -f "content=${CONTENT}")
+            [ -n "$SHA" ] && ARGS+=(-f "sha=${SHA}")
+            if gh api "${ARGS[@]}" >/dev/null 2>"${RUNNER_TEMP}/pin-err.txt"; then
+              ok=true; break
+            fi
+            echo "::warning::Versuch ${attempt} fehlgeschlagen: $(head -c 400 "${RUNNER_TEMP}/pin-err.txt")"
+            sleep $(( attempt * 4 + RANDOM % 6 ))
+            SHA="$(gh api "/repos/${MVN_REPO}/contents/${TARGET}?ref=${PIN_BRANCH}" --jq '.sha' 2>/dev/null || true)"
+          done
+
+          if [ "$ok" != true ]; then
+            echo "::error::${TARGET} auf Branch ${PIN_BRANCH} von ${MVN_REPO} konnte nicht geschrieben werden."
+            echo "::error::Der Aufraeum-Workflow drueben arbeitet weiter mit dem alten Pin — das ist sicher (er schuetzt dann eher zu viel), aber es gehoert repariert."
+            exit 1
+          fi
+
+          echo "::notice::${TARGET} geschrieben: ${VERS} (${GRUND})"
+          {
+            echo "## root-Pin veroeffentlicht"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Ziel | \`${MVN_REPO}@${PIN_BRANCH}:${TARGET}\` |"
+            echo "| Versionen | \`${VERS}\` |"
+            echo "| Grund | ${GRUND} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Ein stillschweigend nicht mehr gemeldeter Pin ist der einzige Weg, auf dem dieses
+      # Konstrukt unbemerkt verrotten kann. Der Heartbeat macht es drueben sichtbar, hier
+      # macht es die Meldung sofort sichtbar.
+      - name: Pushover bei Fehlschlag
+        if: failure()
+        env:
+          APP: ${{ secrets.PUSHOVER_APP_TOKEN }}
+          USR: ${{ secrets.PUSHOVER_USER_KEY }}
+        run: |
+          [ -n "${APP:-}" ] && [ -n "${USR:-}" ] || exit 0
+          curl -sf -F "token=${APP}" -F "user=${USR}" -F "priority=0" \
+            -F "title=root-Pin nicht gemeldet: ${GITHUB_REPOSITORY##*/}" \
+            -F "message=Der Pin konnte nicht nach plaintext-mvn geschrieben werden. Das Aufraeumen der Maven-Pakete arbeitet solange mit dem letzten bekannten Stand (sicher, aber veraltet) und bricht ab, sobald der Pin 30 Tage alt ist." \
+            -F "url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            -F "url_title=Workflow-Run" \
+            https://api.pushover.net/1/messages.json || true

@@ -1,0 +1,459 @@
+name: Root Auto-Bump
+
+# ---------------------------------------------------------------------------
+# Karte 322 — zieht ein Consumer-Repo automatisch auf die neueste veroeffentlichte
+# plaintext-root-Version nach.
+#
+# REUSABLE (Zustandsbericht 29.08.2026, Paket S): dieser Workflow lag bis dahin viermal
+# fast identisch in app, iot, schuetu und guild — Unterschiede waren nur PGPORT, DB_NAME
+# und ein Kommentarblock. Jetzt liegt die Logik hier (`workflow_call`), die App-Repos
+# behalten nur noch einen Aufrufer mit Zeitplan und ihren beiden Werten (Beispiel im README
+# unter "Reusable Workflows"). Das Skript kommt aus ci/root-autobump.sh dieses Repos.
+#
+# Bewusste Entscheidungen (Begruendung siehe Karte 322):
+#
+#  * PULL statt PUSH (Variante B): der Workflow laeuft im Consumer-Repo und fragt selbst
+#    nach. Kein cross-repo-PAT noetig — auf dem Free-Plan loesen Org-Secrets in privaten
+#    Repos still zu leer auf, ein neues Secret waere ein zusaetzlicher stiller Fehlerpfad.
+#  * PR statt Commit auf master: ein Bump darf NIE direkt deployen.
+#  * VERIFY VOR PR: der Bump wird hier gebaut (inkl. Unit-Tests/ArchUnit). Ist der Build
+#    rot, entsteht KEIN PR — nur eine Pushover-Meldung. Damit kann ein kaputter root-Release
+#    sich nicht ueber die Consumer verteilen. Der Verify-Schritt ist noetig, weil die
+#    Consumer-CI auf dem Bump-PR nicht verlaesslich laeuft: Bis zum 05.08.2026 loeste ein
+#    per GITHUB_TOKEN erzeugter PR per GitHub-Design gar keine Workflows aus; seit dem
+#    06.08.2026 entsteht zwar ein Lauf, wird aber mit `action_required` angehalten. Seit
+#    Karte 587 eroeffnet AUTOBUMP_TOKEN den PR (Write-Collaborator, keine Freigabe noetig) —
+#    der Verify-Build bleibt trotzdem der Schutz, der einen kaputten root-Release aufhaelt,
+#    BEVOR ein PR entsteht.
+#  * KEIN Auto-Merge: der Merge (und damit release-all + Blue-Green-Deploy) bleibt eine
+#    bewusste Handlung. Nur so bleiben Deploys seriell — parallele Consumer-Deploys
+#    recyceln die ephemeren NAS-Runner mitten im Blue-Green (PROD 502). Und ein gruener
+#    Build ist kein Beweis, dass die Laufzeit haelt: fwtool fiel nach dem root-Bump auf
+#    >=1.422.0 mit 502 aus, weil ihm Vault-Bootstrap-Variablen fehlten — Build war gruen.
+#
+# KONTEXT IM AUFGERUFENEN WORKFLOW: `github.repository`, `github.token` und der Checkout ohne
+# `repository:` gehoeren dem AUFRUFER — gebumpt wird also das App-Repo, nicht plaintext-scripts.
+# Die Rechte (contents/pull-requests: write, actions: read) muss der Aufrufer gewaehren; ein
+# aufgerufener Workflow kann nie mehr haben als der aufrufende.
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_call:
+    inputs:
+      pgport:
+        description: 'Host-Port des Test-Postgres fuer den Verify-Build. Schema: ci-Port des Repos + 200 (app 5636, iot 5635, schuetu 5637, guild 5639) — auf dem geteilten Docker-Daemon der NAS-Runner muss er je Repo eindeutig sein.'
+        required: true
+        type: string
+      db-name:
+        description: 'Name der Test-Datenbank (z. B. plaintext, plaintext_iot, plaintext_schuetu, plaintext_guild).'
+        required: true
+        type: string
+      java-version:
+        description: 'JDK fuer den Verify-Build.'
+        required: false
+        type: string
+        default: '25'
+      dry-run:
+        description: 'Nur pruefen und bauen, keinen PR erstellen.'
+        required: false
+        type: boolean
+        default: false
+      scripts-ref:
+        description: 'Branch/Ref von plaintext-scripts fuer ci/root-autobump.sh (Default master; zum Testen von Skript-Aenderungen vor dem Merge auf einen Branch zeigen).'
+        required: false
+        type: string
+        default: 'master'
+      bump-branch:
+        description: 'Branch, auf dem der Bump-PR entsteht.'
+        required: false
+        type: string
+        default: 'chore/root-autobump'
+    secrets:
+      MVN_DEPLOY_TOKEN:
+        description: 'PAT fuer GitHub Packages (settings.xml, server-id plaintext) und den Checkout von plaintext-scripts.'
+        required: true
+      MAVEN_NAS_TOKEN:
+        description: 'Reposilite-Token (server-id plaintext-nas).'
+        required: true
+      AUTOBUMP_TOKEN:
+        description: 'Token des Write-Collaborators, der den PR eroeffnet (Karte 587). Fehlt es, faellt der Workflow auf github.token zurueck — dann braucht der PR eine Freigabe.'
+        required: false
+      PUSHOVER_APP_TOKEN:
+        required: false
+      PUSHOVER_USER_KEY:
+        required: false
+
+jobs:
+  autobump:
+    name: root-Version nachziehen
+    # Self-hosted, weil nur von dort das private NAS-Maven-Repo (maven.plaintext.ch, LAN-only)
+    # erreichbar ist.
+    runs-on: [self-hosted, nas]
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      # Guard 2 fragt ueber `gh run list` ab, ob gerade ein Deploy laeuft. Ohne actions:read
+      # antwortet die API mit 403 "Resource not accessible by integration" — der Guard kann
+      # dann nie ermitteln, ob gebaut wird, und der Bump wird bei JEDEM Lauf uebersprungen.
+      actions: read
+    # Nie zwei Auto-Bumps desselben Repos gleichzeitig; laufende Laeufe werden nicht
+    # abgebrochen, damit ein Verify-Build nicht auf halber Strecke stirbt. Job-Ebene, weil
+    # das die Stelle ist, die im aufgerufenen Workflow sicher greift; der Aufrufer kann
+    # zusaetzlich eine Workflow-Gruppe setzen.
+    concurrency:
+      group: root-autobump-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      PGPORT: ${{ inputs.pgport }}
+      DB_NAME: ${{ inputs.db-name }}
+      BUMP_BRANCH: ${{ inputs.bump-branch }}
+
+    steps:
+      # `ref: master` ist Absicht: gebumpt wird immer der Stand, der auch deployt wird — ein
+      # Bump-PR aus einem Feature-Branch heraus waere falsch. Ohne `repository:` ist das der
+      # Checkout des AUFRUFERS (github.repository).
+      - name: Checkout (Consumer-Repo, master)
+        uses: actions/checkout@v7
+        with:
+          ref: master
+
+      # Das Skript kommt aus plaintext-scripts, nicht aus dem Consumer-Repo (Karte 322 hielt
+      # es dort; seit Paket S ist ci/root-autobump.sh die einzige Fassung). `scripts-ref`
+      # erlaubt, eine Skript-Aenderung vor dem Merge im Lauf zu testen — die alte Kopie
+      # liess sich nur ueber master pruefen (Karte 792).
+      - name: Checkout plaintext-scripts (ci/root-autobump.sh)
+        uses: actions/checkout@v7
+        with:
+          repository: Plaintext-Gmbh/plaintext-scripts
+          ref: ${{ inputs.scripts-ref }}
+          path: .plaintext-scripts
+          token: ${{ secrets.MVN_DEPLOY_TOKEN }}
+
+      # ── Version ermitteln — VOR den Guards (Karte 792) ───────────────
+      # Frueher stand dieser Schritt hinter den drei Guards. Ein uebersprungener Lauf meldete
+      # dadurch "Bump noetig: nein/uebersprungen" und niemand erfuhr, wie weit das Repo
+      # zurueckliegt — so blieben alle Consumer tagelang unbemerkt auf 1.573.0, waehrend root
+      # schon 1.579.0 veroeffentlicht hatte. Der Schritt kostet nur einen HTTP-Abruf gegen
+      # maven.plaintext.ch; er darf deshalb immer laufen. Die Guards haengen umgekehrt jetzt an
+      # seinem Ergebnis: ist gar kein Bump faellig, entfaellt auch jede API-Abfrage.
+      - name: Neueste root-Version ermitteln
+        id: detect
+        run: bash .plaintext-scripts/ci/root-autobump.sh detect || true
+
+      # ── Guard 1: NAS-Last ────────────────────────────────────────────
+      # Karte 875/882: hier stand `[ "$(printf '%.0f' "$LOAD")" -ge 8 ]`. printf RUNDET — die
+      # wirksame Schwelle war damit 7.5, nicht 8:
+      #     7.49 -> 7 -> laeuft      7.50 -> 8 -> gebremst      7.99 -> 8 -> gebremst
+      # Und die Warnung schrieb dann woertlich "NAS-Last 7.57 >= 8", also eine Aussage, die nicht
+      # stimmt; wer sie liest, sucht bei der Last statt beim Vergleich. Real aufgetreten am
+      # 16.08.2026 in plaintext-guild (Lauf 31969860676): loadavg 7.57, gebremst, obwohl unter der
+      # Schwelle. Der NAS hat sechs Kerne — 7.5 sind bereits 125 % Auslastung und im Tagesbetrieb
+      # haeufig; genau in diesem halben Punkt blieb der Bump haengen.
+      #
+      # awk vergleicht die Kommazahl direkt: keine Rundung, und keine Locale-Abhaengigkeit wie bei
+      # printf (in einer Umgebung mit Komma-Dezimaltrenner wird aus "7.57" sonst schnell "7").
+      #
+      # WAS DER GUARD NICHT LEISTET, damit sich niemand daran aufreibt: er misst die Last zu einem
+      # Zeitpunkt, an dem dieser Lauf sie bereits mit erhoeht hat (Runner-Container, Checkout,
+      # Maven-Cache). Am 16.08.2026 dreimal nacheinander gemessen: Host-loadavg 6.58 unmittelbar
+      # vor dem Start, im Guard-Schritt dann 8.10. Ein Bump von Hand gegen ein knappes Lastfenster
+      # zu erzwingen funktioniert deshalb schlecht — dafuer gibt es die Zeitplaene des Aufrufers,
+      # die bewusst in den ruhigsten Fenstern liegen (Karte 792).
+      - name: NAS-Last pruefen
+        id: load
+        if: steps.detect.outputs.bump == 'true'
+        env:
+          SCHWELLE: '8'
+        run: |
+          LOAD="$(cut -d' ' -f1 /proc/loadavg)"
+          echo "loadavg(1m) = $LOAD, Schwelle = $SCHWELLE"
+          if awk -v l="$LOAD" -v s="$SCHWELLE" 'BEGIN { exit !(l >= s) }'; then
+            echo "::warning title=Auto-Bump uebersprungen::NAS-Last ${LOAD} erreicht die Schwelle ${SCHWELLE} — naechster Lauf versucht es erneut."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Guard 2: laeuft gerade ein Deploy dieses Repos? ───────────────
+      - name: Laufende Runs pruefen
+        id: busy
+        if: steps.load.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Schlaegt die Abfrage fehl (Rate-Limit, API-Hicks), ist der Lauf unter `bash -e` sofort
+          # rot — und ein roter Auto-Bump sieht aus wie ein gescheiterter Bump, obwohl nur der
+          # Guard nicht antworten konnte. Deshalb fail-soft, und zwar bewusst in Richtung
+          # UEBERSPRINGEN: im Zweifel lieber auf den naechsten Lauf warten, als parallel zu einem
+          # Deploy die NAS-Last zu verdoppeln.
+          if ! RUNNING="$(gh run list --repo "$GITHUB_REPOSITORY" \
+            --workflow 'Build And Deploy' --status in_progress --json databaseId --jq 'length' 2>&1)"; then
+            echo "::warning title=Auto-Bump uebersprungen::Laufende Runs nicht ermittelbar ($RUNNING) — Bump wartet auf den naechsten Lauf."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Nicht-numerische Antwort ebenso behandeln (leere Ausgabe waere sonst ein Syntaxfehler
+          # in der Zahlpruefung und damit wieder ein roter Lauf).
+          case "$RUNNING" in
+            ''|*[!0-9]*)
+              echo "::warning title=Auto-Bump uebersprungen::Unerwartete Antwort statt Anzahl: '$RUNNING'"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          echo "laufende Build-And-Deploy-Runs: $RUNNING"
+          if [ "$RUNNING" -gt 0 ]; then
+            echo "::warning title=Auto-Bump uebersprungen::Es laeuft ein Deploy — Bump wartet auf den naechsten Lauf."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Guard 3: offener Bump-PR? ────────────────────────────────────
+      - name: Offenen Bump-PR pruefen
+        id: openpr
+        if: steps.busy.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Gleiche Ueberlegung wie bei Guard 2: eine fehlgeschlagene Abfrage darf den Lauf nicht
+          # rot faerben. Konservativ ueberspringen — im Zweifel lieber kein Bump als ein zweiter,
+          # konkurrierender Bump-PR.
+          if ! NUM="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BUMP_BRANCH" \
+                   --state open --json number --jq '.[0].number // empty' 2>&1)"; then
+            echo "::warning title=Auto-Bump uebersprungen::Offene Bump-PRs nicht ermittelbar ($NUM)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -n "$NUM" ]; then
+            echo "::notice::Bump-PR #${NUM} ist noch offen — kein neuer Lauf, erst mergen/schliessen."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Rueckstand sichtbar machen, wenn ein Guard gebremst hat ──────
+      # Guard 3 (offener Bump-PR) ist hier bewusst NICHT aufgefuehrt: dort ist der Bump gemacht
+      # und wartet nur auf den Merge — das ist kein Rueckstand, sondern eine offene Aufgabe.
+      - name: Rueckstand melden
+        if: steps.load.outputs.skip == 'true' || steps.busy.outputs.skip == 'true'
+        env:
+          APP: ${{ secrets.PUSHOVER_APP_TOKEN }}
+          USR: ${{ secrets.PUSHOVER_USER_KEY }}
+          OLD: ${{ steps.detect.outputs.current }}
+          NEW: ${{ steps.detect.outputs.latest }}
+          BEHIND: ${{ steps.detect.outputs.behind || '?' }}
+        run: |
+          echo "::warning title=Auto-Bump verschoben::plaintext-root ${OLD} -> ${NEW} (${BEHIND} Release(s) Rueckstand) bleibt liegen — dieser Lauf wurde wegen NAS-Last oder laufendem Deploy uebersprungen."
+          # Ab drei Releases ist es kein verpasster Tag mehr, sondern ein Muster. Darunter nicht
+          # melden: eine taegliche Meldung ueber einen normalen Uebersprung waere nach einer
+          # Woche Tapete, und dann faellt auch die ernste nicht mehr auf.
+          if [ "${BEHIND:-0}" -ge 3 ] 2>/dev/null && [ -n "$APP" ] && [ -n "$USR" ]; then
+            curl -sf -F "token=${APP}" -F "user=${USR}" -F "priority=0" \
+              -F "title=Auto-Bump haengt: ${GITHUB_REPOSITORY##*/}" \
+              -F "message=plaintext-root ${OLD} -> ${NEW} (${BEHIND} Releases zurueck). Der Lauf wurde wegen NAS-Last/Deploy uebersprungen. Von Hand: gh workflow run root-autobump.yaml -R ${GITHUB_REPOSITORY}" \
+              -F "url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+              -F "url_title=Workflow-Run" \
+              https://api.pushover.net/1/messages.json || true
+          fi
+
+      - name: Bump anwenden
+        id: apply
+        if: steps.detect.outputs.bump == 'true' && steps.openpr.outputs.skip == 'false'
+        run: bash .plaintext-scripts/ci/root-autobump.sh apply "${{ steps.detect.outputs.latest }}"
+
+      # ── Verify: der eigentliche Schutz ───────────────────────────────
+      - name: Maven konfigurieren
+        if: steps.apply.outcome == 'success'
+        run: |
+          # Karte 313: settings.xml NICHT nach ~/.m2 (geteiltes Volume aller Org-Runner) —
+          # job-lokal in $RUNNER_TEMP + mvn-Shim im PATH.
+          umask 077
+          cat > "$RUNNER_TEMP/settings.xml" << EOF
+          <settings>
+            <servers>
+              <server>
+                <id>plaintext</id>
+                <username>daniel-marthaler</username>
+                <password>${{ secrets.MVN_DEPLOY_TOKEN }}</password>
+              </server>
+              <server>
+                <id>plaintext-nas</id>
+                <username>ci</username>
+                <password>${{ secrets.MAVEN_NAS_TOKEN }}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+          chmod 600 "$RUNNER_TEMP/settings.xml"
+          REAL_MVN="$(command -v mvn)"
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/usr/bin/env bash\nexec "%s" -s "%s" "$@"\n' "$REAL_MVN" "$RUNNER_TEMP/settings.xml" \
+            > "$RUNNER_TEMP/bin/mvn"
+          chmod 755 "$RUNNER_TEMP/bin/mvn"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          echo "MAVEN_ARGS=-s $RUNNER_TEMP/settings.xml" >> "$GITHUB_ENV"
+          rm -f ~/.m2/settings.xml
+
+      - name: Test-Postgres starten
+        if: steps.apply.outcome == 'success'
+        run: |
+          # `rm -f -v`: postgres:18-alpine deklariert VOLUME /var/lib/postgresql, jeder Start
+          # legt also ein anonymes Volume an. Ohne `-v` bleibt es als herrenlose Kopie der
+          # Test-DB auf dem NAS liegen (Karte 791).
+          # WEGWERF-TESTDATENBANK — kein Geheimnis (Karte 812): existiert nur fuer diesen Lauf,
+          # von aussen nicht erreichbar, keine echten Daten.
+          CTR="ci-postgres-autobump-${PGPORT}"
+          docker rm -f -v "$CTR" 2>/dev/null || true
+          docker run -d --name "$CTR" --network host \
+            -e POSTGRES_DB="$DB_NAME" -e POSTGRES_USER=plaintext -e POSTGRES_PASSWORD=plaintext \
+            postgres:18-alpine postgres -p "$PGPORT"
+          for _ in $(seq 1 60); do
+            PGPASSWORD=plaintext psql -h localhost -p "$PGPORT" -U plaintext -d postgres -c "SELECT 1" >/dev/null 2>&1 && break
+            sleep 3
+          done
+
+      - name: Setup JDK ${{ inputs.java-version }}
+        if: steps.apply.outcome == 'success'
+        uses: actions/setup-java@v6
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+
+      - name: Verify-Build mit neuer root-Version
+        id: verify
+        if: steps.apply.outcome == 'success'
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.MVN_DEPLOY_TOKEN }}
+          CI: 'true'
+          # Port und DB aus den Inputs — in den vier Kopien standen sie hier ein zweites Mal
+          # als Literal und mussten mit env.PGPORT/DB_NAME von Hand synchron gehalten werden.
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:${{ inputs.pgport }}/${{ inputs.db-name }}
+          SPRING_DATASOURCE_USERNAME: plaintext
+          SPRING_DATASOURCE_PASSWORD: plaintext
+        run: |
+          # Cache-frei: der Build-Cache wuerde die Module mit den ALTEN root-Artefakten
+          # restaurieren und der Verify waere wertlos.
+          # quality-gate ausgeschlossen (analog Deploy-Build): ein aktives Alert-File darf den
+          # Bump nicht blockieren.
+          mvn -B clean verify -DskipITs -DexcludedGroups=quality-gate \
+              -Dmaven.build.cache.enabled=false
+
+      - name: Test-Postgres stoppen
+        if: always()
+        run: docker rm -f -v "ci-postgres-autobump-${PGPORT}" 2>/dev/null || true
+
+      - name: Secrets vom Runner entfernen
+        if: always()
+        run: |
+          # Karte 313 / A3: der Runner-Container ueberlebt den Job.
+          shred -u "$RUNNER_TEMP/settings.xml" 2>/dev/null || rm -f "$RUNNER_TEMP/settings.xml" 2>/dev/null || true
+          rm -f ~/.m2/settings.xml 2>/dev/null || true
+          exit 0
+
+      # ── PR nur bei gruenem Verify ────────────────────────────────────
+      - name: Bump-PR erstellen
+        id: pr
+        if: steps.verify.outcome == 'success' && inputs.dry-run != true
+        env:
+          # Karte 587: NICHT github.token. Seit dem 06.08.2026 erzeugt ein per GITHUB_TOKEN
+          # eroeffneter PR zwar einen Lauf — GitHub haelt ihn aber sofort mit `action_required`
+          # an und wartet auf "Approve and run workflows". Der Bump-PR hatte dadurch tagelang
+          # gar keine Checks. AUTOBUMP_TOKEN gehoert dem Write-Collaborator Plaintext-User;
+          # dessen PRs sind nicht freigabepflichtig und laufen als normaler ci-only-Lauf.
+          # Fallback auf github.token, damit ein fehlendes Secret den Bump nicht ganz stoppt —
+          # dann ist wieder eine Freigabe noetig (`offene-prs` weist sie aus).
+          GH_TOKEN: ${{ secrets.AUTOBUMP_TOKEN || github.token }}
+          OLD: ${{ steps.detect.outputs.current }}
+          OLDPARENT: ${{ steps.detect.outputs.parent }}
+          NEW: ${{ steps.detect.outputs.latest }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BUMP_BRANCH"
+          # Nur die pom.xml — der Checkout von plaintext-scripts unter .plaintext-scripts/
+          # bleibt untracked und gehoert nicht in den PR.
+          git add pom.xml
+          {
+            printf 'chore(322): plaintext-root %s -> %s (Auto-Bump)\n\n' "$OLD" "$NEW"
+            printf 'Automatischer Bump durch den Workflow "Root Auto-Bump" (reusable aus plaintext-scripts).\n'
+            printf 'Verify-Build (mvn clean verify -DskipITs) auf diesem Stand war gruen.\n'
+          } > "$RUNNER_TEMP/commit-msg.txt"
+          git commit -F "$RUNNER_TEMP/commit-msg.txt"
+          # --force: der Branch wird pro Bump neu geschrieben, es gibt immer
+          # hoechstens einen offenen Bump-PR (Guard 3).
+          git push --force origin "$BUMP_BRANCH"
+          {
+            printf 'Automatischer Bump auf die neueste veroeffentlichte plaintext-root-Version.\n\n'
+            printf '| | vorher | nachher |\n|---|---|---|\n'
+            printf '| `<parent>` plaintext-root-parent | %s | %s |\n' "$OLDPARENT" "$NEW"
+            printf '| `plaintext-root.version` | %s | %s |\n\n' "$OLD" "$NEW"
+            printf '**Verify:** `mvn clean verify -DskipITs` mit der neuen root-Version lief im Auto-Bump-Job gruen — sonst waere dieser PR nicht entstanden.\n\n'
+            printf '**Vor dem Merge beachten:** Der Merge auf `master` loest `release-all` aus (Release + DEV + PROD Blue-Green). Nicht mergen, waehrend ein anderer Consumer deployt — die NAS-Runner sind ephemer und recyceln sonst mitten im Blue-Green (PROD 502). Nach dem Deploy `/nosec/version` auf PROD pruefen.\n\n'
+            printf '_Erzeugt von `Plaintext-Gmbh/plaintext-scripts/.github/workflows/root-autobump.yaml` (Karte 322, reusable seit Paket S)._\n'
+          } > "$RUNNER_TEMP/pr-body.md"
+          URL="$(gh pr create --repo "$GITHUB_REPOSITORY" --base master --head "$BUMP_BRANCH" \
+            --title "chore: plaintext-root ${OLD} -> ${NEW} (Auto-Bump)" --body-file "$RUNNER_TEMP/pr-body.md")"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "### Bump-PR erstellt: $URL" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Meldung: roter Verify = root-Release ist fuer uns kaputt ──────
+      - name: Pushover bei rotem Verify
+        # Nur wenn wirklich der VERIFY rot war. Vorher hing die Bedingung an steps.apply —
+        # dadurch meldete auch ein Scheitern der PR-Erstellung "Auto-Bump rot: baut NICHT",
+        # obwohl der Build gruen war (Lauf 30616330278). Eine falsche Alarmmeldung ist teurer
+        # als keine: sie diskreditiert den Bump.
+        if: failure() && steps.verify.outcome == 'failure'
+        env:
+          APP: ${{ secrets.PUSHOVER_APP_TOKEN }}
+          USR: ${{ secrets.PUSHOVER_USER_KEY }}
+        run: |
+          [ -n "${APP:-}" ] && [ -n "${USR:-}" ] || exit 0
+          curl -sf -F "token=${APP}" -F "user=${USR}" -F "priority=1" \
+            -F "title=Auto-Bump rot: ${GITHUB_REPOSITORY##*/}" \
+            -F "message=plaintext-root ${{ steps.detect.outputs.current }} -> ${{ steps.detect.outputs.latest }} baut NICHT. Kein PR erstellt, Repo bleibt auf der alten Version." \
+            -F "url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            -F "url_title=Workflow-Run" \
+            https://api.pushover.net/1/messages.json || true
+
+      # Actions duerfen in dieser Org keine PRs erstellen ("GitHub Actions is not permitted to
+      # create or approve pull requests"). Der Branch ist dann aber gepusht und der Bump
+      # verifiziert — es fehlt nur der letzte Handgriff. Das ist eine Bringschuld an den
+      # Menschen, keine Fehlermeldung.
+      - name: Pushover wenn nur die PR-Erstellung fehlt
+        if: failure() && steps.verify.outcome == 'success'
+        env:
+          APP: ${{ secrets.PUSHOVER_APP_TOKEN }}
+          USR: ${{ secrets.PUSHOVER_USER_KEY }}
+        run: |
+          [ -n "${APP:-}" ] && [ -n "${USR:-}" ] || exit 0
+          REPO_NAME="${GITHUB_REPOSITORY##*/}"
+          curl -sf -F "token=${APP}" -F "user=${USR}" -F "priority=0" \
+            -F "title=Auto-Bump verifiziert, PR fehlt: ${REPO_NAME}" \
+            -F "message=plaintext-root ${{ steps.detect.outputs.current }} -> ${{ steps.detect.outputs.latest }} baut GRUEN. Branch ${BUMP_BRANCH} ist gepusht, nur das Oeffnen des PR ist Actions org-weit untersagt." \
+            -F "url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${BUMP_BRANCH}?expand=1" \
+            -F "url_title=PR oeffnen" \
+            https://api.pushover.net/1/messages.json || true
+
+      - name: Zusammenfassung
+        if: always()
+        run: |
+          {
+            echo "## Root Auto-Bump"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| gepinnt | \`${{ steps.detect.outputs.current || 'n/a' }}\` |"
+            echo "| parent | \`${{ steps.detect.outputs.parent || 'n/a' }}\` |"
+            echo "| neueste | \`${{ steps.detect.outputs.latest || 'n/a' }}\` |"
+            echo "| Rueckstand | \`${{ steps.detect.outputs.behind || 'n/a' }}\` Release(s) |"
+            echo "| Bump noetig | \`${{ steps.detect.outputs.bump || 'nein' }}\` |"
+            echo "| Guard NAS-Last | \`${{ steps.load.outputs.skip == 'true' && 'gebremst' || steps.load.outcome }}\` |"
+            echo "| Guard laufender Deploy | \`${{ steps.busy.outputs.skip == 'true' && 'gebremst' || steps.busy.outcome }}\` |"
+            echo "| Guard offener Bump-PR | \`${{ steps.openpr.outputs.skip == 'true' && 'gebremst' || steps.openpr.outcome }}\` |"
+            echo "| Verify | \`${{ steps.verify.outcome || 'nicht gelaufen' }}\` |"
+            echo "| PR | ${{ steps.pr.outputs.url || '—' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
