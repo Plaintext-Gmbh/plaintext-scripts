@@ -299,7 +299,7 @@ backup_prod_db() {
     # Karte 955: zweite, unabhaengige Wache. Ein Aufruf, der 0 meldet, aber nichts geschrieben
     # hat, ist trotzdem keine Sicherung -- und genau darauf greift restore_prod_db() zurueck.
     local _SIZE
-    _SIZE=$(ssh ${DEPLOY_SERVER} "stat -c %s '${REMOTE_BACKUP_PATH}' 2>/dev/null || echo 0")
+    _SIZE=$(ssh ${DEPLOY_SERVER} "stat -c %s '${REMOTE_BACKUP_PATH}' 2>/dev/null || stat -f %z '${REMOTE_BACKUP_PATH}' 2>/dev/null || echo 0")
     if [ "${_SIZE:-0}" -lt "${_MIN_BYTE}" ]; then
         echo -e "${RED}✗ Database backup is empty (${_SIZE:-0} bytes, expected >= ${_MIN_BYTE})!${NC}" >&2
         echo -e "${RED}   Container: ${_DB_CONTAINER}, database: ${_DB_NAME}${NC}" >&2
