@@ -21,7 +21,7 @@ LOGIN_URL="http://localhost:8080/login.html"
 
 do_start() {
     echo -e "${FG_BLUE}${BOLD}Starting application with spring-boot:run...${RESET}"
-    cd "$SCRIPT_DIR"
+    cd "$SCRIPT_DIR" || return 1
 
     # Start PostgreSQL container
     if command -v podman &>/dev/null; then
@@ -94,7 +94,7 @@ do_kill() {
 
 do_clean_install() {
     echo -e "${FG_BLUE}${BOLD}Running mvn clean install...${RESET}"
-    cd "$SCRIPT_DIR"
+    cd "$SCRIPT_DIR" || return 1
     local MVN="mvn"
     [[ -f "$SCRIPT_DIR/mvnw" ]] && MVN="$SCRIPT_DIR/mvnw"
     $MVN clean install -DskipTests
@@ -128,7 +128,7 @@ do_flywaynr() {
 
 do_playwright_build() {
     echo -e "${FG_BLUE}${BOLD}Playwright Tests (build + start + test)${RESET}"
-    cd "$SCRIPT_DIR"
+    cd "$SCRIPT_DIR" || return 1
     local MVN="mvn"
     [[ -f "$SCRIPT_DIR/mvnw" ]] && MVN="$SCRIPT_DIR/mvnw"
 
@@ -193,7 +193,7 @@ do_playwright_build() {
 
 do_playwright_running() {
     echo -e "${FG_BLUE}${BOLD}Playwright Tests (against running app)${RESET}"
-    cd "$SCRIPT_DIR"
+    cd "$SCRIPT_DIR" || return 1
     local MVN="mvn"
     [[ -f "$SCRIPT_DIR/mvnw" ]] && MVN="$SCRIPT_DIR/mvnw"
 

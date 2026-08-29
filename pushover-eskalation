@@ -174,7 +174,8 @@ EOF
         fehler "Auftragskommando '$KOMMANDO' ist fehlgeschlagen — schreibe in eine Datei"
     fi
     # Auffangweg: Der Auftrag darf nicht verloren gehen, nur weil das Board nicht erreichbar ist.
-    local ablage="$STATE_DIR/auftrag-$sk-$(date +%Y%m%d-%H%M%S).md"
+    local ablage
+    ablage="$STATE_DIR/auftrag-$sk-$(date +%Y%m%d-%H%M%S).md"
     { echo "# $titelzeile"; echo; printf '%s\n' "$beschreibung"; } > "$ablage"
     echo "datei:$ablage"
 }

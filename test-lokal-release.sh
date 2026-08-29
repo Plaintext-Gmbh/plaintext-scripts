@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
-# test-lokal-release.sh — bewacht die Sicherungen des Lokal-Release (do_local_release).
+# test-lokal-release.sh — bewacht die Sicherungen des Release-Pfads (do_release / do_local_release).
 #
 # WORUM ES GEHT
 #
 # Der Lokal-Release ist der zweite Weg neben der CI-Pipeline: Release + Tag + Push + Build +
 # Blue-Green-Deploy von einer Entwicklermaschine aus. Er ist nur deshalb ungefaehrlich, weil
-# vier Dinge in einer bestimmten REIHENFOLGE bzw. FORM passieren — und genau solche Dinge
+# einige Dinge in einer bestimmten REIHENFOLGE bzw. FORM passieren — und genau solche Dinge
 # verrutschen beim naechsten Umbau lautlos:
 #
-#   1. Der Release-Commit traegt "[skip-ci]" in der BETREFFZEILE. Sonst startet der Push auf
-#      master die CI (release-all), die parallel einen zweiten Release deployt.
-#   2. Der Vorflug (lokal_vorflug: Branch, Arbeitsbaum, origin, CI, Maven) laeuft VOR do_release —
+#   1. Der Release-Commit traegt das NATIVE "[skip ci]" (mit Leerzeichen) in der BETREFFZEILE —
+#      lokal UND in der CI (Zustandsbericht 29.08.2026, Paket S). Sonst startet der Push auf
+#      master einen zweiten CI-Lauf (release-all), der parallel einen weiteren Release rechnet.
+#      Die Bindestrich-Form "[skip-ci]" kennt GitHub nicht; sie erzeugte Laeufe, die sich nur
+#      per Concurrency gegenseitig abbrachen.
+#   2. Der Default fuer den Marker liegt in do_release AUSSERHALB des CI-Guards — sonst faellt
+#      die CI wieder auf "kein Marker" zurueck.
+#   3. Der Vorflug (lokal_vorflug: Branch, Arbeitsbaum, origin, CI, Maven) laeuft VOR do_release —
 #      und do_release selbst ruft ihn ausserhalb der CI ebenfalls (./build 3/5/56 lokal).
-#   3. Das NAS wird VOR do_release auf Erreichbarkeit geprueft (kein Tag ohne Deploy).
-#   4. Der Suffix wird VOR do_release gesetzt und nach dem Aufruf wieder geleert.
+#   4. Das NAS wird VOR do_release auf Erreichbarkeit geprueft (kein Tag ohne Deploy).
+#   5. Das GitHub-Release mit Notes entsteht NACH dem Tag-Push und ist nie fatal (jeder Pfad
+#      der Funktion endet mit return 0).
 #
 # Aufruf:  ./test-lokal-release.sh [pfad-zu-tui-build-logic.sh]
 set -uo pipefail
@@ -24,57 +30,78 @@ SKRIPT="${1:-$(dirname "$0")/tui-build-logic.sh}"
 FEHLER=0
 pruefe() { if [ "$2" = "$3" ]; then printf '  ok   %s\n' "$1"
            else printf '  FEHL %s\n       erwartet: %s\n       erhalten: %s\n' "$1" "$2" "$3"; FEHLER=1; fi; }
-# Erste Zeile, in der das Muster im Funktionskoerper von do_local_release steht (0 = nicht gefunden).
-zeile_in_lokal() {
-    awk -v muster="$1" '
-        /^do_local_release\(\) \{/ { drin=1 }
-        drin && $0 ~ muster && !gefunden { print NR; gefunden=1 }
+# Erste Zeile, in der das Muster (LITERAL, kein Regex — index() statt ~, damit Klammern, $ und
+# Backslashes nicht escaped werden muessen) im Funktionskoerper der Funktion $1 steht
+# (leer = nicht gefunden).
+zeile_in() {
+    awk -v fn="$1" -v muster="$2" '
+        $0 ~ ("^" fn "\\(\\) \\{") { drin=1 }
+        drin && index($0, muster) > 0 && !gefunden { print NR; gefunden=1 }
         drin && /^\}/ { drin=0 }
     ' "$SKRIPT" | head -1
 }
+zeile_in_lokal() { zeile_in do_local_release "$1"; }
+koerper() { awk "/^$1\\(\\) \\{/,/^\\}/" "$SKRIPT"; }
 
-echo "Lokal-Release: Sicherungen in $SKRIPT"
+echo "Release-Pfad: Sicherungen in $SKRIPT"
 
 # 1. Betreffzeile des Release-Commits traegt den Suffix (erste Zeile von COMMIT_MSG)
 BETREFF=$(grep -m1 -E '^\s*COMMIT_MSG="Release version ' "$SKRIPT")
 pruefe "Release-Commit-Betreff kennt RELEASE_COMMIT_SUFFIX" \
     "ja" "$(printf '%s' "$BETREFF" | grep -q 'RELEASE_COMMIT_SUFFIX' && echo ja || echo nein)"
 
-# 2.-4. Reihenfolge innerhalb von do_local_release
-Z_SAUBER=$(zeile_in_lokal 'lokal_vorflug "\\$BRANCH"')
+# 1b. Der Default ist das NATIVE [skip ci] — und die Bindestrich-Form kommt im Code nicht mehr vor
+pruefe "do_release: Default ' [skip ci]' (nativ, mit Leerzeichen)" "ja" \
+    "$(koerper do_release | grep -q 'RELEASE_COMMIT_SUFFIX= \[skip ci\]' && echo ja || echo nein)"
+pruefe "SNAPSHOT-Commit traegt natives [skip ci]" "ja" \
+    "$(koerper do_release | grep -q 'Prepare next development iteration .*\[skip ci\]"' && echo ja || echo nein)"
+# Kommentare duerfen die alte Form erklaeren; ausgefuehrter Code nicht.
+BINDESTRICH=$(grep -v '^\s*#' "$SKRIPT" | grep -c 'skip-ci' || true)
+pruefe "kein [skip-ci] (Bindestrich) mehr im Code" "0" "$BINDESTRICH"
+
+# 2. Der Default liegt NICHT im CI-Guard von do_release (sonst haette die CI keinen Marker)
+Z_R_CI_IF=$(zeile_in do_release 'if [ "${CI:-}" != "true" ]')
+Z_R_DEFAULT=$(zeile_in do_release 'RELEASE_COMMIT_SUFFIX= [skip ci]')
+Z_R_CI_FI=""
+if [ -n "${Z_R_CI_IF:-}" ]; then
+    Z_R_CI_FI=$(awk -v start="$Z_R_CI_IF" 'NR > start && /^    fi$/ { print NR; exit }' "$SKRIPT")
+fi
+pruefe "do_release: CI-Guard vorhanden" "ja" "$([ -n "${Z_R_CI_IF:-}" ] && [ -n "${Z_R_CI_FI:-}" ] && echo ja || echo nein)"
+if [ -n "${Z_R_CI_IF:-}" ] && [ -n "${Z_R_CI_FI:-}" ] && [ -n "${Z_R_DEFAULT:-}" ]; then
+    pruefe "do_release: [skip ci]-Default gilt auch in der CI (ausserhalb des Guards)" "ja" \
+        "$([ "$Z_R_DEFAULT" -gt "$Z_R_CI_FI" ] && echo ja || echo nein)"
+fi
+
+# 3.-4. Reihenfolge innerhalb von do_local_release
+Z_SAUBER=$(zeile_in_lokal 'lokal_vorflug "$BRANCH"')
 Z_NAS=$(zeile_in_lokal 'ensure_nas_reachable')
-Z_SUFFIX=$(zeile_in_lokal 'RELEASE_COMMIT_SUFFIX=" \\[skip-ci\\]"')
-Z_RELEASE=$(zeile_in_lokal 'do_release "\\$INCREMENT_TYPE"')
+Z_RELEASE=$(zeile_in_lokal 'do_release "$INCREMENT_TYPE"')
 Z_PROD=$(zeile_in_lokal 'deploy_to_prod "true"')
 
 pruefe "Vorflug-Aufruf vorhanden"         "ja" "$([ -n "${Z_SAUBER:-}" ] && echo ja || echo nein)"
 pruefe "NAS-Pruefung vorhanden"           "ja" "$([ -n "${Z_NAS:-}" ] && echo ja || echo nein)"
-pruefe "[skip-ci]-Suffix wird gesetzt"    "ja" "$([ -n "${Z_SUFFIX:-}" ] && echo ja || echo nein)"
 pruefe "do_release wird aufgerufen"       "ja" "$([ -n "${Z_RELEASE:-}" ] && echo ja || echo nein)"
 pruefe "PROD-Deploy mit Healthcheck"      "ja" "$([ -n "${Z_PROD:-}" ] && echo ja || echo nein)"
 
-if [ -n "${Z_SAUBER:-}" ] && [ -n "${Z_NAS:-}" ] && [ -n "${Z_SUFFIX:-}" ] && [ -n "${Z_RELEASE:-}" ] && [ -n "${Z_PROD:-}" ]; then
+if [ -n "${Z_SAUBER:-}" ] && [ -n "${Z_NAS:-}" ] && [ -n "${Z_RELEASE:-}" ] && [ -n "${Z_PROD:-}" ]; then
     pruefe "Vorflug VOR do_release"              "ja" "$([ "$Z_SAUBER" -lt "$Z_RELEASE" ] && echo ja || echo nein)"
     pruefe "NAS-Pruefung VOR do_release"         "ja" "$([ "$Z_NAS" -lt "$Z_RELEASE" ] && echo ja || echo nein)"
-    pruefe "[skip-ci]-Suffix VOR do_release"     "ja" "$([ "$Z_SUFFIX" -lt "$Z_RELEASE" ] && echo ja || echo nein)"
     pruefe "PROD-Deploy NACH do_release"         "ja" "$([ "$Z_PROD" -gt "$Z_RELEASE" ] && echo ja || echo nein)"
-    # Der Suffix darf nicht in der Umgebung haengen bleiben (spaeteres ./build 3 waere sonst [skip-ci]).
-    Z_LEER=$(awk -v start="$Z_RELEASE" 'NR > start && /RELEASE_COMMIT_SUFFIX=""/ { print NR; exit }' "$SKRIPT")
-    pruefe "Suffix nach do_release geleert"      "ja" "$([ -n "${Z_LEER:-}" ] && echo ja || echo nein)"
 fi
+# Kein Sonderweg mehr: do_local_release setzt den Marker nicht selbst (Default in do_release).
+pruefe "do_local_release setzt keinen eigenen Suffix" "0" \
+    "$(koerper do_local_release | grep -v '^\s*#' | grep -c 'RELEASE_COMMIT_SUFFIX=' || true)"
 
 # 5. lokal_vorflug prueft den Arbeitsbaum; do_release ruft ihn ausserhalb der CI VOR dem Versionsschritt
 pruefe "lokal_vorflug prueft den Arbeitsbaum" "ja" \
-    "$(awk '/^lokal_vorflug\(\) \{/,/^\}/' "$SKRIPT" | grep -q 'git status --porcelain' && echo ja || echo nein)"
-Z_R_VORFLUG=$(awk '/^do_release\(\) \{/{d=1} d && /lokal_vorflug/ && !g {print NR; g=1} d && /^\}/{d=0}' "$SKRIPT" | head -1)
-Z_R_SET=$(awk '/^do_release\(\) \{/{d=1} d && /mvn versions:set/ && !g {print NR; g=1} d && /^\}/{d=0}' "$SKRIPT" | head -1)
+    "$(koerper lokal_vorflug | grep -q 'git status --porcelain' && echo ja || echo nein)"
+Z_R_VORFLUG=$(zeile_in do_release 'lokal_vorflug')
+Z_R_SET=$(zeile_in do_release 'mvn versions:set')
 pruefe "do_release: Vorflug VOR versions:set" "ja" \
     "$([ -n "${Z_R_VORFLUG:-}" ] && [ -n "${Z_R_SET:-}" ] && [ "$Z_R_VORFLUG" -lt "$Z_R_SET" ] && echo ja || echo nein)"
-pruefe "do_release: lokal [skip-ci]-Default" "ja" \
-    "$(awk '/^do_release\(\) \{/,/^\}/' "$SKRIPT" | grep -q 'RELEASE_COMMIT_SUFFIX= \[skip-ci\]' && echo ja || echo nein)"
 for fn in deploy_to_dev deploy_to_prod; do
     pruefe "$fn: lokal CI-Rollout-Sperre" "ja" \
-        "$(awk "/^${fn}\\(\\) \\{/,/^\\}/" "$SKRIPT" | grep -q 'lokal_release_ci_frei' && echo ja || echo nein)"
+        "$(koerper "$fn" | grep -q 'lokal_release_ci_frei' && echo ja || echo nein)"
 done
 
 # 7. Massnahmen 1-5 (29.08.2026, PROD 502 durch zwei parallele Lokal-Releases)
@@ -125,7 +152,19 @@ pruefe "M5: geplanter Tag wird VOR do_release auf origin geprueft" "ja" \
 
 # 6. Rueckbau nimmt nur zurueck, was NICHT auf origin ist
 pruefe "Rueckbau prueft origin-Zugehoerigkeit" "ja" \
-    "$(awk '/^lokal_release_rueckbau\(\) \{/,/^\}/' "$SKRIPT" | grep -q 'merge-base --is-ancestor HEAD' && echo ja || echo nein)"
+    "$(koerper lokal_release_rueckbau | grep -q 'merge-base --is-ancestor HEAD' && echo ja || echo nein)"
+
+# 7. GitHub-Release mit Notes: NACH dem Tag-Push, und nie fatal
+Z_TAGPUSH=$(zeile_in do_release 'git push origin "refs/tags/')
+Z_NOTES=$(zeile_in do_release 'release_notes_erzeugen "${NEW_VERSION}"')
+pruefe "Release-Notes werden erzeugt" "ja" "$([ -n "${Z_NOTES:-}" ] && echo ja || echo nein)"
+if [ -n "${Z_TAGPUSH:-}" ] && [ -n "${Z_NOTES:-}" ]; then
+    pruefe "Release-Notes NACH dem Tag-Push" "ja" "$([ "$Z_NOTES" -gt "$Z_TAGPUSH" ] && echo ja || echo nein)"
+fi
+pruefe "release_notes_erzeugen: kein fataler Ausstieg (return 1 / exit)" "0" \
+    "$(koerper release_notes_erzeugen | grep -v '^\s*#' | grep -cE 'return [1-9]|exit ' || true)"
+pruefe "release_notes_erzeugen: prueft auf gh" "ja" \
+    "$(koerper release_notes_erzeugen | grep -q 'command -v gh' && echo ja || echo nein)"
 
 if [ "$FEHLER" -eq 0 ]; then echo "alles ok"; else echo "FEHLER"; fi
 exit "$FEHLER"

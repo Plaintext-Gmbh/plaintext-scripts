@@ -224,7 +224,7 @@ load_state() {
 
 save_state() {
     local i
-    > "$STATE_FILE"
+    : > "$STATE_FILE"
     for ((i=0; i<TOTAL; i++)); do
         echo "${TOGGLE_NAMES[$i]}=${TOGGLE_STATE[$i]}" >> "$STATE_FILE"
     done

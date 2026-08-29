@@ -1,0 +1,33 @@
+# ═══════════════════════════════════════════════════════════════
+#  shellcheck — die Build-Bibliothek prueft ihre eigenen Skripte
+#
+#  Zustandsbericht 29.08.2026 (Paket S): plaintext-scripts ist die Build-Bibliothek aller
+#  Plaintext-Apps. Ein Fehler in tui-build-logic.sh trifft den naechsten Release in vier Repos
+#  auf einmal — und bis heute gab es dafuer keine automatische Pruefung, nur Testskripte fuer
+#  einzelne Funktionen. Muster wie namespace-lint.yaml: ubuntu-latest (kein NAS-Runner fuer
+#  einen Linter), und die Pruefung selbst liegt in quality/shellcheck.sh, damit lokal und CI
+#  dasselbe laufen lassen (`./quality/shellcheck.sh`).
+# ═══════════════════════════════════════════════════════════════
+name: shellcheck
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Bash-Skripte pruefen (bash -n + shellcheck)
+        # shellcheck ist auf ubuntu-latest vorinstalliert. SHELLCHECK_PFLICHT=1 macht ein Fehlen
+        # zum Fehler statt zum Hinweis — sonst waere ein Runner-Image ohne shellcheck nicht von
+        # einem sauberen Repo zu unterscheiden.
+        env:
+          SHELLCHECK_PFLICHT: '1'
+        run: ./quality/shellcheck.sh .

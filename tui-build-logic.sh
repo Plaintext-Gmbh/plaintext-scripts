@@ -64,7 +64,6 @@ else
     NAS_HOST="192.168.1.224"
 fi
 
-REGISTRY="${NAS_HOST}:6666"
 DEPLOY_SERVER="mad@${NAS_HOST}"
 
 # ── Read versions from pom.xml (no more version.txt / versionRelease.txt) ──
@@ -162,7 +161,7 @@ show_usage() {
     echo ""
     echo -e "${BLUE}Lokal-Release (zweiter Weg neben CI/CD; Wrapper muss ihn verdrahten, plaintext-app: ./build 8):${NC}"
     echo -e "  ${GREEN}./build local-release [1|2|3] [prod|dev-prod]${NC}"
-    echo -e "    Release + Tag + Push (Commit mit [skip-ci]) + Build + Blue-Green-Deploy von dieser Maschine"
+    echo -e "    Release + Tag + Push (Commit mit [skip ci]) + Build + Blue-Green-Deploy von dieser Maschine"
     echo -e "    ${YELLOW}prod${NC} = direkt PROD (Default), ${YELLOW}dev-prod${NC} = erst DEV, dann PROD"
     echo -e "    Nur Vorflug: ${YELLOW}LOKAL_RELEASE_NUR_VORFLUG=true${NC}   CI-Sperre uebergehen: ${YELLOW}LOKAL_RELEASE_IGNORIERE_CI=true${NC}"
 }
@@ -218,9 +217,11 @@ stage_jar_to_nas() {
     JAR=$(find "$PWD" -path '*/target/*-exec.jar' -type f 2>/dev/null | head -1)
     if [ -z "$JAR" ]; then
         local c
-        for c in $(find "$PWD" -path '*/target/*.jar' -type f ! -name '*.original' ! -name '*-sources.jar' ! -name '*-javadoc.jar' 2>/dev/null); do
+        # while-read statt `for c in $(find ...)` (shellcheck SC2044): Pfade mit Leerzeichen
+        # wuerden im for-Loop zerlegt. Semantik sonst unveraendert.
+        while IFS= read -r c; do
             if [ -f "${c}.original" ]; then JAR="$c"; break; fi
-        done
+        done < <(find "$PWD" -path '*/target/*.jar' -type f ! -name '*.original' ! -name '*-sources.jar' ! -name '*-javadoc.jar' 2>/dev/null)
     fi
     if [ -z "$JAR" ]; then
         # Build-Cache-Restore-Fall: das Fat-Jar liegt OHNE -exec-Suffix und OHNE .original-
@@ -228,9 +229,11 @@ stage_jar_to_nas() {
         # Groesstes Jar nehmen, aber NUR wenn es nachweislich ein Boot-Jar ist (BOOT-INF im
         # Zip-Verzeichnis; grep -a liest den unkomprimierten Eintragsnamen aus dem Archiv).
         local c
-        for c in $(find "$PWD" -path '*/target/*.jar' -type f ! -name '*-sources.jar' ! -name '*-javadoc.jar' 2>/dev/null | xargs -r ls -S 2>/dev/null); do
+        # -print0/xargs -0 + while-read (shellcheck SC2038/SC2044): `ls -S` sortiert weiterhin
+        # nach Groesse, nur die Uebergabe ist jetzt gegen Leerzeichen im Pfad sicher.
+        while IFS= read -r c; do
             if grep -aq 'BOOT-INF/' "$c" 2>/dev/null; then JAR="$c"; break; fi
-        done
+        done < <(find "$PWD" -path '*/target/*.jar' -type f ! -name '*-sources.jar' ! -name '*-javadoc.jar' -print0 2>/dev/null | xargs -0 -r ls -S 2>/dev/null)
         [ -n "$JAR" ] && echo -e "${BLUE}M3: Boot-Jar ohne -exec-Suffix erkannt (Cache-Restore): $(basename "$JAR")${NC}"
     fi
     if [ -z "$JAR" ] || [ ! -f "$JAR" ]; then
@@ -246,7 +249,8 @@ stage_jar_to_nas() {
     # Tmp-Name PID+Zeitstempel-eindeutig (statt einem fixen "app.jar.tmp"): zwei ueberlappende
     # stage_jar_to_nas()-Laeufe fuer dieselbe App wuerden sich sonst denselben Tmp-Pfad teilen und
     # sich gegenseitig ueberschreiben/verstuemmeln (Race Condition, #16/fleetd Haertung).
-    local TMP_NAME="app.jar.tmp.$$.$(date +%s 2>/dev/null || echo 0)"
+    local TMP_NAME
+    TMP_NAME="app.jar.tmp.$$.$(date +%s 2>/dev/null || echo 0)"
     # Massnahme 2: die Kopie selbst unter Lock — zwei Laeufe ueberschreiben sich sonst gegenseitig.
     deploy_lock_acquire "staging" || return 1
     ssh "${DEPLOY_SERVER}" "mkdir -p ${STAGING}"
@@ -263,7 +267,8 @@ stage_jar_to_nas() {
 # Function to create backup of prod database (PostgreSQL via SSH on NAS)
 backup_prod_db() {
     local REMOTE_BACKUP_DIR="${DEPLOY_PATH}/backups"
-    local BACKUP_NAME="backup-$(date +%y-%m-%d_%H-%M).sql.gz"
+    local BACKUP_NAME
+    BACKUP_NAME="backup-$(date +%y-%m-%d_%H-%M).sql.gz"
     local REMOTE_BACKUP_PATH="${REMOTE_BACKUP_DIR}/${BACKUP_NAME}"
     local _DB_CONTAINER="${DB_CONTAINER_PREFIX:-${IMAGE_NAME}}-db-prod"
     local _DB_NAME="${DB_NAME:-${IMAGE_NAME}}"
@@ -1515,7 +1520,15 @@ do_run() {
     mvn clean package -DskipTests
 
     echo -e "${GREEN}=== Build OK - Starting application ===${NC}"
-    JAR_FILE=$(ls -1 ${WEBAPP_MODULE}/target/${WEBAPP_MODULE}-*.jar 2>/dev/null | grep -v original | head -1)
+    # Glob statt `ls | grep -v original | head -1` (shellcheck SC2010): erstes Jar, das kein
+    # .original-Geschwister des Boot-Repackage ist.
+    JAR_FILE=""
+    local f
+    for f in "${WEBAPP_MODULE}/target/${WEBAPP_MODULE}"-*.jar; do
+        [ -f "$f" ] || continue
+        case "$f" in *original*) continue ;; esac
+        JAR_FILE="$f"; break
+    done
     if [[ -z "$JAR_FILE" ]]; then
         echo -e "${RED}Error: JAR file not found${NC}"
         exit 1
@@ -1663,6 +1676,58 @@ compute_release_versions() {
     echo "${NEU} ${NEU}-SNAPSHOT"
 }
 
+# ── GitHub-Release mit generierten Notes (Zustandsbericht 29.08.2026, Paket S) ──────────────
+# Legt zum eben gepushten Tag ein GitHub-Release an; die Notes erzeugt GitHub selbst aus den
+# seit dem Vor-Tag gemergten PRs bzw. Commits (`--generate-notes`). Bisher gab es nur den
+# Git-Tag — die Releases-Seite blieb leer, und "was steckt in 2.1715.0?" fuehrte ins git log.
+#
+# BEST-EFFORT, NIE FATAL: der Release ist mit Commit + Tag + Artefakt komplett; ein fehlendes
+# GitHub-Release ist Kosmetik und darf weder einen CI-Deploy noch einen Lokal-Release rot
+# faerben. Deshalb endet JEDER Pfad mit return 0 und einer Meldung, die sagt, warum uebersprungen
+# wurde und wie man es nachholt.
+#
+# Voraussetzungen:
+#   * `gh` im PATH — lokal `brew install gh`; auf den NAS-Runnern ist es im Runner-Image
+#     (root-autobump nutzt dort `gh run list`). Fehlt es: Hinweis, kein Abbruch.
+#   * Ein Token mit Schreibrecht auf Releases: in der CI liegt GITHUB_TOKEN=MVN_DEPLOY_TOKEN (PAT
+#     mit repo-Scope) in der Umgebung des Build-&-Deploy-Schritts — dessen Job hat ohnehin
+#     `contents: write`; lokal genuegt die gh-Anmeldung (`gh auth login`). gh liest GH_TOKEN vor
+#     GITHUB_TOKEN vor dem Keyring.
+#   * Der Tag muss schon auf dem Remote liegen (`--verify-tag`) — deshalb steht der Aufruf NACH
+#     dem Tag-Push und nicht direkt hinter `git tag -a`.
+release_notes_erzeugen() {   # $1 = Tag/Version
+    local TAG="$1" REPO URL VERSUCH
+    if ! command -v gh >/dev/null 2>&1; then
+        echo -e "${YELLOW}⚠ 'gh' nicht installiert — kein GitHub-Release mit Notes fuer ${TAG} (Tag ist da; nachholen: gh release create ${TAG} --generate-notes).${NC}"
+        return 0
+    fi
+    REPO=$(git remote get-url origin 2>/dev/null | sed -E 's#^.*[:/]([^/]+/[^/]+)$#\1#; s#\.git$##')
+    if [ -z "$REPO" ]; then
+        echo -e "${YELLOW}⚠ origin-Repository nicht ermittelbar — GitHub-Release fuer ${TAG} uebersprungen.${NC}"
+        return 0
+    fi
+    if [ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ] && ! gh auth status >/dev/null 2>&1; then
+        echo -e "${YELLOW}⚠ gh ist nicht angemeldet (kein GH_TOKEN/GITHUB_TOKEN, kein 'gh auth login') — GitHub-Release fuer ${TAG} uebersprungen.${NC}"
+        return 0
+    fi
+    if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+        echo -e "${BLUE}GitHub-Release ${TAG} existiert bereits — nichts zu tun.${NC}"
+        return 0
+    fi
+    # Ein eben gepushter Tag ist ueber die API gelegentlich erst nach Sekunden sichtbar
+    # (--verify-tag scheitert dann) — drei Versuche mit kurzer Pause.
+    for VERSUCH in 1 2 3; do
+        if URL=$(gh release create "$TAG" -R "$REPO" --verify-tag --title "$TAG" --generate-notes 2>/dev/null); then
+            echo -e "${GREEN}✓ GitHub-Release ${TAG} mit generierten Notes angelegt: ${URL}${NC}"
+            return 0
+        fi
+        sleep $((VERSUCH * 3))
+    done
+    echo -e "${YELLOW}⚠ GitHub-Release ${TAG} konnte nicht angelegt werden (Token ohne Schreibrecht? API?) — Tag und Artefakt sind davon unberuehrt.${NC}"
+    echo -e "${YELLOW}  Nachholen: gh release create ${TAG} -R ${REPO} --generate-notes${NC}"
+    return 0
+}
+
 # Release build, $1=increment type or deploy flag, $2=optional deploy flag
 do_release() {
     echo -e "${YELLOW}=== Release Build ===${NC}"
@@ -1701,16 +1766,30 @@ do_release() {
     esac
 
     # Lokaler Lauf (nicht CI): derselbe Vorflug wie beim Lokal-Release (./build 8) — master,
-    # Arbeitsbaum, origin nachgezogen, kein CI-Rollout aktiv, Maven-Zugangsdaten — und der
-    # Release-Commit bekommt [skip-ci]. Sonst wuerde der Push dieses Commits die CI-Pipeline
-    # starten, die parallel zu ./build 5/56/7 einen ZWEITEN Release deployt (Karte: Lokal-Release,
-    # 29.08.2026). In der CI (CI=true) aendert sich hier nichts.
+    # Arbeitsbaum, origin nachgezogen, kein CI-Rollout aktiv, Maven-Zugangsdaten (Karte:
+    # Lokal-Release, 29.08.2026). In der CI (CI=true) prueft das die Pipeline selbst.
     if [ "${CI:-}" != "true" ]; then
         if ! lokal_vorflug; then
             return 1
         fi
-        : "${RELEASE_COMMIT_SUFFIX= [skip-ci]}"
     fi
+
+    # Zustandsbericht 29.08.2026 (Paket S): der Release-Commit traegt IMMER das native
+    # "[skip ci]" — lokal UND in der CI, mit Leerzeichen, nicht mit Bindestrich.
+    #   * Die Bindestrich-Form kennt GitHub nicht. Sie erzeugte trotzdem einen Lauf, den erst die
+    #     skip-pruefung der App-Pipeline auf einem NAS-Runner uebersprang — und der sich per
+    #     Concurrency-Gruppe mit dem naechsten Push gegenseitig abbrach (9 von 40 master-Laeufen
+    #     in plaintext-app am 29.08.2026 "cancelled"). Mit dem nativen Marker entsteht gar kein Lauf.
+    #   * In der CI trug der Release-Commit bisher GAR KEINEN Marker (Suffix leer). Der Push
+    #     erzeugte einen zweiten release-all-Lauf, den nur der spaetere SNAPSHOT-Push in derselben
+    #     Concurrency-Gruppe verdraengte (plaintext-root 29.08.2026: "Release version 1.633.0 /
+    #     1.634.0 / 1.635.0" je "cancelled"). Scheitert der SNAPSHOT-Push — laut Karte 410
+    #     bewusst nur eine Warnung —, haette dieser Lauf einen WEITEREN Release gerechnet.
+    # An einem Lauf fuer diesen Commit haengt nichts: publish-root-pin (push master, paths pom.xml)
+    # liest nur den root-Pin, der sich beim Release nicht aendert, und hat einen Wochen-Schedule;
+    # verify-dev/prod und e2e-smoke laufen im Lauf des MERGE-Commits, nicht in einem eigenen.
+    # Vorbelegt, nicht erzwungen: wer den Marker bewusst weglassen will, setzt RELEASE_COMMIT_SUFFIX="".
+    : "${RELEASE_COMMIT_SUFFIX= [skip ci]}"
 
     read -r NEW_VERSION NEXT_SNAPSHOT_VERSION <<< "$(compute_release_versions "$CURRENT_VERSION" "$INCREMENT_TYPE")"
     echo -e "${BLUE}New release version: ${GREEN}${NEW_VERSION}${NC}"
@@ -1751,10 +1830,10 @@ do_release() {
     echo -e "${YELLOW}Changes to be committed:${NC}"
     git --no-pager diff --cached --name-status || echo "No changes"
 
-    # RELEASE_COMMIT_SUFFIX: leer im CI-Lauf. Der Lokal-Release (do_local_release) setzt
-    # " [skip-ci]" — der Push dieses Commits auf master wuerde sonst die CI-Pipeline
-    # (release-all) starten, die parallel zum lokalen Deploy einen ZWEITEN Release rechnet.
-    # Die skip-pruefung der App-Pipeline fuehrt "Release version" als Automatik-Commit.
+    # RELEASE_COMMIT_SUFFIX (Default " [skip ci]", siehe oben): der Push dieses Commits auf master
+    # wuerde sonst die CI-Pipeline (release-all) starten — parallel zum lokalen Deploy bzw. als
+    # zweiter Lauf hinter dem CI-Release. Die skip-pruefung der App-Pipeline fuehrt "Release
+    # version" ausserdem als Automatik-Commit (kein Pushover-Alarm), falls doch ein Lauf entsteht.
     COMMIT_MSG="Release version ${NEW_VERSION}${RELEASE_COMMIT_SUFFIX:-}
 
 Includes:
@@ -1800,6 +1879,10 @@ Includes:
         echo -e "${RED}  Es wurde NICHTS veroeffentlicht; erst den Tag klaeren, dann erneut.${NC}"
         return 1
     fi
+
+    # GitHub-Release mit generierten Notes zum eben gepushten Tag — best-effort, nie fatal
+    # (Zustandsbericht 29.08.2026, Paket S; Details an der Funktion).
+    release_notes_erzeugen "${NEW_VERSION}"
 
     # M1 (build once): die CI gibt MVN_TEST_FLAG (-DskipITs) explizit per Env vor → Unit-Tests im
     # EINZIGEN Build; lokal (ohne diese Vorgabe) ohne Tests (Dev-Rechner/Nacht-Runner ohne Test-DB).
@@ -1859,7 +1942,9 @@ Includes:
 
     echo -e "${BLUE}Git: Committing next SNAPSHOT version...${NC}"
     git add pom.xml "*/pom.xml" || true
-    git commit -m "Prepare next development iteration ${NEXT_SNAPSHOT_VERSION} [skip-ci]"
+    # Natives "[skip ci]" (Zustandsbericht 29.08.2026): GitHub erzeugt fuer diesen Push gar keinen
+    # Lauf mehr — vorher entstand einer, der auf einem NAS-Runner nur uebersprungen wurde.
+    git commit -m "Prepare next development iteration ${NEXT_SNAPSHOT_VERSION} [skip ci]"
 
     # Karte 410 (M1): Der Rueckgabewert BEIDER Pushes muss geprueft werden.
     # Am 01.08.2026 wurde `git push` abgelehnt ("! [rejected] master -> master (fetch first)"),
@@ -1913,9 +1998,10 @@ Includes:
 # WARUM NICHT EINFACH ./build 56?
 #   1. Der Push des Release-Commits loest die CI aus (push auf master -> release-all). Die
 #      wuerde parallel zum lokalen Deploy einen ZWEITEN Release rechnen und gegen dieselben
-#      Slots und dasselbe Staging-Jar deployen. Deshalb traegt der lokale Release-Commit
-#      "[skip-ci]" (RELEASE_COMMIT_SUFFIX); die skip-pruefung der App-Pipeline fuehrt
-#      "Release version" als Automatik-Commit, damit kein Pushover-Alarm ausgeloest wird.
+#      Slots und dasselbe Staging-Jar deployen. Deshalb traegt der Release-Commit das native
+#      "[skip ci]" (RELEASE_COMMIT_SUFFIX, Default in do_release — seit dem Zustandsbericht
+#      29.08.2026 lokal wie CI); die skip-pruefung der App-Pipeline fuehrt "Release version"
+#      zusaetzlich als Automatik-Commit, damit kein Pushover-Alarm ausgeloest wird.
 #   2. do_release macht `git add -A`: alles Ungespeicherte wanderte in den Release. Hier ist
 #      ein sauberer, auf origin nachgezogener master Pflicht — sonst Abbruch VOR dem Tag.
 #   3. Lokal fehlen typischerweise die Reposilite-Zugangsdaten (server-id aus
@@ -1973,7 +2059,7 @@ do_local_release() {
     # ── Plan ─────────────────────────────────────────────────────────────────
     echo ""
     echo -e "${BLUE}Plan:${NC}"
-    echo -e "  Version:   ${CURRENT_VERSION} -> ${GREEN}${PLAN_NEU}${NC} (Tag ${PLAN_NEU}, Commit mit [skip-ci])"
+    echo -e "  Version:   ${CURRENT_VERSION} -> ${GREEN}${PLAN_NEU}${NC} (Tag ${PLAN_NEU}, Commit mit [skip ci])"
     echo -e "  Build:     mvn clean $([ "${MVN_RELEASE_DEPLOY:-false}" == "true" ] && echo deploy || echo package) ${MVN_TEST_FLAG:--DskipTests}"
     echo -e "  Transport: $([ "${JAR_VOLUME_DEPLOY}" == "true" ] && echo "Jar -> NAS-Staging (M3)" || echo "Image -> NAS-Registry")"
     echo -e "  Deploy:    Blue-Green $([ "$ZIEL" == "dev-prod" ] && echo "DEV (int) -> PROD" || echo "PROD direkt") mit Healthcheck"
@@ -1983,17 +2069,16 @@ do_local_release() {
         return 0
     fi
 
-    # ── Release: Version, Commit [skip-ci], Tag, Push, Build, Staging ─────────
+    # ── Release: Version, Commit [skip ci], Tag, Push, Build, Staging ─────────
+    # Den Marker setzt do_release selbst (Default " [skip ci]", lokal wie CI) — der frueher hier
+    # gesetzte und danach geleerte Sonderweg fuer den Lokal-Release ist damit entfallen.
     local START_SHA
     START_SHA=$(git rev-parse HEAD)
-    RELEASE_COMMIT_SUFFIX=" [skip-ci]"
     if ! do_release "$INCREMENT_TYPE"; then
-        RELEASE_COMMIT_SUFFIX=""
         lokal_release_rueckbau "$START_SHA" "$BRANCH"
         lokal_release_melde 1 "Release ${NEW_VERSION:-?} abgebrochen (Release-Phase). Details im Terminal."
         return 1
     fi
-    RELEASE_COMMIT_SUFFIX=""
 
     # Der Tag ist die Quelle fuer deploy_to_prod (get_release_version). Er MUSS die eben
     # gebaute Version sein — sonst wuerde ein fremder Stand ausgerollt.
