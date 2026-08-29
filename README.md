@@ -165,6 +165,11 @@ Was ihn vom blossen `./build 56` unterscheidet:
 - Tests: wie bei jedem lokalen Build standardmaessig `-DskipTests`; mit lokaler Test-DB
   `MVN_TEST_FLAG="-DskipITs -DexcludedGroups=quality-gate" ./build 8`.
 
+Dieselben Sicherungen gelten fuer JEDEN lokalen Release-Lauf (`./build 3/4/5/56/7`, Erkennung
+ueber `CI != true`): Vorflug vor dem Versionsschritt, `[skip-ci]` im Release-Commit, und
+`deploy_to_dev`/`deploy_to_prod` sperren, solange ein CI-Rollout auf master laeuft. Ungespeicherte
+Aenderungen bewusst mitnehmen (altes `git add -A`-Verhalten): `LOKAL_RELEASE_MIT_AENDERUNGEN=true`.
+
 Trockenlauf ohne Seiteneffekte: `LOKAL_RELEASE_NUR_VORFLUG=true ./build 8`.
 CI-Sperre bewusst uebergehen: `LOKAL_RELEASE_IGNORIERE_CI=true ./build 8`.
 Sicherungen bewacht `./test-lokal-release.sh`.

@@ -1135,6 +1135,12 @@ deploy_to_dev() {
 
     echo -e "${BLUE}=== Deploying to DEV Server (Blue-Green) ===${NC}"
 
+    # Lokaler Lauf (nicht CI): ein gerade laufender CI-Rollout benutzt dieselben Slots und
+    # dasselbe Staging-Jar — erst pruefen, dann anfassen. In der CI ist das die Concurrency-Gruppe.
+    if [ "${CI:-}" != "true" ] && ! lokal_release_ci_frei "${RELEASE_BRANCH:-master}"; then
+        return 1
+    fi
+
     # Ensure NAS is reachable
     if ! ensure_nas_reachable; then
         echo -e "${RED}✗ Cannot deploy - NAS not reachable${NC}"
@@ -1189,6 +1195,12 @@ deploy_to_prod() {
     local WITH_HEALTH_CHECK=${1:-false}
 
     echo -e "${BLUE}=== Deploying to PROD Server (Blue-Green) ===${NC}"
+
+    # Lokaler Lauf (nicht CI): ein gerade laufender CI-Rollout benutzt dieselben Slots und
+    # dasselbe Staging-Jar — erst pruefen, dann anfassen. In der CI ist das die Concurrency-Gruppe.
+    if [ "${CI:-}" != "true" ] && ! lokal_release_ci_frei "${RELEASE_BRANCH:-master}"; then
+        return 1
+    fi
 
     # Ensure NAS is reachable
     if ! ensure_nas_reachable; then
@@ -1505,6 +1517,18 @@ do_release() {
         *) echo -e "${YELLOW}Incrementing MINOR version (default)${NC}" ;;
     esac
 
+    # Lokaler Lauf (nicht CI): derselbe Vorflug wie beim Lokal-Release (./build 8) — master,
+    # Arbeitsbaum, origin nachgezogen, kein CI-Rollout aktiv, Maven-Zugangsdaten — und der
+    # Release-Commit bekommt [skip-ci]. Sonst wuerde der Push dieses Commits die CI-Pipeline
+    # starten, die parallel zu ./build 5/56/7 einen ZWEITEN Release deployt (Karte: Lokal-Release,
+    # 29.08.2026). In der CI (CI=true) aendert sich hier nichts.
+    if [ "${CI:-}" != "true" ]; then
+        if ! lokal_vorflug; then
+            return 1
+        fi
+        : "${RELEASE_COMMIT_SUFFIX= [skip-ci]}"
+    fi
+
     read -r NEW_VERSION NEXT_SNAPSHOT_VERSION <<< "$(compute_release_versions "$CURRENT_VERSION" "$INCREMENT_TYPE")"
     echo -e "${BLUE}New release version: ${GREEN}${NEW_VERSION}${NC}"
     echo -e "${BLUE}Next SNAPSHOT version: ${GREEN}${NEXT_SNAPSHOT_VERSION}${NC}"
@@ -1736,59 +1760,10 @@ do_local_release() {
         *) echo -e "${RED}✗ Ungueltiges Ziel '${ZIEL}' (prod | dev-prod)${NC}"; return 1 ;;
     esac
 
-    # ── Vorflug 1: Git ────────────────────────────────────────────────────────
-    local AKTUELLER_BRANCH
-    AKTUELLER_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-    if [ "$AKTUELLER_BRANCH" != "$BRANCH" ]; then
-        echo -e "${RED}✗ Lokal-Release nur auf '${BRANCH}' (aktuell: '${AKTUELLER_BRANCH}').${NC}"
+    # ── Vorflug 1-3: Git, CI, Maven (geteilt mit do_release im lokalen Lauf) ─
+    if ! lokal_vorflug "$BRANCH"; then
         return 1
     fi
-    if [ -n "$(git status --porcelain)" ]; then
-        echo -e "${RED}✗ Arbeitsbaum nicht sauber — der Release wuerde ALLES Ungespeicherte mitnehmen (git add -A).${NC}"
-        git --no-pager status --short
-        echo -e "${YELLOW}  Erst committen/stashen, dann erneut.${NC}"
-        return 1
-    fi
-    echo -e "${BLUE}Git: origin nachziehen (fetch)...${NC}"
-    # Bewusst OHNE --tags: lokale Tags, die vom Remote abweichen (plaintext-app: v56.x), lassen
-    # `git fetch --tags` mit "would clobber existing tag" scheitern — Release-Tags (n.n.n) kommen
-    # mit der Branch-Historie ohnehin mit, und do_release prueft den Tag-Push selbst.
-    if ! git fetch origin -q; then
-        echo -e "${RED}✗ git fetch origin fehlgeschlagen — ohne Netz kein Release.${NC}"
-        return 1
-    fi
-    local LOKAL REMOTE BASIS
-    LOKAL=$(git rev-parse HEAD)
-    REMOTE=$(git rev-parse "origin/${BRANCH}")
-    BASIS=$(git merge-base HEAD "origin/${BRANCH}")
-    if [ "$LOKAL" = "$REMOTE" ]; then
-        echo -e "${GREEN}✓ ${BRANCH} ist auf dem Stand von origin${NC}"
-    elif [ "$LOKAL" = "$BASIS" ]; then
-        echo -e "${YELLOW}${BRANCH} liegt hinter origin — ziehe nach (fast-forward)...${NC}"
-        if ! git pull -q --ff-only origin "$BRANCH"; then
-            echo -e "${RED}✗ Fast-forward nicht moeglich.${NC}"
-            return 1
-        fi
-        echo -e "${GREEN}✓ Nachgezogen auf $(git log --oneline -1)${NC}"
-    elif [ "$REMOTE" = "$BASIS" ]; then
-        local VORAUS
-        VORAUS=$(git rev-list --count "origin/${BRANCH}..HEAD")
-        echo -e "${YELLOW}⚠ ${VORAUS} lokale Commit(s) sind noch nicht auf origin — sie gehen mit dem Release raus:${NC}"
-        git --no-pager log --oneline "origin/${BRANCH}..HEAD"
-    else
-        echo -e "${RED}✗ ${BRANCH} und origin/${BRANCH} sind divergiert — erst git pull --rebase, dann erneut.${NC}"
-        return 1
-    fi
-    # Versionen NACH dem Nachziehen neu lesen: do_release rechnet aus CURRENT_VERSION.
-    init_versions
-
-    # ── Vorflug 2: laufende CI-Rollouts ──────────────────────────────────────
-    if ! lokal_release_ci_frei "$BRANCH"; then
-        return 1
-    fi
-
-    # ── Vorflug 3: Maven-Zugangsdaten fuers Release-Repo ─────────────────────
-    lokal_release_maven_zugangsdaten
 
     # ── Vorflug 4: NAS erreichbar — VOR dem Tag ──────────────────────────────
     if ! ensure_nas_reachable; then
@@ -1851,6 +1826,79 @@ do_local_release() {
     echo -e "${GREEN}=== Lokal-Release ${NEW_VERSION} ausgerollt (${ZIEL}, Blue-Green) ===${NC}"
     echo -e "${GREEN}    Tag ${NEW_VERSION} und Release-Commit sind auf origin/${BRANCH}; CI wurde bewusst uebersprungen.${NC}"
     lokal_release_melde 0 "Release ${NEW_VERSION} lokal gebaut und per Blue-Green auf ${ZIEL} ausgerollt."
+    return 0
+}
+
+# Gemeinsamer Vorflug jedes LOKALEN Release-Laufs (do_release ausserhalb der CI, do_local_release):
+#   1. Git: Release-Branch, sauberer Arbeitsbaum, origin per fast-forward nachgezogen.
+#      do_release macht `git add -A` — alles Ungespeicherte ginge sonst in den Release. Wer das
+#      bewusst will (Nacht-Runner, Hotfix aus dem Arbeitsbaum): LOKAL_RELEASE_MIT_AENDERUNGEN=true.
+#   2. CI: kein Rollout auf dem Release-Branch aktiv (gleiche Slots, gleiches Staging-Jar).
+#   3. Maven: Zugangsdaten fuers Release-Repo, sonst nur mvn package.
+# Idempotent: ein zweiter Aufruf im selben Lauf kostet nur ein fetch.
+lokal_vorflug() {
+    local BRANCH="${1:-${RELEASE_BRANCH:-master}}"
+
+    local AKTUELLER_BRANCH
+    AKTUELLER_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    if [ "$AKTUELLER_BRANCH" != "$BRANCH" ]; then
+        echo -e "${RED}✗ Lokaler Release nur auf '${BRANCH}' (aktuell: '${AKTUELLER_BRANCH}').${NC}"
+        echo -e "${YELLOW}  Anderer Release-Branch: RELEASE_BRANCH=<name> setzen.${NC}"
+        return 1
+    fi
+    if [ -n "$(git status --porcelain)" ]; then
+        if [ "${LOKAL_RELEASE_MIT_AENDERUNGEN:-false}" == "true" ]; then
+            echo -e "${YELLOW}⚠ Arbeitsbaum nicht sauber — die Aenderungen gehen MIT in den Release-Commit (LOKAL_RELEASE_MIT_AENDERUNGEN=true):${NC}"
+            git --no-pager status --short
+        else
+            echo -e "${RED}✗ Arbeitsbaum nicht sauber — der Release wuerde ALLES Ungespeicherte mitnehmen (git add -A).${NC}"
+            git --no-pager status --short
+            echo -e "${YELLOW}  Erst committen/stashen — oder bewusst: LOKAL_RELEASE_MIT_AENDERUNGEN=true${NC}"
+            return 1
+        fi
+    fi
+    echo -e "${BLUE}Git: origin nachziehen (fetch)...${NC}"
+    # Bewusst OHNE --tags: lokale Tags, die vom Remote abweichen (plaintext-app: v56.x), lassen
+    # `git fetch --tags` mit "would clobber existing tag" scheitern — Release-Tags (n.n.n) kommen
+    # mit der Branch-Historie ohnehin mit, und do_release prueft den Tag-Push selbst.
+    if ! git fetch origin -q; then
+        echo -e "${RED}✗ git fetch origin fehlgeschlagen — ohne Netz kein Release.${NC}"
+        return 1
+    fi
+    local LOKAL REMOTE BASIS
+    LOKAL=$(git rev-parse HEAD)
+    REMOTE=$(git rev-parse "origin/${BRANCH}")
+    BASIS=$(git merge-base HEAD "origin/${BRANCH}")
+    if [ "$LOKAL" = "$REMOTE" ]; then
+        echo -e "${GREEN}✓ ${BRANCH} ist auf dem Stand von origin${NC}"
+    elif [ "$LOKAL" = "$BASIS" ]; then
+        echo -e "${YELLOW}${BRANCH} liegt hinter origin — ziehe nach (fast-forward)...${NC}"
+        if [ -n "$(git status --porcelain)" ]; then
+            echo -e "${RED}✗ Nachziehen mit ungespeicherten Aenderungen ist nicht sicher — erst committen/stashen.${NC}"
+            return 1
+        fi
+        if ! git pull -q --ff-only origin "$BRANCH"; then
+            echo -e "${RED}✗ Fast-forward nicht moeglich.${NC}"
+            return 1
+        fi
+        echo -e "${GREEN}✓ Nachgezogen auf $(git log --oneline -1)${NC}"
+    elif [ "$REMOTE" = "$BASIS" ]; then
+        local VORAUS
+        VORAUS=$(git rev-list --count "origin/${BRANCH}..HEAD")
+        echo -e "${YELLOW}⚠ ${VORAUS} lokale Commit(s) sind noch nicht auf origin — sie gehen mit dem Release raus:${NC}"
+        git --no-pager log --oneline "origin/${BRANCH}..HEAD"
+    else
+        echo -e "${RED}✗ ${BRANCH} und origin/${BRANCH} sind divergiert — erst git pull --rebase, dann erneut.${NC}"
+        return 1
+    fi
+    # Versionen NACH dem Nachziehen neu lesen: do_release rechnet aus CURRENT_VERSION.
+    init_versions
+
+    if ! lokal_release_ci_frei "$BRANCH"; then
+        return 1
+    fi
+
+    lokal_release_maven_zugangsdaten
     return 0
 }
 
