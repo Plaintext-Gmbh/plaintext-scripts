@@ -203,34 +203,40 @@ jobs:
           fi
           echo "motor=$MOTOR" >> "$GITHUB_OUTPUT"
 
-          # AUSNAHME: geplante Laeufe bleiben IMMER hier, unabhaengig vom Motor.
+          # HIER STAND BIS ZUM 30.08.2026 EINE AUSNAHME FUER `schedule`.
           #
-          # Ueber `schedule` laufen der naechtliche Test-Build und -- mittwochs -- die
-          # Voll-Analyse mit SonarQube, OWASP-CVE-Scan und SpotBugs. Woodpecker kann sie
-          # nicht uebernehmen: der CVE-Scan braucht einen persistenten NVD-Bestand, der
-          # Agent haengt nur `woodpecker-m2` ein, und ein untrusted Repo darf sich kein
+          # Sie liess Nightly und woechentliche Voll-Analyse auch dann auf GitHub Actions
+          # laufen, wenn `.ci-engine` auf `woodpecker` stand. Begruendung damals: der
+          # CVE-Scan braucht einen persistenten NVD-Bestand, der Woodpecker-Agent haengt in
+          # Step-Container nur `woodpecker-m2` ein, und ein untrusted Repo darf sich kein
           # eigenes Volume mounten. Ohne Bestand laedt dependency-check jedes Mal die
           # komplette NVD (~96 min), laeuft ins Timeout und schreibt KEINEN Report -- und
-          # quality-gate.py wertet einen fehlenden Report als "kein Breach".
+          # quality-gate.py wertet einen fehlenden Report als "kein Breach". Ergebnis waere
+          # ein gruenes Gate, weil nichts gemessen wurde (Karten 365/420/896/925).
           #
-          # Das Ergebnis waere ein gruenes Gate, weil nichts gemessen wurde. Genau dieser
-          # Zustand hat schon mehrfach Zeit gekostet (Karten 365/420/896/925). Ein
-          # Motor-Wechsel darf die Sicherheitspruefung nicht stilllegen, deshalb faehrt sie
-          # weiter auf GitHub Actions -- auch wenn Push und Pull Request nach Woodpecker
-          # gehen. Die beiden stossen sich nicht: Nightly 03:00, Voll-Analyse Mittwoch
-          # 04:00 UTC, und deploy-target ist dabei ci-only.
-          if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]; then
-            echo "zustaendig=true" >> "$GITHUB_OUTPUT"
-            echo "CI-Motor: $MOTOR -- geplanter Lauf, bleibt bei GitHub Actions (Sicherheitspruefung)."
-            {
-              echo "## CI-Motor: \`$MOTOR\` -- geplanter Lauf"
-              echo ""
-              echo "Nightly und Voll-Analyse laufen **immer** hier, auch im Woodpecker-Modus:"
-              echo "der CVE-Scan braucht einen persistenten NVD-Bestand, den der Woodpecker-Agent"
-              echo "nicht hat. Ein fehlender Report ginge als kein Breach durch."
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
+          # DIESE BEGRUENDUNG IST ENTFALLEN. Die Repos haben seit dem 30.08.2026
+          # `.woodpecker/analyse.yml`: der Step `owasp-cve` haengt das vorhandene Volume
+          # `github-runners_odc-cache` selbst ein (die Repos stehen dafuer auf
+          # `trusted.volumes = true`) und arbeitet darin in einem eigenen Unterverzeichnis
+          # je Repo. Nachgemessen am 30.08.2026 ohne NVD-API-Key: ein
+          # `dependency-check:update-only` gegen den so gesaeten Bestand ist nach 23,7 s
+          # durch, gegen ein leeres Verzeichnis beginnt es ein Vollupdate ueber 384'613
+          # Eintraege. Ausserdem bricht der Woodpecker-Step ab, wenn KEIN Report entsteht --
+          # das Gate laeuft dann gar nicht, statt gruen zu melden. Damit ist die Pruefung
+          # dort nicht bloss vorhanden, sondern strenger als hier.
+          #
+          # WARUM DIE AUSNAHME WEG MUSS UND NICHT BLOSS UEBERFLUESSIG IST: liefe sie weiter,
+          # bewerteten ZWEI Systeme dasselbe Repo und committeten beide
+          # `quality/quality-gate.properties` auf `master` zurueck. Der zweite Push
+          # scheitert am Rebase oder ueberschreibt den ersten -- in beiden Faellen steht im
+          # Repo ein Gate-Stand, dessen Herkunft niemand mehr ansieht. Dazu belegte der
+          # GitHub-Lauf weiterhin einen NAS-Runner, also genau die Ressource, die mit dem
+          # Umstieg frei werden soll.
+          #
+          # ZURUECKDREHEN: dieser Commit ist absichtlich der einzige seiner Art. Wer die
+          # Ausnahme wiederbraucht (etwa weil das Volume verloren ging), nimmt ihn als
+          # Ganzes zurueck -- und schaltet dann auch die Woodpecker-Crons ab, sonst laufen
+          # beide.
 
           case "$MOTOR" in
             github)
