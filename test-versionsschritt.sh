@@ -87,11 +87,17 @@ pruefe "keine zweite MINOR-Erhoehung (NEXT_MINOR) mehr im Skript" "ja" \
        "$(grep -q 'NEXT_MINOR' "$SKRIPT" && echo nein || echo ja)"
 pruefe "SNAPSHOT traegt die Release-Nummer" "ja" \
        "$(grep -q 'echo "${NEU} ${NEU}-SNAPSHOT"' "$SKRIPT" && echo ja || echo nein)"
-# Die Funktion darf nicht korrekt und gleichzeitig ungenutzt sein.
-pruefe "do_release benutzt compute_release_versions" "ja" \
-       "$(sed -n '/^do_release() {/,/^}/p' "$SKRIPT" | grep -q 'compute_release_versions' && echo ja || echo nein)"
-pruefe "do_release rechnet nicht selbst" "ja" \
-       "$(sed -n '/^do_release() {/,/^}/p' "$SKRIPT" | grep -qE '(MINOR|MAJOR|PATCH)=\$\(\(' && echo nein || echo ja)"
+# Die Funktion darf nicht korrekt und gleichzeitig ungenutzt sein. Seit dem Release-Lock
+# (30.08.2026) rechnet nicht mehr do_release selbst, sondern der gesperrte Abschnitt
+# release_nummer_beanspruchen — geprueft wird deshalb ueber beide Funktionen.
+RELEASE_PFAD="$(sed -n '/^do_release() {/,/^}/p' "$SKRIPT"; sed -n '/^release_nummer_beanspruchen() {/,/^}/p' "$SKRIPT")"
+pruefe "der Release-Pfad benutzt compute_release_versions" "ja" \
+       "$(printf '%s\n' "$RELEASE_PFAD" | grep -q 'compute_release_versions' && echo ja || echo nein)"
+pruefe "der Release-Pfad rechnet nicht selbst" "ja" \
+       "$(printf '%s\n' "$RELEASE_PFAD" | grep -qE '(MINOR|MAJOR|PATCH)=\$\(\(' && echo nein || echo ja)"
+# Und die Rechnung steht unter dem Release-Lock, nicht davor (sonst zwei Laeufe, eine Nummer).
+pruefe "gerechnet wird im gesperrten Abschnitt" "ja" \
+       "$(sed -n '/^release_nummer_beanspruchen() {/,/^}/p' "$SKRIPT" | grep -q 'compute_release_versions' && echo ja || echo nein)"
 
 echo "== Syntax ================================================================="
 pruefe "Skript ist syntaktisch gueltig" "ja" "$(bash -n "$SKRIPT" 2>/dev/null && echo ja || echo nein)"

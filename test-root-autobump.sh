@@ -241,8 +241,11 @@ pruefe "Parent fehlt: return 0, rote Zeile"           "0:ja" "$RC:$(printf '%s' 
 echo "== Verdrahtung ============================================================="
 pruefe "root-autobump.sh sourct die Bibliothek" "ja" "$(grep -q 'reposilite-release.sh' "$SKRIPT" && echo ja || echo nein)"
 pruefe "tui-build-logic.sh sourct die Bibliothek" "ja" "$(grep -q 'ci/reposilite-release.sh' "$TUI" && echo ja || echo nein)"
-pruefe "do_release ruft die Selbstkontrolle nach mvn clean deploy" "ja" \
-       "$(sed -n '/^do_release() {/,/^}/p' "$TUI" | grep -A6 'mvn clean deploy' | grep -q 'release_vollstaendig_pruefen "${NEW_VERSION}"' && echo ja || echo nein)"
+# Seit dem Release-Lock (30.08.2026) steht der Build nicht mehr in do_release selbst, sondern
+# im ungesperrten Teil do_release_bauen_und_veroeffentlichen — die Selbstkontrolle ist mit
+# umgezogen und muss weiterhin unmittelbar hinter `mvn clean deploy` stehen.
+pruefe "der Release-Pfad ruft die Selbstkontrolle nach mvn clean deploy" "ja" \
+       "$(sed -n '/^do_release_bauen_und_veroeffentlichen() {/,/^}/p' "$TUI" | grep -A6 'mvn clean deploy' | grep -q 'release_vollstaendig_pruefen "${NEW_VERSION}"' && echo ja || echo nein)"
 pruefe "release_vollstaendig_pruefen: kein fataler Ausstieg" "0" \
        "$(sed -n '/^release_vollstaendig_pruefen() {/,/^}/p' "$TUI" | grep -v '^\s*#' | grep -cE 'return [1-9]|exit ' || true)"
 
