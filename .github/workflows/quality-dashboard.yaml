@@ -21,7 +21,17 @@ concurrency:
 jobs:
   build:
     name: Dashboard generieren
-    runs-on: ['self-hosted', 'nas']
+    # ubuntu-latest statt self-hosted (30.08.2026): Der Job braucht kein LAN. Er ruft
+    # ausschliesslich die SonarQube-REST-API unter https://sonar.plaintext.ch (von aussen
+    # erreichbar, nachgemessen HTTP 200) und die GitHub-API; quality-dashboard.py kommt mit
+    # der Standardbibliothek aus (urllib), ohne Maven und ohne Docker.
+    #
+    # Warum dieser Workflow NICHT nach Woodpecker zieht wie der Rest der Familie: Der
+    # zweite Job veroeffentlicht ueber actions/deploy-pages auf GitHub Pages. Das ist ein
+    # GitHub-Dienst; Woodpecker koennte ihn nur ersetzen, wenn das Dashboard woanders
+    # gehostet wuerde. Auf ubuntu-latest gibt der Job trotzdem den self-hosted Runner frei,
+    # und darum ging es.
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -45,7 +55,17 @@ jobs:
   deploy:
     name: Auf GitHub Pages veröffentlichen
     needs: build
-    runs-on: ['self-hosted', 'nas']
+    # ubuntu-latest statt self-hosted (30.08.2026): Der Job braucht kein LAN. Er ruft
+    # ausschliesslich die SonarQube-REST-API unter https://sonar.plaintext.ch (von aussen
+    # erreichbar, nachgemessen HTTP 200) und die GitHub-API; quality-dashboard.py kommt mit
+    # der Standardbibliothek aus (urllib), ohne Maven und ohne Docker.
+    #
+    # Warum dieser Workflow NICHT nach Woodpecker zieht wie der Rest der Familie: Der
+    # zweite Job veroeffentlicht ueber actions/deploy-pages auf GitHub Pages. Das ist ein
+    # GitHub-Dienst; Woodpecker koennte ihn nur ersetzen, wenn das Dashboard woanders
+    # gehostet wuerde. Auf ubuntu-latest gibt der Job trotzdem den self-hosted Runner frei,
+    # und darum ging es.
+    runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
