@@ -224,6 +224,18 @@ Woodpecker-Seite hat dafuer keine Entsprechung, und der Job kostet keinen NAS-Ru
 Warum der Waechter hier steht und nicht in den vier Aufrufern: so ist das Umschalten eines
 Repos genau ein Commit (die `.ci-engine`-Datei), ohne Eingriff in `ci-cd.yaml`.
 
+**Auch `schedule` folgt der Datei — seit dem 30.08.2026.** Bis dahin gab es eine Ausnahme:
+geplante Laeufe (Nightly und woechentliche Voll-Analyse) blieben immer bei GitHub Actions,
+weil der OWASP-CVE-Scan einen persistenten NVD-Bestand braucht und der Woodpecker-Agent
+keinen hatte. Diese Begruendung ist entfallen: die Repos haben jetzt
+`.woodpecker/analyse.yml`, dessen CVE-Step das vorhandene Volume `github-runners_odc-cache`
+selbst einhaengt (`trusted.volumes = true` am Repo) und darin je Repo ein eigenes
+Unterverzeichnis fuehrt. Die Ausnahme MUSSTE weg und war nicht bloss ueberfluessig: sonst
+bewerteten zwei Systeme dasselbe Repo und committeten beide `quality/quality-gate.properties`
+auf `master` zurueck. Ein Repo im Woodpecker-Modus braucht seine Crons jetzt **dort**
+(`nightly`, `wochenanalyse`) — die GitHub-`schedule`-Eintraege der Aufrufer laufen zwar
+weiter, werden aber vom `ci-motor` abgefangen und tun nichts.
+
 Enthaelt `.ci-engine` etwas anderes als die beiden Woerter (auch: leere Datei), bricht der
 Job **rot** ab statt zu raten. Beide Waechter lesen dieselbe Datei und steigen bei allem aus,
 was nicht ihr eigener Name ist — ein Tippfehler wuerde sonst *beide* Systeme stilllegen, und
