@@ -1660,6 +1660,36 @@ deploy_prod_single() {
 # plaintext-iot 1.330 -> 1.332 -> 1.334. Der SNAPSHOT gehoert deshalb auf die GERADE
 # veroeffentlichte Nummer; hochgezaehlt wird erst wieder beim naechsten Release.
 # Wer hier umbaut, laesst test-versionsschritt.sh laufen.
+# Massnahme 11 (Standortbestimmung 29.08.2026): Basis der Versionsrechnung ist MAX(hoechster
+# Release-Tag, POM-Version), nicht die POM allein. Bricht ein Lauf NACH Tag+Push ab (2.1708.0 und
+# 2.1709.0 blieben so ohne Artefakt), steht die POM hinter dem Tag; der naechste Lauf rechnete
+# bisher aus der POM weiter und konnte einen bereits vergebenen Tag erneut anfassen. Mit dem Tag
+# als Untergrenze bleibt die Historie lueckenlos steigend. NEXT_SNAPSHOT bleibt bewusst auf der
+# Release-Nummer (siehe compute_release_versions / test-versionsschritt.sh); "NEU+1" haette die
+# Bedeutung von ./build 2/4 (MAJOR/PATCH) verschoben und ist hier ausdruecklich NICHT umgesetzt.
+# Groessere von zwei Versionen (numerisch je Stelle; -SNAPSHOT wird ignoriert; leer zaehlt nicht).
+hoechste_version() {
+    local A="${1%-SNAPSHOT}" B="${2%-SNAPSHOT}"
+    if [ -z "$A" ]; then echo "$B"; return 0; fi
+    if [ -z "$B" ]; then echo "$A"; return 0; fi
+    printf '%s\n%s\n' "$A" "$B" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+}
+# Hoechster Release-Tag des Repos (X.Y.Z, ohne v-Praefix); leer, wenn es keinen gibt.
+hoechster_release_tag() {
+    git tag --list '[0-9]*.[0-9]*.[0-9]*' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+        | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+}
+# Basis fuer compute_release_versions: MAX(Tag, POM). Meldet, wenn der Tag die POM ueberholt hat.
+versionsbasis() {
+    local POM="${1:-$CURRENT_VERSION}" TAG BASIS
+    TAG=$(hoechster_release_tag)
+    BASIS=$(hoechste_version "$POM" "$TAG")
+    if [ -n "$TAG" ] && [ "$BASIS" != "${POM%-SNAPSHOT}" ]; then
+        echo -e "${YELLOW}⚠ Versionsbasis: hoechster Tag ${TAG} liegt vor der POM (${POM}) — rechne ab ${BASIS} (Massnahme 11).${NC}" >&2
+    fi
+    echo "$BASIS"
+}
+
 compute_release_versions() {
     local CURRENT="${1%-SNAPSHOT}"
     local TYPE="${2:-2}"
@@ -1845,7 +1875,7 @@ do_release() {
     # Vorbelegt, nicht erzwungen: wer den Marker bewusst weglassen will, setzt RELEASE_COMMIT_SUFFIX="".
     : "${RELEASE_COMMIT_SUFFIX= [skip ci]}"
 
-    read -r NEW_VERSION NEXT_SNAPSHOT_VERSION <<< "$(compute_release_versions "$CURRENT_VERSION" "$INCREMENT_TYPE")"
+    read -r NEW_VERSION NEXT_SNAPSHOT_VERSION <<< "$(compute_release_versions "$(versionsbasis "$CURRENT_VERSION")" "$INCREMENT_TYPE")"
     echo -e "${BLUE}New release version: ${GREEN}${NEW_VERSION}${NC}"
     echo -e "${BLUE}Next SNAPSHOT version: ${GREEN}${NEXT_SNAPSHOT_VERSION}${NC}"
 
@@ -2102,7 +2132,7 @@ do_local_release() {
 
     # ── Vorflug 5: der geplante Tag darf auf origin noch nicht existieren (Massnahme 5) ─
     local PLAN_NEU
-    read -r PLAN_NEU _ <<< "$(compute_release_versions "$CURRENT_VERSION" "$INCREMENT_TYPE")"
+    read -r PLAN_NEU _ <<< "$(compute_release_versions "$(versionsbasis "$CURRENT_VERSION")" "$INCREMENT_TYPE")"
     if git ls-remote --tags origin "refs/tags/${PLAN_NEU}" 2>/dev/null | grep -q .; then
         echo -e "${RED}✗ Tag ${PLAN_NEU} existiert bereits auf origin — POM-Version und Tags passen nicht zusammen.${NC}"
         echo -e "${YELLOW}  git fetch --tags; git tag --sort=-v:refname | head; POM-Version pruefen — erst dann erneut.${NC}"
