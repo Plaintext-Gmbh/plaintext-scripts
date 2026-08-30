@@ -207,11 +207,37 @@ Sicherungen bewacht `./test-lokal-release.sh`.
 
 ## GitHub Actions
 
+### Welcher CI-Motor faehrt? (`.ci-engine`)
+
+Seit dem 30.08.2026 kann ein Repo seine Pipeline wahlweise von GitHub Actions oder von
+Woodpecker (`https://ci.plaintext.ch`) fahren lassen — inklusive Release und
+Blue-Green-Deploy. Die Entscheidung steht als **ein Wort** in der Datei `.ci-engine` im
+Repo-Root: `github` oder `woodpecker`. **Fehlt die Datei, gilt `github`** — ein Repo ohne
+Datei aendert sich also nicht.
+
+Durchgesetzt wird das vom Job **`ci-motor`**, dem ersten Job dieser Pipeline: er laeuft auf
+`ubuntu-latest`, checkt per sparse checkout **nur** diese eine Datei aus und liefert den
+Output `zustaendig`. `ci`, `sonar` und `deploy` haengen daran; `verify-dev` und `verify-prod`
+folgen ueber `needs: deploy`. `namespace-lint` bleibt **bewusst** ungesperrt — die
+Woodpecker-Seite hat dafuer keine Entsprechung, und der Job kostet keinen NAS-Runner.
+
+Warum der Waechter hier steht und nicht in den vier Aufrufern: so ist das Umschalten eines
+Repos genau ein Commit (die `.ci-engine`-Datei), ohne Eingriff in `ci-cd.yaml`.
+
+Enthaelt `.ci-engine` etwas anderes als die beiden Woerter (auch: leere Datei), bricht der
+Job **rot** ab statt zu raten. Beide Waechter lesen dieselbe Datei und steigen bei allem aus,
+was nicht ihr eigener Name ist — ein Tippfehler wuerde sonst *beide* Systeme stilllegen, und
+zwar lautlos mit lauter gruenen Haekchen.
+
+Bedienung, Secret-Liste und die nicht portierten Teile: `docs/CI-UMSCHALTEN.md` im jeweiligen
+Repo (Vorlage und Pilot: `plaintext-iot`).
+
 ### CI/CD-Pipeline (`ci-cd-pipeline.yaml`)
 
 Der zentrale reusable Workflow ist `.github/workflows/ci-cd-pipeline.yaml` (bis zum
 Zustandsbericht 29.08.2026 stand hier ein nicht existierendes `maven-build-deploy.yaml` mit
-ebenso nicht existierenden Inputs). Jobs: `namespace-lint` (ubuntu-latest) → `ci` (Build+Test,
+ebenso nicht existierenden Inputs). Jobs: `ci-motor` (Waechter, siehe oben) →
+`namespace-lint` (ubuntu-latest) → `ci` (Build+Test,
 nur ci-only/Sonar) → `sonar` → `deploy` → `verify-dev` / `verify-prod`. Das Ereignis des
 Aufrufers bestimmt das Ziel; die Build-Konfiguration kommt aus `plaintext-config`, nicht aus
 dem Aufruf. Gekuerztes Beispiel nach `plaintext-app/.github/workflows/ci-cd.yaml`:

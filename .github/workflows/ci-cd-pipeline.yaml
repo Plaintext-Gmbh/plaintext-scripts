@@ -151,6 +151,117 @@ env:
   JAVA_TOOL_OPTIONS: "-XX:MaxRAM=4g -XX:ActiveProcessorCount=2"
 
 jobs:
+  # ── CI-Motor-Waechter: wer fuehrt dieses Repo? (.ci-engine) ─────────────────
+  #
+  # Seit dem 30.08.2026 kann ein Repo seine Pipeline entweder von GitHub Actions oder von
+  # Woodpecker (https://ci.plaintext.ch) fahren lassen. Die Entscheidung steht als EIN WORT in
+  # der Datei `.ci-engine` im Repo-Root: `github` oder `woodpecker`. Fehlt die Datei, gilt
+  # `github` — ein Repo ohne Datei aendert sich damit nicht.
+  #
+  # WARUM DAS NOETIG IST: beide Systeme haengen am selben `push`-Ereignis auf master, und beide
+  # rufen dieselbe Shell-Logik auf (`./build 56` aus plaintext-scripts). Ohne Waechter wuerde ein
+  # Merge auf master ZWEI Releases rechnen (zwei Versionsnummern, zwei Tags — der zweite
+  # scheitert an der Kollisionspruefung, aber erst nach dem halben Weg) und ZWEI Blue-Green-
+  # Deploys gegen dieselben Slots fahren. Der NAS-Deploy-Lock (Massnahme 2, 29.08.2026) faengt
+  # den Slot-Teil ab; die doppelte Versionsrechnung faengt er NICHT.
+  #
+  # WARUM HIER UND NICHT IM AUFRUFER: der Waechter liegt in der GETEILTEN Pipeline, damit das
+  # Ausrollen auf app/guild/schuetu genau ein Commit je Repo ist (die `.ci-engine`-Datei) und
+  # kein Eingriff in vier `ci-cd.yaml`. Das Muster ist dasselbe wie bei `skip-pruefung` im
+  # Aufrufer: ein billiger Job auf ubuntu-latest, ein Output, und ein `if:` an den teuren Jobs.
+  #
+  # SPARSE CHECKOUT statt `gh api .../contents`: die Datei ist entweder im Baum oder nicht —
+  # kein Rate-Limit, kein Netzfehler, keine Fail-safe-Frage. Der Unterschied ist wichtig, weil
+  # es hier KEINE sichere Richtung zum Raten gibt: raten wir "github", waehrend Woodpecker
+  # faehrt, deployt es doppelt; raten wir "woodpecker", waehrend GitHub faehrt, deployt es
+  # nirgends. Deshalb wird nicht geraten, sondern gelesen.
+  ci-motor:
+    name: CI-Motor (.ci-engine)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      zustaendig: ${{ steps.pruefung.outputs.zustaendig }}
+      motor: ${{ steps.pruefung.outputs.motor }}
+    steps:
+      - name: Nur .ci-engine auschecken
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          sparse-checkout: .ci-engine
+          sparse-checkout-cone-mode: false
+
+      - name: Motor bestimmen
+        id: pruefung
+        run: |
+          if [ -f .ci-engine ]; then
+            # tr -d: Zeilenumbrueche und ein versehentliches CR aus einem Windows-Editor raus.
+            MOTOR="$(head -1 .ci-engine | tr -d '[:space:]')"
+          else
+            MOTOR=github
+            echo "Keine .ci-engine im Repo — Vorgabe: github."
+          fi
+          echo "motor=$MOTOR" >> "$GITHUB_OUTPUT"
+
+          # AUSNAHME: geplante Laeufe bleiben IMMER hier, unabhaengig vom Motor.
+          #
+          # Ueber `schedule` laufen der naechtliche Test-Build und -- mittwochs -- die
+          # Voll-Analyse mit SonarQube, OWASP-CVE-Scan und SpotBugs. Woodpecker kann sie
+          # nicht uebernehmen: der CVE-Scan braucht einen persistenten NVD-Bestand, der
+          # Agent haengt nur `woodpecker-m2` ein, und ein untrusted Repo darf sich kein
+          # eigenes Volume mounten. Ohne Bestand laedt dependency-check jedes Mal die
+          # komplette NVD (~96 min), laeuft ins Timeout und schreibt KEINEN Report -- und
+          # quality-gate.py wertet einen fehlenden Report als "kein Breach".
+          #
+          # Das Ergebnis waere ein gruenes Gate, weil nichts gemessen wurde. Genau dieser
+          # Zustand hat schon mehrfach Zeit gekostet (Karten 365/420/896/925). Ein
+          # Motor-Wechsel darf die Sicherheitspruefung nicht stilllegen, deshalb faehrt sie
+          # weiter auf GitHub Actions -- auch wenn Push und Pull Request nach Woodpecker
+          # gehen. Die beiden stossen sich nicht: Nightly 03:00, Voll-Analyse Mittwoch
+          # 04:00 UTC, und deploy-target ist dabei ci-only.
+          if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]; then
+            echo "zustaendig=true" >> "$GITHUB_OUTPUT"
+            echo "CI-Motor: $MOTOR -- geplanter Lauf, bleibt bei GitHub Actions (Sicherheitspruefung)."
+            {
+              echo "## CI-Motor: \`$MOTOR\` -- geplanter Lauf"
+              echo ""
+              echo "Nightly und Voll-Analyse laufen **immer** hier, auch im Woodpecker-Modus:"
+              echo "der CVE-Scan braucht einen persistenten NVD-Bestand, den der Woodpecker-Agent"
+              echo "nicht hat. Ein fehlender Report ginge als kein Breach durch."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          case "$MOTOR" in
+            github)
+              echo "zustaendig=true" >> "$GITHUB_OUTPUT"
+              echo "CI-Motor: github — diese Pipeline ist zustaendig."
+              echo "CI-Motor: \`github\` — GitHub Actions faehrt dieses Repo." >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            woodpecker)
+              echo "zustaendig=false" >> "$GITHUB_OUTPUT"
+              echo "::notice title=CI-Motor woodpecker::.ci-engine sagt 'woodpecker' — Build, Sonar, Deploy und Verify werden hier uebersprungen. Der Lauf gehoert nach https://ci.plaintext.ch. Zurueckschalten: .ci-engine auf 'github' setzen (docs/CI-UMSCHALTEN.md)."
+              {
+                echo "## CI-Motor: \`woodpecker\`"
+                echo ""
+                echo "GitHub Actions ist fuer dieses Repo **nicht zustaendig**. Build, Sonar,"
+                echo "Deploy und Verify sind uebersprungen — der Lauf gehoert nach"
+                echo "<https://ci.plaintext.ch>."
+                echo ""
+                echo "Zurueckschalten: \`.ci-engine\` auf \`github\` setzen (siehe \`docs/CI-UMSCHALTEN.md\`)."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              # HART ROT, nicht stillschweigend auf github zurueckfallen. Ein Tippfehler
+              # ("woodpecke", "Woodpecker\n\n") wuerde sonst je nach Rateregel entweder doppelt
+              # deployen oder — schlimmer — BEIDE Systeme stillegen: Woodpeckers Waechter liest
+              # dieselbe Datei und steigt bei allem ausser 'woodpecker' aus. Ein Repo, in dem
+              # nichts mehr deployt und alles gruen ist, ist genau der Zustand, den die
+              # skip-pruefung-Historie (Karte 433/445) teuer gelernt hat.
+              echo "::error title=.ci-engine unlesbar::Inhalt '$MOTOR' ist weder 'github' noch 'woodpecker'. Die Datei enthaelt genau EIN Wort. Solange sie falsch ist, deployt WEDER GitHub NOCH Woodpecker — deshalb bricht dieser Lauf ab statt zu raten."
+              exit 1
+              ;;
+          esac
   # ── Namespace-Leitplanke (Karte 600/606/642) ───────────────────
   # Bis zum 10.08.2026 zog genau DIESE Pipeline ihre Build-Config aus
   # `daniel-marthaler/plaintext-config` und fuenf POMs ihre Java-Artefakte aus
@@ -173,6 +284,19 @@ jobs:
   # gehen ins Inklusivkontingent des Free-Plans (2000 min/Monat); bei ~1 min je Lauf bleibt
   # das auch mit allen Repos zusammen weit darunter. publish-root-pin laeuft aus demselben
   # Grund schon laenger auf GitHub-Runnern.
+  #
+  # BEWUSST OHNE `.ci-engine`-WAECHTER (30.08.2026). Die anderen Jobs sind gesperrt, wenn
+  # Woodpecker faehrt; dieser nicht — und das ist Absicht, nicht Vergesslichkeit:
+  #   * Die Woodpecker-Pipeline hat KEINE Entsprechung fuer diesen Lint. Waere er mitgesperrt,
+  #     verschwaende die Namespace-Leitplanke genau in dem Zeitraum, in dem am Build-System
+  #     geschraubt wird — also dann, wenn ein versehentlich zurueckgedrehter Namespace am
+  #     wenigsten auffiele.
+  #   * Er kostet nichts, was knapp ist: ubuntu-latest, zwei Checkouts, ein grep. Kein
+  #     NAS-Runner, kein Deploy-Slot, keine Testdatenbank.
+  #   * Er blockiert nichts (haengt an keinem anderen Job) und kann deshalb auch keinen
+  #     Woodpecker-Deploy aufhalten — er faerbt nur den GitHub-Lauf.
+  # Folge: ein Repo im Woodpecker-Modus hat weiterhin einen GitHub-Lauf je Push, der genau
+  # diesen einen Job ausfuehrt. Das ist der sichtbare Preis dieser Entscheidung.
   namespace-lint:
     name: Namespace-Lint
     runs-on: ubuntu-latest
@@ -203,7 +327,8 @@ jobs:
     name: Build & Test
     # M1 (build once): der Deliverable-Build läuft jetzt im deploy-Job (inkl. Unit-Tests).
     # Der separate ci-Build ist nur noch für PRs (ci-only) und den Sonar-Schedule nötig.
-    if: inputs.deploy-target == 'ci-only' || inputs.sonar-enabled
+    needs: ci-motor
+    if: needs.ci-motor.outputs.zustaendig == 'true' && (inputs.deploy-target == 'ci-only' || inputs.sonar-enabled)
     runs-on: ${{ fromJSON(inputs.runner) }}
     # 17.08.2026 (Karte 906): die concurrency-Gruppe `testdb-<project>` ist hier ENTFERNT.
     #
@@ -450,11 +575,17 @@ jobs:
   # ── SonarQube Analysis ──────────────────────────────────────────
   sonar:
     name: SonarQube Analysis
-    needs: ci
+    needs: [ci-motor, ci]
     # !cancelled(): auch bei rotem Build & Test laufen — sonst Catch-22: Gate BREACHED/ERROR
     # → QualityGateTest lässt Build & Test scheitern → die Analyse (die das Gate wieder
     # zurücksetzen würde) wird geskippt → Gate bleibt für immer rot.
-    if: inputs.sonar-enabled && !cancelled()
+    #
+    # Der `.ci-engine`-Waechter muss hier AUSDRUECKLICH stehen und nicht nur ueber `needs`
+    # wirken: `!cancelled()` ist auch dann wahr, wenn `ci` uebersprungen wurde. Ohne die erste
+    # Bedingung liefe die Analyse also genau in dem Fall weiter, in dem Woodpecker faehrt —
+    # zwei Scanner auf demselben Sonar-Projekt, und der Rueckcommit von
+    # quality/quality-gate.properties von beiden Seiten.
+    if: needs.ci-motor.outputs.zustaendig == 'true' && inputs.sonar-enabled && !cancelled()
     runs-on: ${{ fromJSON(inputs.runner) }}
     # Ein Lauf ohne Build-Cache dauert rund 25 Minuten (gemessen an allen vier Projekten am
     # 31.07.2026), die Voll-Analyse mit OWASP-CVE etwas länger. 90 Minuten lassen dafür Luft und
@@ -972,7 +1103,13 @@ jobs:
       cancel-in-progress: false
     # M1 (build once): kein separater ci-Build mehr — dieser Job ist der EINZIGE Build
     # (Compile + Unit-Tests + Package) und deployt anschliessend.
-    if: inputs.deploy-target != 'ci-only'
+    #
+    # `.ci-engine`-Waechter (30.08.2026): DER Job, um dessentwillen es den Waechter gibt. Er
+    # rechnet die Versionsnummer, setzt Tag und Release-Commit und faehrt den Blue-Green-Deploy.
+    # Zweimal gleichzeitig — einmal von hier, einmal von Woodpecker — waere zweimal derselbe
+    # Release mit zwei verschiedenen Nummern.
+    needs: ci-motor
+    if: needs.ci-motor.outputs.zustaendig == 'true' && inputs.deploy-target != 'ci-only'
     runs-on: ${{ fromJSON(inputs.runner) }}
     permissions:
       contents: write
@@ -1253,6 +1390,10 @@ jobs:
   # ── Verify DEV ─────────────────────────────────────────────────
   verify-dev:
     name: Verify DEV
+    # Kein eigener `.ci-engine`-Waechter noetig: `needs: deploy` genuegt. Anders als bei `sonar`
+    # steht in der Bedingung unten weder `always()` noch `!cancelled()` — ein uebersprungener
+    # `deploy` ueberspringt diesen Job also mit. (Wer hier je ein `always()` einbaut, muss den
+    # Waechter nachziehen, sonst pollt Woodpeckers Deploy-Ergebnis von GitHub aus mit.)
     needs: deploy
     # Karte 776: `release-only` deployt bewusst keinen Container — es gibt dann auch kein DEV
     # zu verifizieren. Ohne diesen Ausschluss wuerde der Verify-Schritt eine stillgelegte
@@ -1397,6 +1538,7 @@ jobs:
   verify-prod:
     name: Verify PROD
     # Unabhaengig von Verify DEV: ein flaky DEV-Verify darf die PROD-Verifikation nicht ueberspringen.
+    # Kein eigener `.ci-engine`-Waechter noetig — Begruendung wie bei verify-dev.
     needs: deploy
     if: inputs.deploy-target == 'release-all' && inputs.prod-url != ''
     # Massnahme 3, Rest (29.08.2026): `verify-prod-runner` erlaubt dem Aufrufer, NUR diesen Job
