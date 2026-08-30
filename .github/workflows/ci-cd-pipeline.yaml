@@ -203,6 +203,35 @@ jobs:
           fi
           echo "motor=$MOTOR" >> "$GITHUB_OUTPUT"
 
+          # AUSNAHME: geplante Laeufe bleiben IMMER hier, unabhaengig vom Motor.
+          #
+          # Ueber `schedule` laufen der naechtliche Test-Build und -- mittwochs -- die
+          # Voll-Analyse mit SonarQube, OWASP-CVE-Scan und SpotBugs. Woodpecker kann sie
+          # nicht uebernehmen: der CVE-Scan braucht einen persistenten NVD-Bestand, der
+          # Agent haengt nur `woodpecker-m2` ein, und ein untrusted Repo darf sich kein
+          # eigenes Volume mounten. Ohne Bestand laedt dependency-check jedes Mal die
+          # komplette NVD (~96 min), laeuft ins Timeout und schreibt KEINEN Report -- und
+          # quality-gate.py wertet einen fehlenden Report als "kein Breach".
+          #
+          # Das Ergebnis waere ein gruenes Gate, weil nichts gemessen wurde. Genau dieser
+          # Zustand hat schon mehrfach Zeit gekostet (Karten 365/420/896/925). Ein
+          # Motor-Wechsel darf die Sicherheitspruefung nicht stilllegen, deshalb faehrt sie
+          # weiter auf GitHub Actions -- auch wenn Push und Pull Request nach Woodpecker
+          # gehen. Die beiden stossen sich nicht: Nightly 03:00, Voll-Analyse Mittwoch
+          # 04:00 UTC, und deploy-target ist dabei ci-only.
+          if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]; then
+            echo "zustaendig=true" >> "$GITHUB_OUTPUT"
+            echo "CI-Motor: $MOTOR -- geplanter Lauf, bleibt bei GitHub Actions (Sicherheitspruefung)."
+            {
+              echo "## CI-Motor: \`$MOTOR\` -- geplanter Lauf"
+              echo ""
+              echo "Nightly und Voll-Analyse laufen **immer** hier, auch im Woodpecker-Modus:"
+              echo "der CVE-Scan braucht einen persistenten NVD-Bestand, den der Woodpecker-Agent"
+              echo "nicht hat. Ein fehlender Report ginge als kein Breach durch."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           case "$MOTOR" in
             github)
               echo "zustaendig=true" >> "$GITHUB_OUTPUT"
