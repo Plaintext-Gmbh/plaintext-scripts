@@ -170,6 +170,50 @@ hochgezaehlt wird erst beim naechsten Release (`compute_release_versions`, bewac
 Zustandsbericht 29.08.2026 — ein GitHub-Release mit generierten Notes (`gh release create
 --generate-notes`, best-effort: ohne `gh` oder ohne Token nur ein Hinweis, nie ein Abbruch).
 
+### Release-Lock — eine Nummer wird genau einmal vergeben
+
+Bis zur Umstellung auf Woodpecker (30.08.2026) sorgte die GitHub-Concurrency-Gruppe
+`deploy-<projekt>` dafuer, dass je Repo hoechstens ein Release-Lauf gleichzeitig faehrt.
+**Woodpecker kennt keine Concurrency-Gruppen.** Ohne Ersatz rechnen zwei gleichzeitig
+gestartete Laeufe aus derselben POM-Version dieselbe neue Nummer, bestehen beide die
+Kollisionspruefung gegen das Release-Repo (die Nummer ist ja noch nirgends veroeffentlicht),
+bauen beide — und erst der `git push` des zweiten wird abgelehnt. Bei plaintext-root sind das
+24 Module und rund 20 Minuten Build fuer nichts.
+
+Der Ersatz ist ein **Release-Lock auf dem NAS**, derselbe Mechanismus wie fuer
+`staging`/`int`/`prod` (atomares `mkdir` ueber SSH, Besitzer-Token mit Zeitstempel,
+`DEPLOY_LOCK_WAIT` = 1800 s Wartezeit, `DEPLOY_LOCK_STALE` = 3600 s fuer verwaiste Locks).
+Er liegt auf dem NAS, weil sich dort — und nur dort — **alle** Laeufe treffen: Woodpecker,
+GitHub Actions, `./build 3` auf dem Mac, Nacht-Runner. Der Name ist
+`.deploy-lock-release-<projekt>` unter `DEPLOY_PATH`, also einer je Repo: root und app
+blockieren sich nicht gegenseitig.
+
+- **Gesperrt ist genau** "Nummer rechnen → Nummer beanspruchen": nachziehen, rechnen,
+  Kollisionspruefung, `mvn versions:set`, Commit, Tag, Push von Commit und Tag
+  (`release_nummer_beanspruchen`). Danach wird sofort freigegeben — **der Build laeuft NICHT
+  unter dem Lock** (`do_release_bauen_und_veroeffentlichen`). Sonst haette ein wartender Lauf
+  bei root die 1800 s Wartezeit gerissen, und aus der geloesten Race waere ein neuer
+  Fehlerfall geworden.
+- **Nach dem Warten wird der Stand neu gezogen** (`release_stand_nachziehen`: `git fetch`,
+  fast-forward, `init_versions`). `CURRENT_VERSION` wird beim Start des Wrappers gesetzt; wer
+  eine halbe Stunde gewartet hat, wuerde sonst dieselbe Nummer noch einmal rechnen — ein Lock
+  allein verschiebt die Race nur.
+- **Freigabe auf jedem Pfad**: regulaere Fehler ueber das Muster
+  `nehmen → gesperrter Abschnitt → Rueckgabewert → freigeben` (wie
+  `deploy_to_prod`/`deploy_to_prod_gesperrt`), harte Abbrueche (Ctrl-C, `kill`) ueber einen
+  INT/TERM-Trap. Ein `kill -9` faengt `DEPLOY_LOCK_STALE` ab.
+- **Ohne NAS kein Release.** Der Lock haengt an SSH zum NAS; fuer `staging`/`int`/`prod` ist
+  das laengst Voraussetzung, in der CI richtet der Deploy-Job SSH ohnehin ein. Ein reiner
+  `release-only`-Lauf (plaintext-root) kam bisher ohne aus und scheitert jetzt mit einer
+  Meldung, die den Grund nennt. Bewusster Ausweg, laut und nur von Hand:
+  `RELEASE_LOCK_OHNE_NAS=true ./build 3` — dann laeuft der Release ohne Lock, und zwei
+  gleichzeitige Laeufe koennen wieder dieselbe Nummer rechnen. Ein stiller Rueckfall waere
+  keine Loesung: er sieht aus wie ein Schutz und ist keiner.
+
+Nachgestellt (echte Git-Repos, echtes `mkdir`, `ssh` als Attrappe, Lock in einem
+Wegwerf-Verzeichnis): `./test-release-lock.sh` — Race mit und ohne Lock, verwaister Lock,
+fremder frischer Lock, Fehlerfall, SIGTERM, NAS-Ausfall.
+
 ### Lokal-Release (zweiter Weg neben CI/CD)
 
 `./build local-release [1|2|3] [prod|dev-prod]` (plaintext-app: `./build 8`) macht den kompletten
@@ -546,7 +590,7 @@ Lokal: `./quality/shellcheck.sh` (mit `brew install shellcheck`; ohne shellcheck
 (`.github/actionlint.yaml` kennt die NAS-Runner-Labels). Die Testskripte (`test-*.sh`, ohne
 Netz, ohne Attrappen fuer curl — Repo-Attrappen liegen als `file://` im Dateisystem):
 `./test-versionsschritt.sh`, `./test-release-reihenfolge.sh`, `./test-lokal-release.sh`,
-`./test-root-autobump.sh`, `./test-backup-prod-db.sh tui-build-logic.sh`,
+`./test-release-lock.sh`, `./test-root-autobump.sh`, `./test-backup-prod-db.sh tui-build-logic.sh`,
 `./test-pushover.sh`, `./test-pushover-eskalation.sh`.
 
 ## Voice-to-Claude
@@ -667,6 +711,7 @@ A **Glass sound** plays whenever Claude Code finishes a response. Detection work
 | `tui-build-logic.sh` | Build, release, deploy, and version management logic |
 | `test-lokal-release.sh` | Guards for the release path (native `[skip ci]` subject, preflight order, rollback, release notes) |
 | `test-root-autobump.sh` | Vollstaendigkeitspruefung (Massnahme 4): halbes Release, komplett, Parent fehlt, Ausnahmen, Selbstkontrolle |
+| `test-release-lock.sh` | Nachgestellte Race der Versionsvergabe: zwei parallele Laeufe mit und ohne Release-Lock, verwaister Lock, Fehlerfall, SIGTERM, NAS-Ausfall |
 | `ci/root-autobump.sh` | Kanonisches Auto-Bump-Skript fuer die App-Repos (siehe oben) |
 | `ci/reposilite-release.sh` | Bibliothek: ist ein Multi-Modul-Release im Maven-Repo vollstaendig? (Auto-Bump + Release-Selbstkontrolle) |
 | `quality/shellcheck.sh` | `bash -n` + shellcheck ueber alle Bash-Skripte (CI: `shellcheck.yaml`) |

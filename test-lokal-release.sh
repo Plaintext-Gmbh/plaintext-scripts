@@ -42,6 +42,11 @@ zeile_in() {
 }
 zeile_in_lokal() { zeile_in do_local_release "$1"; }
 koerper() { awk "/^$1\\(\\) \\{/,/^\\}/" "$SKRIPT"; }
+# Der Release-Pfad steckt seit dem Release-Lock (30.08.2026) in DREI Funktionen: do_release
+# (Rahmen + Lock), release_nummer_beanspruchen (der gesperrte Abschnitt: rechnen, versions:set,
+# Commit, Tag, Push) und do_release_bauen_und_veroeffentlichen (Build, mvn deploy, SNAPSHOT).
+# Sicherungen, die "irgendwo im Release-Pfad" pruefen, muessen alle drei sehen.
+release_pfad() { koerper do_release; koerper release_nummer_beanspruchen; koerper do_release_bauen_und_veroeffentlichen; }
 
 echo "Release-Pfad: Sicherungen in $SKRIPT"
 
@@ -54,10 +59,10 @@ pruefe "Release-Commit-Betreff kennt RELEASE_COMMIT_SUFFIX" \
 pruefe "do_release: Default ' [skip ci]' (nativ, mit Leerzeichen)" "ja" \
     "$(koerper do_release | grep -q 'RELEASE_COMMIT_SUFFIX= \[skip ci\]' && echo ja || echo nein)"
 pruefe "SNAPSHOT-Commit traegt natives [skip ci]" "ja" \
-    "$(koerper do_release | grep -q 'Prepare next development iteration .*\[skip ci\]"' && echo ja || echo nein)"
+    "$(release_pfad | grep -q 'Prepare next development iteration .*\[skip ci\]"' && echo ja || echo nein)"
 # Kommentare duerfen die alte Form erklaeren; die Commit-Erzeugung nicht. (lokal_release_ci_frei
 # kennt beide Formen absichtlich — deshalb nur die beiden Release-Funktionen.)
-BINDESTRICH=$({ koerper do_release; koerper do_local_release; } | grep -v '^\s*#' | grep -c 'skip-ci' || true)
+BINDESTRICH=$({ release_pfad; koerper do_local_release; } | grep -v '^\s*#' | grep -c 'skip-ci' || true)
 pruefe "kein [skip-ci] (Bindestrich) mehr in do_release/do_local_release" "0" "$BINDESTRICH"
 
 # 2. Der Default liegt NICHT im CI-Guard von do_release (sonst haette die CI keinen Marker)
@@ -96,10 +101,17 @@ pruefe "do_local_release setzt keinen eigenen Suffix" "0" \
 # 5. lokal_vorflug prueft den Arbeitsbaum; do_release ruft ihn ausserhalb der CI VOR dem Versionsschritt
 pruefe "lokal_vorflug prueft den Arbeitsbaum" "ja" \
     "$(koerper lokal_vorflug | grep -q 'git status --porcelain' && echo ja || echo nein)"
-Z_R_VORFLUG=$(zeile_in do_release 'lokal_vorflug')
-Z_R_SET=$(zeile_in do_release 'mvn versions:set')
-pruefe "do_release: Vorflug VOR versions:set" "ja" \
+# Der Vorflug steht zweimal im Pfad: in do_release VOR dem Release-Lock (fail fast, damit ein
+# aussichtsloser Lauf niemanden warten laesst) und in release_nummer_beanspruchen NACH dem Lock
+# (frischer Stand, sonst rechnet der Wartende die veraltete Nummer). Massgeblich fuer diese
+# Sicherung ist der zweite: er muss vor `mvn versions:set` liegen.
+Z_R_VORFLUG=$(zeile_in release_nummer_beanspruchen 'lokal_vorflug')
+Z_R_SET=$(zeile_in release_nummer_beanspruchen 'mvn versions:set')
+pruefe "gesperrter Abschnitt: Vorflug VOR versions:set" "ja" \
     "$([ -n "${Z_R_VORFLUG:-}" ] && [ -n "${Z_R_SET:-}" ] && [ "$Z_R_VORFLUG" -lt "$Z_R_SET" ] && echo ja || echo nein)"
+pruefe "do_release prueft den Vorflug ausserdem VOR dem Release-Lock" "ja" \
+    "$(Z1=$(zeile_in do_release 'lokal_vorflug'); Z2=$(zeile_in do_release 'release_lock_nehmen'); \
+       [ -n "${Z1:-}" ] && [ -n "${Z2:-}" ] && [ "$Z1" -lt "$Z2" ] && echo ja || echo nein)"
 for fn in deploy_to_dev deploy_to_prod; do
     pruefe "$fn: lokal CI-Rollout-Sperre" "ja" \
         "$(koerper "$fn" | grep -q 'lokal_release_ci_frei' && echo ja || echo nein)"

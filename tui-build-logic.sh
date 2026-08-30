@@ -363,6 +363,7 @@ restore_prod_db() {
 # (abgebrochener Lauf) werden nach DEPLOY_LOCK_STALE Sekunden uebernommen.
 DEPLOY_LOCK_WAIT="${DEPLOY_LOCK_WAIT:-1800}"      # max. Wartezeit auf einen fremden Lauf (s)
 DEPLOY_LOCK_STALE="${DEPLOY_LOCK_STALE:-3600}"    # aelter als das = verwaist
+DEPLOY_LOCK_INTERVALL="${DEPLOY_LOCK_INTERVALL:-15}"  # Abstand zweier Versuche (s); nur Tests setzen das kleiner
 DEPLOY_LOCK_TOKEN="$(hostname -s 2>/dev/null || hostname)-$$-$(date +%s)"
 DEPLOY_LOCK_HELD=""
 
@@ -404,8 +405,8 @@ deploy_lock_acquire() {
         if [ "$GEWARTET" -eq 0 ]; then
             echo -e "${YELLOW}⏳ Deploy-Lock ${ENV_NAME} belegt von: ${OWNER} — warte (max ${DEPLOY_LOCK_WAIT}s)...${NC}"
         fi
-        sleep 15
-        GEWARTET=$((GEWARTET + 15))
+        sleep "$DEPLOY_LOCK_INTERVALL"
+        GEWARTET=$((GEWARTET + DEPLOY_LOCK_INTERVALL))
     done
 }
 
@@ -421,6 +422,80 @@ deploy_lock_release() {
     local REST="" W
     for W in ${DEPLOY_LOCK_HELD}; do [ "$W" != "$ENV_NAME" ] && REST="${REST} ${W}"; done
     DEPLOY_LOCK_HELD="$REST"
+}
+
+# ── Release-Lock: die Versionsnummer wird genau einmal vergeben (30.08.2026) ─────────────
+#
+# WAS FEHLTE. Bis zur Umstellung auf Woodpecker deckte die GitHub-Concurrency-Gruppe
+# (`group: deploy-<projekt>`) ab, dass je Repo hoechstens ein Release-Lauf gleichzeitig faehrt.
+# Woodpecker kennt keine Concurrency-Gruppen. Ohne Ersatz rechnen zwei gleichzeitig gestartete
+# Laeufe aus derselben POM-Version DIESELBE neue Nummer, bestehen BEIDE die Kollisionspruefung
+# gegen das Release-Repo (die Nummer ist ja noch nirgends veroeffentlicht), bauen BEIDE — und
+# erst der `git push` des zweiten wird abgelehnt. Bei plaintext-root sind das 24 Module und rund
+# 20 Minuten Build fuer nichts. Kaputt ist danach nichts, verschwendet aber schon.
+#
+# DER LOCK LIEGT AUF DEM NAS, nicht in der CI: dort — und nur dort — treffen sich alle Laeufe,
+# die es geben kann (Woodpecker, GitHub, `./build 3` auf dem Mac, Nacht-Runner). Ein Lock in der
+# CI kennt den lokalen Lauf nicht, und umgekehrt. Der Mechanismus ist derselbe wie fuer
+# staging/int/prod (Massnahme 2, 29.08.2026): atomares `mkdir` ueber SSH, Besitzer-Token mit
+# Zeitstempel, DEPLOY_LOCK_WAIT Wartezeit, DEPLOY_LOCK_STALE fuer verwaiste Locks.
+#
+# EIGENER LOCK JE REPO. `deploy_lock_pfad` haengt den Namen an DEPLOY_PATH, und DEPLOY_PATH ist
+# projektspezifisch (/volume1/docker/plaintext-<projekt>). Der Name traegt IMAGE_NAME trotzdem
+# mit: dann steht im `ls` auf dem NAS, wer den Lock haelt, und zwei Projekte mit (versehentlich)
+# gleichem DEPLOY_PATH blockieren sich immer noch nicht gegenseitig. Kollisionsfrei gegenueber
+# den bestehenden Namen staging/int/prod, weil "release-" davorsteht.
+RELEASE_LOCK_NAME="${RELEASE_LOCK_NAME:-release-${IMAGE_NAME}}"
+
+# Abbruch (Ctrl-C, kill) waehrend der Versionsvergabe: erst den Lock loesen, dann sterben.
+# Ohne das blockiert ein abgebrochener Lauf jeden weiteren Release, bis DEPLOY_LOCK_STALE
+# (eine Stunde) abgelaufen ist. Bewusst NUR auf INT/TERM: den EXIT-Trap belegen die
+# build-Wrapper der Apps selbst (`trap 'restart_twingate_if_needed' EXIT`), den darf diese
+# Bibliothek nicht ueberschreiben. Alle regulaeren Fehlerpfade gibt statt dessen der
+# Aufrufer frei (do_release: acquire -> release_nummer_beanspruchen -> release, wie
+# deploy_to_prod/deploy_to_prod_gesperrt).
+release_lock_abbruch() {
+    echo -e "${RED}✗ Abbruch waehrend der Versionsvergabe — Release-Lock wird freigegeben.${NC}" >&2
+    release_lock_freigeben
+    exit 130
+}
+
+# 0 = weiter (Lock gehalten oder bewusst uebergangen), 1 = Abbruch.
+release_lock_nehmen() {
+    trap 'release_lock_abbruch' INT TERM
+    # Der Lock haengt an SSH zum NAS. Fuer staging/int/prod ist das laengst Voraussetzung; ein
+    # reiner release-only-Lauf (plaintext-root) kam bisher ohne aus. ensure_nas_reachable statt
+    # direkt loszu-sshen, weil es ein ConnectTimeout hat und Twingate beruecksichtigt — sonst
+    # haengt jeder der ssh-Aufrufe im Lock bis zum TCP-Timeout.
+    if ! ensure_nas_reachable; then
+        if [ "${RELEASE_LOCK_OHNE_NAS:-false}" == "true" ]; then
+            echo -e "${RED}⚠ RELEASE_LOCK_OHNE_NAS=true: Release laeuft OHNE Release-Lock weiter.${NC}"
+            echo -e "${RED}  Ab hier ist NICHT ausgeschlossen, dass ein zweiter Lauf dieselbe${NC}"
+            echo -e "${RED}  Versionsnummer rechnet. Nur benutzen, wenn sicher kein zweiter Lauf faehrt.${NC}"
+            trap - INT TERM
+            return 0
+        fi
+        echo -e "${RED}✗ NAS nicht erreichbar — ohne NAS kein Release.${NC}"
+        echo -e "${RED}  Der Release-Lock liegt auf dem NAS; ohne ihn koennten zwei Laeufe dieselbe${NC}"
+        echo -e "${RED}  Versionsnummer vergeben. Das ist der einzige Ort, an dem sich CI und lokale${NC}"
+        echo -e "${RED}  Laeufe treffen — ein lokaler Ersatz waere ein stiller Rueckfall.${NC}"
+        echo -e "${YELLOW}  Bewusst ohne Lock (nur wenn sicher kein zweiter Lauf faehrt):${NC}"
+        echo -e "${YELLOW}    RELEASE_LOCK_OHNE_NAS=true ./build ...${NC}"
+        trap - INT TERM
+        return 1
+    fi
+    if ! deploy_lock_acquire "$RELEASE_LOCK_NAME"; then
+        trap - INT TERM
+        return 1
+    fi
+    return 0
+}
+
+release_lock_freigeben() {
+    trap - INT TERM
+    # Idempotent: haelt dieser Lauf den Lock nicht (RELEASE_LOCK_OHNE_NAS, oder schon
+    # freigegeben), tut deploy_lock_release nichts.
+    deploy_lock_release "$RELEASE_LOCK_NAME"
 }
 
 # ── Deploy-Backup nur bei anstehender Migration (Massnahme 3, 29.08.2026) ────────────────
@@ -1822,6 +1897,9 @@ do_release() {
     # Lokaler Lauf (nicht CI): derselbe Vorflug wie beim Lokal-Release (./build 8) — master,
     # Arbeitsbaum, origin nachgezogen, kein CI-Rollout aktiv, Maven-Zugangsdaten (Karte:
     # Lokal-Release, 29.08.2026). In der CI (CI=true) prueft das die Pipeline selbst.
+    # Bewusst VOR dem Release-Lock: ein Lauf, der an einem falschen Branch oder einem schmutzigen
+    # Arbeitsbaum scheitert, soll das sofort merken und keinen anderen Lauf warten lassen. Der
+    # Vorflug ist idempotent und laeuft unter dem Lock ein zweites Mal (frischer Stand).
     if [ "${CI:-}" != "true" ]; then
         if ! lokal_vorflug; then
             return 1
@@ -1844,6 +1922,76 @@ do_release() {
     # verify-dev/prod und e2e-smoke laufen im Lauf des MERGE-Commits, nicht in einem eigenen.
     # Vorbelegt, nicht erzwungen: wer den Marker bewusst weglassen will, setzt RELEASE_COMMIT_SUFFIX="".
     : "${RELEASE_COMMIT_SUFFIX= [skip ci]}"
+
+    # ── Versionsvergabe unter dem Release-Lock (30.08.2026) ────────────────────────────────
+    #
+    # WO DER LOCK ANFAENGT UND WO ER AUFHOERT. Er umschliesst genau den Abschnitt "Nummer
+    # rechnen -> Nummer beanspruchen": nachziehen, rechnen, Kollisionspruefung, versions:set,
+    # Commit, Tag, Push von Commit und Tag. Mit dem gelungenen Push gehoert die Nummer diesem
+    # Lauf — jeder andere Lauf, der danach nachzieht, sieht sie und rechnet die naechste.
+    #
+    # WARUM NICHT BIS NACH `mvn deploy`. Drei Gruende:
+    #   1. Nach dem Push teilen sich zwei Laeufe nichts Veraenderliches mehr. Artefakt, Tag und
+    #      Image tragen die Versionsnummer im Namen und sind damit verschieden; die geteilten
+    #      Dinge, die spaeter kommen (Staging-Jar, Blue-Green-Slots, DB), haben ihre EIGENEN
+    #      Locks (staging/int/prod, Massnahme 2).
+    #   2. Der Build ist bei plaintext-root 24 Module und rund 20 Minuten. Ein Lock, dessen
+    #      Haltezeit an DEPLOY_LOCK_WAIT (1800 s) heranreicht, laesst den Wartenden in den
+    #      Abbruch laufen — aus einer geloesten Race wuerde ein neuer Fehlerfall. Die
+    #      Haltezeit hier liegt bei versions:set + commit + push, also unter einer Minute.
+    #   3. Bleibt ein Restfenster: der SNAPSHOT-Push ganz am Ende kann abgelehnt werden, weil
+    #      der zweite Lauf master inzwischen bewegt hat. Das ist seit Karte 518 ausdruecklich
+    #      eine WARNUNG und kein Fehler — der Release selbst ist dann vollstaendig, es fehlt
+    #      nur die Vorbereitung des naechsten SNAPSHOT, und der naechste Lauf rechnet trotzdem
+    #      richtig weiter (er rechnet ab der Release-Nummer auf master).
+    #
+    # FREIGABE AUF JEDEM PFAD. Muster wie deploy_to_prod/deploy_to_prod_gesperrt: der gesperrte
+    # Abschnitt steckt in einer eigenen Funktion, deren Rueckgabewert erst NACH der Freigabe
+    # ausgewertet wird. Harte Abbrueche (Ctrl-C, kill) faengt der INT/TERM-Trap in
+    # release_lock_nehmen ab; ein kill -9 bleibt bei DEPLOY_LOCK_STALE.
+    if ! release_lock_nehmen; then
+        return 1
+    fi
+    release_nummer_beanspruchen
+    local RC_NUMMER=$?
+    release_lock_freigeben
+    if [ "$RC_NUMMER" -ne 0 ]; then
+        return 1
+    fi
+
+    # GitHub-Release mit generierten Notes zum eben gepushten Tag — best-effort, nie fatal
+    # (Zustandsbericht 29.08.2026, Paket S; Details an der Funktion).
+    release_notes_erzeugen "${NEW_VERSION}"
+
+    do_release_bauen_und_veroeffentlichen
+}
+
+# ── Der gesperrte Abschnitt: Nummer rechnen und Nummer beanspruchen ─────────────────────
+# Laeuft AUSSCHLIESSLICH unter dem Release-Lock (siehe do_release). Setzt die globalen
+# NEW_VERSION / NEXT_SNAPSHOT_VERSION — deshalb bewusst kein `local` und keine Subshell.
+release_nummer_beanspruchen() {
+    # NACH dem Erwerb des Locks den Stand neu ziehen. CURRENT_VERSION wurde vom build-Wrapper
+    # beim Start gesetzt (init_versions) — wer hier eine halbe Stunde auf einen fremden Lauf
+    # gewartet hat, haelt eine veraltete Nummer in der Hand und wuerde dieselbe Version noch
+    # einmal rechnen. Der Lock allein verschiebt die Race also nur; erst das Nachziehen
+    # schliesst sie. Im lokalen Lauf uebernimmt das der (idempotente) Vorflug, der zusaetzlich
+    # noch einmal prueft, ob inzwischen ein CI-Rollout angelaufen ist; in der CI genuegt das
+    # Nachziehen selbst (Branch, Arbeitsbaum und CI-Freiheit prueft dort die Pipeline).
+    if [ "${CI:-}" == "true" ]; then
+        # Zweig NICHT blind auf master setzen: die Pipeline checkt den Zweig aus, der den Lauf
+        # ausgeloest hat. Ein falscher Zweigname liesse den Vergleich mit origin/<zweig> ins
+        # Leere laufen und meldete faelschlich "divergiert".
+        local ZWEIG="${RELEASE_BRANCH:-}"
+        [ -z "$ZWEIG" ] && ZWEIG=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+        { [ -z "$ZWEIG" ] || [ "$ZWEIG" = "HEAD" ]; } && ZWEIG="master"
+        if ! release_stand_nachziehen "$ZWEIG"; then
+            return 1
+        fi
+    else
+        if ! lokal_vorflug; then
+            return 1
+        fi
+    fi
 
     read -r NEW_VERSION NEXT_SNAPSHOT_VERSION <<< "$(compute_release_versions "$CURRENT_VERSION" "$INCREMENT_TYPE")"
     echo -e "${BLUE}New release version: ${GREEN}${NEW_VERSION}${NC}"
@@ -1934,10 +2082,16 @@ Includes:
         return 1
     fi
 
-    # GitHub-Release mit generierten Notes zum eben gepushten Tag — best-effort, nie fatal
-    # (Zustandsbericht 29.08.2026, Paket S; Details an der Funktion).
-    release_notes_erzeugen "${NEW_VERSION}"
+    # ENDE DES GESPERRTEN ABSCHNITTS. Commit und Tag sind auf origin — ab hier sieht jeder
+    # andere Lauf die Nummer und rechnet die naechste. Der Lock wird vom Aufrufer (do_release)
+    # unmittelbar nach dieser Funktion freigegeben, VOR dem Build.
+    return 0
+}
 
+# ── Alles nach der Versionsvergabe: Build, Veroeffentlichung, SNAPSHOT, Deploy ──────────
+# Laeuft OHNE Release-Lock (Begruendung in do_release). Arbeitet auf den globalen
+# NEW_VERSION / NEXT_SNAPSHOT_VERSION, die release_nummer_beanspruchen gesetzt hat.
+do_release_bauen_und_veroeffentlichen() {
     # M1 (build once): die CI gibt MVN_TEST_FLAG (-DskipITs) explizit per Env vor → Unit-Tests im
     # EINZIGEN Build; lokal (ohne diese Vorgabe) ohne Tests (Dev-Rechner/Nacht-Runner ohne Test-DB).
     local TEST_FLAG="${MVN_TEST_FLAG:--DskipTests}"
@@ -2115,6 +2269,9 @@ do_local_release() {
     # ── Plan ─────────────────────────────────────────────────────────────────
     echo ""
     echo -e "${BLUE}Plan:${NC}"
+    # Vorschau, keine Zusage: muss do_release erst auf den Release-Lock warten (fremder Lauf),
+    # zieht es danach den Stand nach und rechnet die dann naechste Nummer. Massgeblich ist
+    # NEW_VERSION nach do_release — darauf pruefen die Tag- und Deploy-Schritte unten.
     echo -e "  Version:   ${CURRENT_VERSION} -> ${GREEN}${PLAN_NEU}${NC} (Tag ${PLAN_NEU}, Commit mit [skip ci])"
     echo -e "  Build:     mvn clean $([ "${MVN_RELEASE_DEPLOY:-false}" == "true" ] && echo deploy || echo package) ${MVN_TEST_FLAG:--DskipTests}"
     echo -e "  Transport: $([ "${JAR_VOLUME_DEPLOY}" == "true" ] && echo "Jar -> NAS-Staging (M3)" || echo "Image -> NAS-Registry")"
@@ -2167,40 +2324,31 @@ do_local_release() {
     return 0
 }
 
-# Gemeinsamer Vorflug jedes LOKALEN Release-Laufs (do_release ausserhalb der CI, do_local_release):
-#   1. Git: Release-Branch, sauberer Arbeitsbaum, origin per fast-forward nachgezogen.
-#      do_release macht `git add -A` — alles Ungespeicherte ginge sonst in den Release. Wer das
-#      bewusst will (Nacht-Runner, Hotfix aus dem Arbeitsbaum): LOKAL_RELEASE_MIT_AENDERUNGEN=true.
-#   2. CI: kein Rollout auf dem Release-Branch aktiv (gleiche Slots, gleiches Staging-Jar).
-#   3. Maven: Zugangsdaten fuers Release-Repo, sonst nur mvn package.
-# Idempotent: ein zweiter Aufruf im selben Lauf kostet nur ein fetch.
-lokal_vorflug() {
+# ── Stand von origin nachziehen und die Versionen neu lesen ────────────────────────────
+# Herausgeloest aus lokal_vorflug (30.08.2026), weil do_release es ein zweites Mal braucht:
+# NACH dem Warten auf den Release-Lock. Wer 20 Minuten auf einen fremden Lauf gewartet hat,
+# haelt eine veraltete CURRENT_VERSION in der Hand und wuerde exakt dieselbe Nummer noch einmal
+# rechnen — der Lock allein verschoebe die Race nur. Deshalb: erst Lock, dann fetch, dann
+# CURRENT_VERSION neu, dann rechnen.
+# Bewusst nur fast-forward: ein Release baut den Stand von origin, nie einen Merge und nie eine
+# Umschreibung der Historie. Divergiert der lokale Zweig, bricht der Lauf ab.
+# $1 = Zweig (Default RELEASE_BRANCH bzw. master).
+release_stand_nachziehen() {
     local BRANCH="${1:-${RELEASE_BRANCH:-master}}"
 
-    local AKTUELLER_BRANCH
-    AKTUELLER_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-    if [ "$AKTUELLER_BRANCH" != "$BRANCH" ]; then
-        echo -e "${RED}✗ Lokaler Release nur auf '${BRANCH}' (aktuell: '${AKTUELLER_BRANCH}').${NC}"
-        echo -e "${YELLOW}  Anderer Release-Branch: RELEASE_BRANCH=<name> setzen.${NC}"
-        return 1
-    fi
-    if [ -n "$(git status --porcelain)" ]; then
-        if [ "${LOKAL_RELEASE_MIT_AENDERUNGEN:-false}" == "true" ]; then
-            echo -e "${YELLOW}⚠ Arbeitsbaum nicht sauber — die Aenderungen gehen MIT in den Release-Commit (LOKAL_RELEASE_MIT_AENDERUNGEN=true):${NC}"
-            git --no-pager status --short
-        else
-            echo -e "${RED}✗ Arbeitsbaum nicht sauber — der Release wuerde ALLES Ungespeicherte mitnehmen (git add -A).${NC}"
-            git --no-pager status --short
-            echo -e "${YELLOW}  Erst committen/stashen — oder bewusst: LOKAL_RELEASE_MIT_AENDERUNGEN=true${NC}"
-            return 1
-        fi
-    fi
     echo -e "${BLUE}Git: origin nachziehen (fetch)...${NC}"
     # Bewusst OHNE --tags: lokale Tags, die vom Remote abweichen (plaintext-app: v56.x), lassen
     # `git fetch --tags` mit "would clobber existing tag" scheitern — Release-Tags (n.n.n) kommen
     # mit der Branch-Historie ohnehin mit, und do_release prueft den Tag-Push selbst.
     if ! git fetch origin -q; then
         echo -e "${RED}✗ git fetch origin fehlgeschlagen — ohne Netz kein Release.${NC}"
+        return 1
+    fi
+    # Ohne origin/<zweig> gibt es nichts zum Vergleichen: bisher lief das in einen irrefuehrenden
+    # "N lokale Commits"-Hinweis und starb erst spaeter am `git push` ohne Upstream.
+    if ! git rev-parse --verify -q "origin/${BRANCH}" >/dev/null; then
+        echo -e "${RED}✗ origin/${BRANCH} ist unbekannt — der Stand laesst sich nicht nachziehen.${NC}"
+        echo -e "${YELLOW}  Anderer Release-Branch: RELEASE_BRANCH=<name> setzen.${NC}"
         return 1
     fi
     local LOKAL REMOTE BASIS
@@ -2231,6 +2379,40 @@ lokal_vorflug() {
     fi
     # Versionen NACH dem Nachziehen neu lesen: do_release rechnet aus CURRENT_VERSION.
     init_versions
+    return 0
+}
+
+# Gemeinsamer Vorflug jedes LOKALEN Release-Laufs (do_release ausserhalb der CI, do_local_release):
+#   1. Git: Release-Branch, sauberer Arbeitsbaum, origin per fast-forward nachgezogen.
+#      do_release macht `git add -A` — alles Ungespeicherte ginge sonst in den Release. Wer das
+#      bewusst will (Nacht-Runner, Hotfix aus dem Arbeitsbaum): LOKAL_RELEASE_MIT_AENDERUNGEN=true.
+#   2. CI: kein Rollout auf dem Release-Branch aktiv (gleiche Slots, gleiches Staging-Jar).
+#   3. Maven: Zugangsdaten fuers Release-Repo, sonst nur mvn package.
+# Idempotent: ein zweiter Aufruf im selben Lauf kostet nur ein fetch.
+lokal_vorflug() {
+    local BRANCH="${1:-${RELEASE_BRANCH:-master}}"
+
+    local AKTUELLER_BRANCH
+    AKTUELLER_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    if [ "$AKTUELLER_BRANCH" != "$BRANCH" ]; then
+        echo -e "${RED}✗ Lokaler Release nur auf '${BRANCH}' (aktuell: '${AKTUELLER_BRANCH}').${NC}"
+        echo -e "${YELLOW}  Anderer Release-Branch: RELEASE_BRANCH=<name> setzen.${NC}"
+        return 1
+    fi
+    if [ -n "$(git status --porcelain)" ]; then
+        if [ "${LOKAL_RELEASE_MIT_AENDERUNGEN:-false}" == "true" ]; then
+            echo -e "${YELLOW}⚠ Arbeitsbaum nicht sauber — die Aenderungen gehen MIT in den Release-Commit (LOKAL_RELEASE_MIT_AENDERUNGEN=true):${NC}"
+            git --no-pager status --short
+        else
+            echo -e "${RED}✗ Arbeitsbaum nicht sauber — der Release wuerde ALLES Ungespeicherte mitnehmen (git add -A).${NC}"
+            git --no-pager status --short
+            echo -e "${YELLOW}  Erst committen/stashen — oder bewusst: LOKAL_RELEASE_MIT_AENDERUNGEN=true${NC}"
+            return 1
+        fi
+    fi
+    if ! release_stand_nachziehen "$BRANCH"; then
+        return 1
+    fi
 
     if ! lokal_release_ci_frei "$BRANCH"; then
         return 1
