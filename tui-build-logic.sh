@@ -890,7 +890,18 @@ preflight_secrets() {
     local COMPOSE_SERVICE="$1"
 
     # Ohne aktivierten Vault gibt es keine Pflicht-Secrets zu pruefen.
-    local PFLICHT_VARS="${REQUIRED_SECRET_VARS:-PLAINTEXT_VAULT_EMAIL PLAINTEXT_VAULT_MASTER_PASSWORD PLAINTEXT_JWT_PRIVATE_KEY_VAULT_ITEM}"
+    #
+    # Ein Eintrag darf Alternativen mit '|' nennen und gilt als erfuellt, sobald EINE davon
+    # gesetzt ist. Das Master-Passwort steht seit Karte 942 als Docker-File-Secret in der
+    # Compose (PLAINTEXT_VAULT_MASTER_PASSWORD_FILE zeigt auf die Datei), vorher als
+    # Klartext-Variable — der Slot startet auf beiden Wegen.
+    #
+    # Warum ODER und nicht einfach der neue Name (Vorfall 31.08.2026): Hier stand nur der
+    # alte Name, und weil die Umstellung alle vier Apps erfasst hatte, scheiterte JEDER
+    # Deploy im Preflight. Aufgefallen ist es an plaintext-app Lauf 37 — dort erst nach dem
+    # Release, sodass das Artefakt da war und der rote Lauf leicht zu uebersehen war. Ein
+    # blosser Namenstausch wuerde beim naechsten Rueckbau genauso lautlos falsch stehen.
+    local PFLICHT_VARS="${REQUIRED_SECRET_VARS:-PLAINTEXT_VAULT_EMAIL PLAINTEXT_VAULT_MASTER_PASSWORD|PLAINTEXT_VAULT_MASTER_PASSWORD_FILE PLAINTEXT_JWT_PRIVATE_KEY_VAULT_ITEM}"
     local VAULT_URL="${VAULT_HEALTH_URL:-https://vault.plaintext.ch/alive}"
 
     echo -e "${BLUE}Preflight: Pflicht-Secrets fuer ${COMPOSE_SERVICE}...${NC}"
@@ -906,8 +917,16 @@ if ! printf '%s\n' "$CFG" | grep -qE '^[[:space:]]+PLAINTEXT_VAULT_ENABLED:[[:sp
     echo "VAULT_AUS"; exit 0
 fi
 FEHLT=""
-for v in $VARS; do
-    printf '%s\n' "$CFG" | grep -qE "^[[:space:]]+$v:[[:space:]]*\"?[^[:space:]\"]" || FEHLT="$FEHLT $v"
+for eintrag in $VARS; do
+    # '|' trennt gleichwertige Alternativen: eine gesetzte genuegt.
+    erfuellt=0
+    for v in $(printf '%s' "$eintrag" | tr '|' ' '); do
+        if printf '%s\n' "$CFG" | grep -qE "^[[:space:]]+$v:[[:space:]]*\"?[^[:space:]\"]"; then
+            erfuellt=1
+            break
+        fi
+    done
+    [ "$erfuellt" -eq 1 ] || FEHLT="$FEHLT $eintrag"
 done
 echo "FEHLT:$FEHLT"
 REMOTE
