@@ -23,8 +23,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: CI-Motor pruefen (.ci-engine)
+        id: motor
+        run: |
+          MOTOR=github
+          [ -f .ci-engine ] && MOTOR="$(head -1 .ci-engine | tr -d '[:space:]')"
+          case "$MOTOR" in
+            github)     echo "zustaendig=true"  >> "$GITHUB_OUTPUT" ;;
+            woodpecker) echo "zustaendig=false" >> "$GITHUB_OUTPUT"
+                        echo "::notice::.ci-engine sagt 'woodpecker' — dieser Lauf gehoert nach https://ci.plaintext.ch." ;;
+            *)          echo "::error::.ci-engine enthaelt '$MOTOR' — weder 'github' noch 'woodpecker'."; exit 1 ;;
+          esac
 
       - name: Bash-Skripte pruefen (bash -n + shellcheck)
+        if: steps.motor.outputs.zustaendig == 'true'
         # shellcheck ist auf ubuntu-latest vorinstalliert. SHELLCHECK_PFLICHT=1 macht ein Fehlen
         # zum Fehler statt zum Hinweis — sonst waere ein Runner-Image ohne shellcheck nicht von
         # einem sauberen Repo zu unterscheiden.
