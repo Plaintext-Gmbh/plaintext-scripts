@@ -84,6 +84,7 @@ hole() {
     fi
 }
 for F in deploy_lock_pfad deploy_lock_acquire deploy_lock_release \
+         deploy_lock_heartbeat_start deploy_lock_heartbeat_stop deploy_lock_heartbeat_alter \
          release_lock_abbruch release_lock_nehmen release_lock_freigeben \
          release_stand_nachziehen compute_release_versions \
          get_pom_version get_release_version init_versions; do
@@ -98,6 +99,9 @@ done
 # Konstanten wie im Skript, nur schnell genug fuer einen Test.
 DEPLOY_LOCK_WAIT=60
 DEPLOY_LOCK_STALE=3600
+DEPLOY_LOCK_STALE_HEARTBEAT=3
+DEPLOY_LOCK_HEARTBEAT=1
+DEPLOY_LOCK_HEARTBEAT_PIDS=""
 DEPLOY_LOCK_INTERVALL=1
 DEPLOY_LOCK_HELD=""
 DEPLOY_LOCK_TOKEN="test-$$"
@@ -332,6 +336,144 @@ pruefe "Build und SNAPSHOT-Push liegen im ungesperrten Teil" "ja" \
 pruefe "beide Nachziehwege vorhanden (CI und lokal)" "ja" \
        "$(printf '%s\n' "$BLOCK_NUMMER" | grep -q 'release_stand_nachziehen' \
           && printf '%s\n' "$BLOCK_NUMMER" | grep -q 'lokal_vorflug' && echo ja || echo nein)"
+
+# ══ Karte 1055: Lebenszeichen statt Alter ══════════════════════════════════════════════
+# Der gemessene Fall: plaintext-guild, 02.09.2026. Pipeline 119 wurde um 15:14:55 von einem
+# neuen Push abgeraeumt und liess ihren PROD-Lock stehen; Pipeline 121 fand ihn um 15:18:50 vor.
+# Der Lock war VIER MINUTEN alt — nach der Alters-Regel (3600 s) kerngesund, in Wahrheit tot.
+LOCK_H="$(deploy_lock_pfad prod-test)"
+
+echo "== Fall H: toter Besitzer (4 min ohne Lebenszeichen) wird uebernommen ====="
+rm -rf "$LOCK_H"; mkdir -p "$LOCK_H"
+echo "tote-pipeline-119 $(( $(date +%s) - 240 )) 1.465.0 ci" > "$LOCK_H/owner"
+echo "$(( $(date +%s) - 240 ))" > "$LOCK_H/heartbeat"     # letztes Lebenszeichen vor 4 Minuten
+DEPLOY_LOCK_HELD=""; DEPLOY_LOCK_TOKEN="pipeline-121-$$"
+deploy_lock_acquire prod-test > "$TESTDIR/fall-h.log" 2>&1; H_RC=$?
+sed 's/^/     /' "$TESTDIR/fall-h.log"
+pruefe "Lock wird uebernommen statt abzuwarten" "0" "$H_RC"
+pruefe "die Uebernahme nennt das fehlende Lebenszeichen" "ja" \
+       "$(grep -q 'ohne Lebenszeichen seit' "$TESTDIR/fall-h.log" && echo ja || echo nein)"
+pruefe "der neue Besitzer steht drin" "ja" \
+       "$(grep -q "^pipeline-121-$$ " "$LOCK_H/owner" && echo ja || echo nein)"
+deploy_lock_release prod-test >/dev/null 2>&1
+
+echo "== Fall H2: Gegenprobe — genau dieser Lock OHNE Lebenszeichen blockiert ==="
+# Derselbe vier Minuten alte Lock, nur ohne heartbeat-Datei: das ist der Zustand VOR dieser
+# Aenderung. Er faellt auf die Alters-Regel zurueck, ist mit 240 s weit unter 3600 — und
+# blockiert. Ohne diese Gegenprobe belegte Fall H nur, dass irgendetwas uebernommen wird.
+rm -rf "$LOCK_H"; mkdir -p "$LOCK_H"
+echo "tote-pipeline-119 $(( $(date +%s) - 240 )) 1.465.0 ci" > "$LOCK_H/owner"
+DEPLOY_LOCK_HELD=""; DEPLOY_LOCK_TOKEN="pipeline-121b-$$"
+DEPLOY_LOCK_WAIT=2
+deploy_lock_acquire prod-test > "$TESTDIR/fall-h2.log" 2>&1; H2_RC=$?
+DEPLOY_LOCK_WAIT=60
+pruefe "ohne Lebenszeichen: Abbruch nach der Wartezeit (der alte Schaden)" "1" "$H2_RC"
+pruefe "der tote Besitzer steht noch drin" "ja" \
+       "$(grep -q '^tote-pipeline-119 ' "$LOCK_H/owner" && echo ja || echo nein)"
+
+echo "== Fall I: langer, LEBENDER Rollout wird nicht bestohlen =================="
+# Umgekehrter Fall: der Lock ist AELTER als DEPLOY_LOCK_STALE (die Alters-Regel wuerde ihn
+# uebernehmen), der Besitzer gibt aber Lebenszeichen. Ein Blue-Green-Rollout darf legitim eine
+# Dreiviertelstunde dauern — er darf dabei nicht abgeraeumt werden.
+rm -rf "$LOCK_H"; mkdir -p "$LOCK_H"
+echo "langer-rollout $(( $(date +%s) - DEPLOY_LOCK_STALE - 600 )) 1.470.0 ci" > "$LOCK_H/owner"
+date +%s > "$LOCK_H/heartbeat"
+DEPLOY_LOCK_HELD=""; DEPLOY_LOCK_TOKEN="dazwischen-$$"
+DEPLOY_LOCK_WAIT=2
+deploy_lock_acquire prod-test > "$TESTDIR/fall-i.log" 2>&1; I_RC=$?
+DEPLOY_LOCK_WAIT=60
+pruefe "lebender Besitzer behaelt den Lock trotz hohen Alters" "1" "$I_RC"
+pruefe "keine Uebernahme gemeldet" "ja" \
+       "$(grep -q 'uebernommen' "$TESTDIR/fall-i.log" && echo nein || echo ja)"
+pruefe "der Besitzer steht unveraendert drin" "ja" \
+       "$(grep -q '^langer-rollout ' "$LOCK_H/owner" && echo ja || echo nein)"
+
+echo "== Fall J: der Besitzer gibt waehrend des Laufs wirklich Lebenszeichen ===="
+rm -rf "$LOCK_H"
+DEPLOY_LOCK_HELD=""; DEPLOY_LOCK_TOKEN="lebendiger-$$"
+deploy_lock_acquire prod-test >/dev/null 2>&1
+J_ERST=$(cat "$LOCK_H/heartbeat" 2>/dev/null)
+pruefe "beim Setzen wird sofort ein Lebenszeichen geschrieben" "ja" \
+       "$([ -n "$J_ERST" ] && echo ja || echo nein)"
+sleep 3                                   # DEPLOY_LOCK_HEARTBEAT=1 -> mehrere Runden
+J_SPAETER=$(cat "$LOCK_H/heartbeat" 2>/dev/null)
+pruefe "das Lebenszeichen wird laufend erneuert" "ja" \
+       "$([ "${J_SPAETER:-0}" -gt "${J_ERST:-0}" ] 2>/dev/null && echo ja || echo nein)"
+J_PID="${DEPLOY_LOCK_HEARTBEAT_PIDS##*:}"
+deploy_lock_release prod-test >/dev/null 2>&1
+sleep 1
+pruefe "nach der Freigabe laeuft kein Lebenszeichen-Prozess mehr" "ja" \
+       "$(kill -0 "$J_PID" 2>/dev/null && echo nein || echo ja)"
+pruefe "und der Lock ist weg" "nein" "$([ -d "$LOCK_H" ] && echo ja || echo nein)"
+
+echo "== Fall J2: stirbt der Besitzer hart, verstummt sein Lebenszeichen ======="
+# Der gefaehrlichste denkbare Fehler dieser Aenderung: ein verwaister Sender haelt einen Lock
+# ewig "lebendig", den niemand mehr besitzt — die Blockade waere dann unheilbar statt nur laestig.
+# Geprueft wird mit einem echten Kindprozess, der sich mitten im Halten selbst hart abschiesst.
+rm -rf "$LOCK_H"
+KIND_SKRIPT="$TESTDIR/kind.sh"
+{
+    echo 'set -u'
+    echo "DEPLOY_PATH='$DEPLOY_PATH'"
+    echo "DEPLOY_SERVER=attrappe; GREEN=''; RED=''; YELLOW=''; NC=''"
+    echo "DEPLOY_LOCK_HEARTBEAT=1; DEPLOY_LOCK_STALE_HEARTBEAT=3; DEPLOY_LOCK_STALE=3600"
+    echo "DEPLOY_LOCK_WAIT=5; DEPLOY_LOCK_INTERVALL=1"
+    echo "DEPLOY_LOCK_HELD=''; DEPLOY_LOCK_HEARTBEAT_PIDS=''; DEPLOY_LOCK_TOKEN='kind-'\$\$"
+    echo 'ssh() { shift; bash -c "$*"; }'
+    hole deploy_lock_pfad
+    hole deploy_lock_heartbeat_start
+    hole deploy_lock_acquire
+    hole deploy_lock_heartbeat_alter
+    hole deploy_lock_heartbeat_stop
+    hole deploy_lock_release
+    echo 'deploy_lock_acquire prod-test >/dev/null 2>&1'
+    echo 'sleep 2'
+    echo 'kill -9 $$'          # harter Tod ohne Trap, ohne Freigabe
+} > "$KIND_SKRIPT"
+# Der Tod des Kindes meldet die aufrufende Shell selbst ("Getoetet") — in einer Subshell
+# mit geschlossenem stderr bleibt die Testausgabe sauber.
+( exec 2>/dev/null; bash "$KIND_SKRIPT" >/dev/null 2>&1 ) || true
+J2_NACH_TOD=$(cat "$LOCK_H/heartbeat" 2>/dev/null)
+pruefe "der Lock bleibt zunaechst liegen (der Besitzer kam nicht zum Freigeben)" "ja" \
+       "$([ -d "$LOCK_H" ] && echo ja || echo nein)"
+sleep 3
+J2_SPAETER=$(cat "$LOCK_H/heartbeat" 2>/dev/null)
+pruefe "das Lebenszeichen verstummt mit dem Besitzer" "ja" \
+       "$([ "${J2_SPAETER:-0}" = "${J2_NACH_TOD:-x}" ] && echo ja || echo nein)"
+DEPLOY_LOCK_HELD=""; DEPLOY_LOCK_TOKEN="nachfolger-$$"
+deploy_lock_acquire prod-test > "$TESTDIR/fall-j2.log" 2>&1; J2_RC=$?
+pruefe "und der naechste Lauf uebernimmt von selbst" "0" "$J2_RC"
+deploy_lock_release prod-test >/dev/null 2>&1
+
+echo "== Fall J3: Lebenszeichen aus DERSELBEN Sekunde bricht nichts ab ========="
+# `expr` liefert bei Ergebnis 0 den Rueckgabewert 1. build.sh laeuft mit `set -e` — ohne
+# Absicherung wuerde ein Lock, dessen Lebenszeichen aus derselben Sekunde stammt, den ganzen
+# Lauf abbrechen statt nur "Alter 0" zu melden.
+rm -rf "$LOCK_H"; mkdir -p "$LOCK_H"
+echo "gleichzeitig $(date +%s) 1.0.0" > "$LOCK_H/owner"
+date +%s > "$LOCK_H/heartbeat"
+J3_ALTER=$( set -e; deploy_lock_heartbeat_alter "$LOCK_H" ); J3_RC=$?
+pruefe "Alter 0 wird geliefert, nicht als Fehler" "0" "$J3_RC"
+pruefe "und der Wert ist 0" "0" "${J3_ALTER:-leer}"
+rm -rf "$LOCK_H"
+
+echo "== Fall K: die Verfallszeit muss innerhalb der Wartezeit erreichbar sein =="
+# Der eigentliche Konstruktionsfehler bis zum 04.09.2026: DEPLOY_LOCK_STALE (3600) war groesser
+# als DEPLOY_LOCK_WAIT (1800). Ein Wartender gab damit IMMER auf, bevor er haette uebernehmen
+# duerfen — die Uebernahme-Regel war Dekoration. Geprueft werden die Vorgabewerte im Skript.
+vorgabe() { grep -o "$1:-[0-9]*" "$SKRIPT" | head -1 | sed 's/.*:-//'; }
+V_WAIT=$(vorgabe DEPLOY_LOCK_WAIT)
+V_STALE=$(vorgabe DEPLOY_LOCK_STALE)
+V_HB_STALE=$(vorgabe DEPLOY_LOCK_STALE_HEARTBEAT)
+V_HB=$(vorgabe DEPLOY_LOCK_HEARTBEAT)
+printf '  Vorgaben: WAIT=%s STALE=%s STALE_HEARTBEAT=%s HEARTBEAT=%s\n' \
+       "$V_WAIT" "$V_STALE" "$V_HB_STALE" "$V_HB"
+pruefe "WAIT > STALE (sonst ist die Alters-Regel unerreichbar)" "ja" \
+       "$([ "${V_WAIT:-0}" -gt "${V_STALE:-0}" ] 2>/dev/null && echo ja || echo nein)"
+pruefe "WAIT > STALE_HEARTBEAT" "ja" \
+       "$([ "${V_WAIT:-0}" -gt "${V_HB_STALE:-0}" ] 2>/dev/null && echo ja || echo nein)"
+pruefe "STALE_HEARTBEAT ist ein Mehrfaches des Sendeabstands" "ja" \
+       "$([ "${V_HB_STALE:-0}" -ge $(( ${V_HB:-1} * 3 )) ] 2>/dev/null && echo ja || echo nein)"
 
 echo
 if [ "$FEHLER" = "0" ]; then echo "ERGEBNIS: alle Faelle wie erwartet"; else echo "ERGEBNIS: FEHLER"; fi

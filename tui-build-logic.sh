@@ -361,13 +361,79 @@ restore_prod_db() {
 # lokalen Lauf nicht. Der Lock lebt deshalb auf dem NAS, wo sich ALLE Laeufe treffen:
 # ein Verzeichnis (mkdir ist atomar) mit Besitzer-Datei "token zeit version". Verwaiste Locks
 # (abgebrochener Lauf) werden nach DEPLOY_LOCK_STALE Sekunden uebernommen.
-DEPLOY_LOCK_WAIT="${DEPLOY_LOCK_WAIT:-1800}"      # max. Wartezeit auf einen fremden Lauf (s)
-DEPLOY_LOCK_STALE="${DEPLOY_LOCK_STALE:-3600}"    # aelter als das = verwaist
+#
+# LEBENSZEICHEN STATT ALTER (Karte 1055, 05.09.2026). Die Uebernahme verwaister Locks gab es
+# schon vorher, sie war nur unerreichbar: DEPLOY_LOCK_STALE (3600 s) war GROESSER als
+# DEPLOY_LOCK_WAIT (1800 s) — ein Wartender gab also immer auf, bevor er haette uebernehmen
+# duerfen. Gemessen an plaintext-guild am 02.09.2026: Pipeline 119 wurde um 15:14:55 von einem
+# neuen Push abgeraeumt, Pipeline 121 fand um 15:18:50 den Lock des toten Laufs vor und lief
+# nach der Wartezeit in den Fehler. Der Lock war zu diesem Zeitpunkt vier Minuten alt — von
+# "verwaist" nach der Alters-Regel meilenweit entfernt.
+#
+# Das Alter ist auch das falsche Mass: ein Blue-Green-Rollout darf legitim eine Dreiviertelstunde
+# dauern, ein abgeraeumter Lauf ist nach einer Sekunde tot. Unterscheidbar sind die beiden nur
+# an einem LEBENSZEICHEN: der Besitzer schreibt, solange er laeuft, jede Minute die Uhrzeit des
+# NAS in ${LOCK}/heartbeat. Wird sein Container abgeraeumt, hoert das auf — und der naechste
+# Lauf uebernimmt nach DEPLOY_LOCK_STALE_HEARTBEAT Sekunden, ohne dass jemand von Hand aufraeumt.
+#
+# Die alte Alters-Regel bleibt als Rueckfallebene fuer Locks OHNE heartbeat-Datei — die stammen
+# von einem Lauf mit einer aelteren Fassung dieses Skripts. Damit sie ueberhaupt greifen kann,
+# ist die Wartezeit jetzt laenger als die Verfallszeit; vorher war sie es nicht.
+DEPLOY_LOCK_WAIT="${DEPLOY_LOCK_WAIT:-3900}"      # max. Wartezeit auf einen fremden Lauf (s)
+DEPLOY_LOCK_STALE="${DEPLOY_LOCK_STALE:-3600}"    # OHNE Lebenszeichen: aelter als das = verwaist
+DEPLOY_LOCK_STALE_HEARTBEAT="${DEPLOY_LOCK_STALE_HEARTBEAT:-300}"  # MIT Lebenszeichen: so lange stumm = tot
+DEPLOY_LOCK_HEARTBEAT="${DEPLOY_LOCK_HEARTBEAT:-60}"  # Abstand zweier Lebenszeichen (s); 0 schaltet sie ab
 DEPLOY_LOCK_INTERVALL="${DEPLOY_LOCK_INTERVALL:-15}"  # Abstand zweier Versuche (s); nur Tests setzen das kleiner
 DEPLOY_LOCK_TOKEN="$(hostname -s 2>/dev/null || hostname)-$$-$(date +%s)"
 DEPLOY_LOCK_HELD=""
+DEPLOY_LOCK_HEARTBEAT_PIDS=""                     # "<env>:<pid>" je gehaltenem Lock
 
 deploy_lock_pfad() { echo "${DEPLOY_PATH}/.deploy-lock-${1}"; }
+
+# Schreibt im Hintergrund alle DEPLOY_LOCK_HEARTBEAT Sekunden die NAS-Uhrzeit in die
+# heartbeat-Datei des Locks. Wird der Lauf abgeraeumt, stirbt dieser Prozess mit ihm — genau
+# das ist das Signal, an dem der naechste Lauf den Lock als verwaist erkennt.
+deploy_lock_heartbeat_start() {
+    local ENV_NAME="$1" LOCK="$2"
+    [ "${DEPLOY_LOCK_HEARTBEAT:-0}" -gt 0 ] 2>/dev/null || return 0
+    local ELTERN=$$
+    (
+        while :; do
+            sleep "${DEPLOY_LOCK_HEARTBEAT}"
+            # Ohne diese Zeile waere der schlimmste Fehler dieser Aenderung moeglich: ein
+            # verwaister Sender haelt einen Lock ewig "lebendig", den niemand mehr besitzt —
+            # also genau die Blockade, die hier beseitigt werden soll, nur unheilbar. In der CI
+            # stirbt der Prozess mit dem Container; lokal (./build, Abbruch mit kill -9 ohne
+            # Trap) tut er das nicht.
+            kill -0 "$ELTERN" 2>/dev/null || exit 0
+            ssh ${DEPLOY_SERVER} "date +%s > '${LOCK}/heartbeat'" >/dev/null 2>&1 || true
+        done
+    ) &
+    DEPLOY_LOCK_HEARTBEAT_PIDS="${DEPLOY_LOCK_HEARTBEAT_PIDS} ${ENV_NAME}:$!"
+}
+
+deploy_lock_heartbeat_stop() {
+    local ENV_NAME="$1" REST="" E
+    for E in ${DEPLOY_LOCK_HEARTBEAT_PIDS}; do
+        if [ "${E%%:*}" = "$ENV_NAME" ]; then
+            kill "${E##*:}" 2>/dev/null
+        else
+            REST="${REST} ${E}"
+        fi
+    done
+    DEPLOY_LOCK_HEARTBEAT_PIDS="$REST"
+}
+
+# Alter des Lebenszeichens in Sekunden — beide Zeiten kommen vom NAS, damit eine Uhrabweichung
+# zwischen CI-Container und NAS das Ergebnis nicht verfaelscht. -1 heisst: keine heartbeat-Datei
+# (Lock von einer aelteren Skriptfassung) -> Rueckfall auf die Alters-Regel.
+deploy_lock_heartbeat_alter() {
+    local LOCK="$1" A
+    # `expr` gibt bei Ergebnis 0 den Rueckgabewert 1 — ein Lebenszeichen aus derselben Sekunde
+    # wuerde unter `set -e` (build.sh) den GANZEN Lauf abbrechen. Deshalb beide Male `|| true`.
+    A=$(ssh ${DEPLOY_SERVER} "if [ -s '${LOCK}/heartbeat' ]; then expr \$(date +%s) - \$(cat '${LOCK}/heartbeat') || true; else echo -1; fi" 2>/dev/null || true)
+    printf '%s' "$(printf '%s' "$A" | tr -dc '0-9-')"
+}
 
 deploy_lock_acquire() {
     local ENV_NAME="$1"
@@ -378,19 +444,36 @@ deploy_lock_acquire() {
     INFO="${DEPLOY_LOCK_TOKEN} $(date +%s) ${NEW_VERSION:-${RELEASE_VERSION:-?}}${CI:+ ci}"
     local GEWARTET=0
     while true; do
-        if ssh ${DEPLOY_SERVER} "mkdir '${LOCK}' 2>/dev/null && echo '${INFO}' > '${LOCK}/owner'" 2>/dev/null; then
+        # Das erste Lebenszeichen wird SYNCHRON mitgeschrieben, nicht erst vom Hintergrund-
+        # prozess: sonst gaebe es ein Fenster, in dem ein Wartender einen frischen Lock ohne
+        # heartbeat sieht und ihn nach der langsamen Alters-Regel behandelt.
+        if ssh ${DEPLOY_SERVER} "mkdir '${LOCK}' 2>/dev/null && echo '${INFO}' > '${LOCK}/owner' && date +%s > '${LOCK}/heartbeat'" 2>/dev/null; then
             DEPLOY_LOCK_HELD="${DEPLOY_LOCK_HELD} ${ENV_NAME}"
+            deploy_lock_heartbeat_start "$ENV_NAME" "$LOCK"
             echo -e "${GREEN}✓ Deploy-Lock ${ENV_NAME} gesetzt (${DEPLOY_LOCK_TOKEN})${NC}"
             return 0
         fi
         local OWNER
         OWNER=$(ssh ${DEPLOY_SERVER} "cat '${LOCK}/owner' 2>/dev/null" 2>/dev/null)
-        local TS
-        TS=$(printf '%s' "$OWNER" | awk '{print $2}' | tr -dc '0-9')
-        if [ -n "$TS" ] && [ $(( $(date +%s) - TS )) -gt "$DEPLOY_LOCK_STALE" ]; then
-            echo -e "${YELLOW}⚠ Verwaister Deploy-Lock ${ENV_NAME} (${OWNER}) — wird uebernommen.${NC}"
-            ssh ${DEPLOY_SERVER} "rm -rf '${LOCK}'" 2>/dev/null
-            continue
+        local HB_ALTER
+        HB_ALTER=$(deploy_lock_heartbeat_alter "$LOCK")
+        if [ -n "$HB_ALTER" ] && [ "$HB_ALTER" -ge 0 ] 2>/dev/null; then
+            # Der Besitzer kennt Lebenszeichen. Dann zaehlt NUR, ob er noch welche gibt —
+            # nicht, wie lange er den Lock schon haelt.
+            if [ "$HB_ALTER" -gt "$DEPLOY_LOCK_STALE_HEARTBEAT" ]; then
+                echo -e "${YELLOW}⚠ Deploy-Lock ${ENV_NAME} ohne Lebenszeichen seit ${HB_ALTER}s (${OWNER}) — wird uebernommen.${NC}"
+                ssh ${DEPLOY_SERVER} "rm -rf '${LOCK}'" 2>/dev/null
+                continue
+            fi
+        else
+            # Kein heartbeat: Lock einer aelteren Skriptfassung -> alte Alters-Regel.
+            local TS
+            TS=$(printf '%s' "$OWNER" | awk '{print $2}' | tr -dc '0-9')
+            if [ -n "$TS" ] && [ $(( $(date +%s) - TS )) -gt "$DEPLOY_LOCK_STALE" ]; then
+                echo -e "${YELLOW}⚠ Verwaister Deploy-Lock ${ENV_NAME} (${OWNER}) — wird uebernommen.${NC}"
+                ssh ${DEPLOY_SERVER} "rm -rf '${LOCK}'" 2>/dev/null
+                continue
+            fi
         fi
         if [ -z "$OWNER" ] && ! ssh ${DEPLOY_SERVER} "[ -d '${LOCK}' ]" 2>/dev/null; then
             # mkdir scheiterte, aber es gibt keinen Lock: SSH/Rechte-Problem, nicht Konkurrenz.
@@ -415,6 +498,7 @@ deploy_lock_release() {
     local LOCK
     LOCK=$(deploy_lock_pfad "$ENV_NAME")
     case " ${DEPLOY_LOCK_HELD} " in *" ${ENV_NAME} "*) ;; *) return 0 ;; esac
+    deploy_lock_heartbeat_stop "$ENV_NAME"
     # Nur den eigenen Lock loesen (Token in der Besitzer-Datei).
     if ssh ${DEPLOY_SERVER} "grep -q '^${DEPLOY_LOCK_TOKEN} ' '${LOCK}/owner' 2>/dev/null && rm -rf '${LOCK}'" 2>/dev/null; then
         echo -e "${GREEN}✓ Deploy-Lock ${ENV_NAME} freigegeben${NC}"
