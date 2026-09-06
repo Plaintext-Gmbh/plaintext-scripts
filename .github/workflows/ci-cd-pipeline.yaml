@@ -68,7 +68,7 @@ on:
         description: 'SonarQube server URL (vom self-hosted NAS-Runner erreichbar)'
         required: false
         type: string
-        default: 'https://sonar.plaintext.ch'
+        default: 'https://sonarqube.plaintext.ch'
       runner:
         description: 'Runner labels as JSON array (e.g. ["self-hosted","nas"] for self-hosted, ["ubuntu-latest"] for GitHub-hosted)'
         required: false

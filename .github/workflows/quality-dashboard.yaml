@@ -30,7 +30,7 @@ jobs:
         env:
           # PAT mit org-weitem Read (Runs/PRs/CodeQL/Gate-Files aller Repos).
           GH_TOKEN: ${{ secrets.MVN_DEPLOY_TOKEN }}
-          SONAR_URL: 'https://sonar.plaintext.ch'
+          SONAR_URL: 'https://sonarqube.plaintext.ch'
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
           mkdir -p public

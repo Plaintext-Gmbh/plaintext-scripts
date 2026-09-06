@@ -11,7 +11,7 @@ Datenquellen (env-getrieben, CI-tauglich; kein Maven, kein `gh`, kein ssh nötig
   - Quality-Gate-Statusfile je Repo (quality/quality-gate.properties) via GitHub-Contents.
 
 Nutzung:  quality/quality-dashboard.py [ausgabe.html]     (Default: ./quality-dashboard.html)
-Env:      GH_TOKEN, SONAR_URL (Default https://sonar.plaintext.ch), SONAR_TOKEN
+Env:      GH_TOKEN, SONAR_URL (Default https://sonarqube.plaintext.ch), SONAR_TOKEN
 """
 import base64
 import datetime
@@ -24,7 +24,7 @@ import urllib.error
 
 ORG = "Plaintext-Gmbh"
 GROUP = "ch.plaintext"
-SONAR_URL = os.environ.get("SONAR_URL", "https://sonar.plaintext.ch").rstrip("/")
+SONAR_URL = os.environ.get("SONAR_URL", "https://sonarqube.plaintext.ch").rstrip("/")
 SONAR_TOKEN = os.environ.get("SONAR_TOKEN", "")
 
 # (Repo, Sonar-artifactId) — die fünf Spring-Anwendungen (Parent-Artifact als Sonar-Projektschlüssel).
