@@ -270,6 +270,23 @@ jobs:
         if: steps.detect.outputs.bump == 'true' && steps.openpr.outputs.skip == 'false'
         run: bash .plaintext-scripts/ci/root-autobump.sh apply "${{ steps.detect.outputs.latest }}"
 
+      # Karte 1011, Luecke 2: der Bump aendert Modul-/Versionswerte in der pom.xml, aber die
+      # generierte README-Tabelle (Massnahme 14, 29.08.2026) zieht nicht automatisch mit —
+      # ReadmeGeneriertVertragTest faerbt den Verify-Build dann rot, obwohl der Bump selbst
+      # korrekt war. NICHT jedes Consumer-Repo hat dieses Skript (Stand 06.09.2026 nur app);
+      # deshalb bedingt und mit `|| true`-freiem, aber weichem Fehlerpfad: schlaegt die
+      # Generierung fehl, faerbt das den Verify-Schritt danach ohnehin rot (kein stiller
+      # Doppel-Fehler).
+      - name: README-Tabellen neu erzeugen (falls vorhanden)
+        id: readme
+        if: steps.apply.outcome == 'success'
+        run: |
+          if [ -f scripts/docs/gen-readme-tabellen.py ]; then
+            python3 scripts/docs/gen-readme-tabellen.py
+          else
+            echo "kein scripts/docs/gen-readme-tabellen.py in diesem Repo — README bleibt unangetastet."
+          fi
+
       # ── Verify: der eigentliche Schutz ───────────────────────────────
       - name: Maven konfigurieren
         if: steps.apply.outcome == 'success'
@@ -352,6 +369,58 @@ jobs:
         if: always()
         run: docker rm -f -v "ci-postgres-autobump-${PGPORT}" 2>/dev/null || true
 
+      # Karte 1011, Luecke 3: ein root-Bump, der ein NEUES eingebautes MCP-Werkzeug mitbringt
+      # (z. B. set_secret_backend/secret_backend_status aus root 1.655.0), faerbt automatisch
+      # JEDEN Consumer-Bump rot — PlaintextMcpScopeVertragTest (plaintext-root-archtests)
+      # verlangt fuer jedes am Klassenpfad gefundene Werkzeug entweder eine @PreAuthorize-
+      # Schranke oder einen BEGRUENDETEN Ausnahmeeintrag in mcp-scope-vertrag.properties.
+      # Diesen Eintrag OHNE Begruendung automatisch zu schreiben waere falsch — die
+      # Begruendung kann keine Maschine liefern (Karte selbst). Erkennung deshalb ohne
+      # eigenen Klassenpfad-Scan: der Verify-Build hat den Scan bereits korrekt ausgefuehrt
+      # (dieselbe JVM-Reflection, die die Anwendung auch selbst nutzt) — dieser Schritt liest
+      # nur sein Ergebnis aus den Surefire-Berichten. Nachrichtentext wortgleich aus
+      # PlaintextMcpScopeVertragTest.jedesMcpWerkzeugHatEineNachweisbareScopeSchranke
+      # (plaintext-root-archtests, per javap gegen 1.668.0 gemessen, Karte 1011) — aendert sich
+      # der Wortlaut dort, erkennt dieser Schritt nichts mehr und faellt auf "kein PR" zurueck
+      # (derselbe sichere Zustand wie heute), statt falsch zu greifen.
+      - name: Scope-Vertrag-Luecke pruefen (Karte 1011)
+        id: scope
+        if: always() && steps.apply.outcome == 'success' && steps.verify.outcome == 'failure'
+        run: |
+          MARKER="MCP-Werkzeuge ohne Scope-Schranke:"
+          TREFFER="$(grep -rl "$MARKER" --include="*.txt" . 2>/dev/null || true)"
+          ANZAHL_TREFFER="$(printf '%s\n' "$TREFFER" | grep -c . || true)"
+
+          # Alle Berichte mit echten Fehlschlaegen (Failures/Errors > 0) einsammeln — nicht nur
+          # die mit dem Marker. Ist der Scope-Vertrag NICHT die EINZIGE Ursache, bleibt es beim
+          # strengen Verhalten: kein PR, normale Pushover-Meldung.
+          ROT="$(grep -rlE 'Tests run: [0-9]+, Failures: [1-9]|Tests run: [0-9]+, Errors: [1-9]' \
+                   --include="*.txt" . 2>/dev/null | sort -u || true)"
+          ANZAHL_ROT="$(printf '%s\n' "$ROT" | grep -c . || true)"
+
+          if [ "$ANZAHL_TREFFER" = "1" ] && [ "$ANZAHL_ROT" = "1" ] && [ "$TREFFER" = "$ROT" ]; then
+            WERKZEUGE="$(awk '
+              /MCP-Werkzeuge ohne Scope-Schranke:/ { infail=1 }
+              infail && /^[A-Za-z0-9_.]+#[A-Za-z0-9_]+$/ { print; found=1; next }
+              infail && found && !/^[A-Za-z0-9_.]+#[A-Za-z0-9_]+$/ { exit }
+            ' "$TREFFER")"
+          else
+            WERKZEUGE=""
+          fi
+
+          if [ -n "$WERKZEUGE" ]; then
+            echo "scope_only=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "werkzeuge<<SCOPE_EOF_1011"
+              echo "$WERKZEUGE"
+              echo "SCOPE_EOF_1011"
+            } >> "$GITHUB_OUTPUT"
+            echo "::notice title=Scope-Vertrag-Luecke::Verify rot NUR wegen fehlendem Vertragseintrag fuer: $(printf '%s' "$WERKZEUGE" | tr '\n' ' ')"
+          else
+            echo "scope_only=false" >> "$GITHUB_OUTPUT"
+            echo "Verify rot aus einem anderen/zusaetzlichen Grund (${ANZAHL_ROT:-0} rote Testberichte) — kein automatischer PR, normale Pushover-Meldung."
+          fi
+
       - name: Secrets vom Runner entfernen
         if: always()
         run: |
@@ -360,10 +429,19 @@ jobs:
           rm -f ~/.m2/settings.xml 2>/dev/null || true
           exit 0
 
-      # ── PR nur bei gruenem Verify ────────────────────────────────────
+      # ── PR bei gruenem Verify ODER bei ausschliesslich fehlendem Scope-Vertrag ───────
+      # Karte 1011: ein Verify, das NUR an PlaintextMcpScopeVertragTest scheitert (neues
+      # eingebautes root-Werkzeug ohne Vertragseintrag), soll den Bump nicht mehr stumm liegen
+      # lassen — der PR entsteht trotzdem, mit der Luecke als benannter Aufgabe. `always()`,
+      # weil ein vorheriger Fehlschlag (Verify) diesen Schritt sonst per impliziter
+      # success()-Regel ueberspringen wuerde, obwohl `steps.scope.outputs.scope_only` genau
+      # diesen Fall gezielt erlauben soll.
       - name: Bump-PR erstellen
         id: pr
-        if: steps.verify.outcome == 'success' && inputs.dry-run != true
+        if: >-
+          always() && steps.apply.outcome == 'success' &&
+          (steps.verify.outcome == 'success' || steps.scope.outputs.scope_only == 'true') &&
+          inputs.dry-run != true
         env:
           # Karte 587: NICHT github.token. Seit dem 06.08.2026 erzeugt ein per GITHUB_TOKEN
           # eroeffneter PR zwar einen Lauf — GitHub haelt ihn aber sofort mit `action_required`
@@ -376,18 +454,27 @@ jobs:
           OLD: ${{ steps.detect.outputs.current }}
           OLDPARENT: ${{ steps.detect.outputs.parent }}
           NEW: ${{ steps.detect.outputs.latest }}
+          SCOPE_ONLY: ${{ steps.scope.outputs.scope_only == 'true' }}
+          WERKZEUGE: ${{ steps.scope.outputs.werkzeuge }}
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$BUMP_BRANCH"
-          # Nur die pom.xml — der Checkout von plaintext-scripts unter .plaintext-scripts/
-          # bleibt untracked und gehoert nicht in den PR.
+          # pom.xml und (falls vorhanden) die neu erzeugte README — der Checkout von
+          # plaintext-scripts unter .plaintext-scripts/ bleibt untracked und gehoert nicht
+          # in den PR.
           git add pom.xml
+          [ -f README.md ] && git add README.md || true
           {
             printf 'chore(322): plaintext-root %s -> %s (Auto-Bump)\n\n' "$OLD" "$NEW"
             printf 'Automatischer Bump durch den Workflow "Root Auto-Bump" (reusable aus plaintext-scripts).\n'
-            printf 'Verify-Build (mvn clean verify -DskipITs) auf diesem Stand war gruen.\n'
+            if [ "$SCOPE_ONLY" = "true" ]; then
+              printf 'Verify-Build (mvn clean verify -DskipITs) war rot — AUSSCHLIESSLICH wegen eines\n'
+              printf 'fehlenden Scope-Vertrag-Eintrags fuer ein neues root-Werkzeug (Karte 1011).\n'
+            else
+              printf 'Verify-Build (mvn clean verify -DskipITs) auf diesem Stand war gruen.\n'
+            fi
           } > "$RUNNER_TEMP/commit-msg.txt"
           git commit -F "$RUNNER_TEMP/commit-msg.txt"
           # --force: der Branch wird pro Bump neu geschrieben, es gibt immer
@@ -398,14 +485,39 @@ jobs:
             printf '| | vorher | nachher |\n|---|---|---|\n'
             printf '| `<parent>` plaintext-root-parent | %s | %s |\n' "$OLDPARENT" "$NEW"
             printf '| `plaintext-root.version` | %s | %s |\n\n' "$OLD" "$NEW"
-            printf '**Verify:** `mvn clean verify -DskipITs` mit der neuen root-Version lief im Auto-Bump-Job gruen — sonst waere dieser PR nicht entstanden.\n\n'
+            if [ "$SCOPE_ONLY" = "true" ]; then
+              printf '**Verify:** `mvn clean verify -DskipITs` ist ROT — aber AUSSCHLIESSLICH an\n'
+              printf '`PlaintextMcpScopeVertragTest.jedesMcpWerkzeugHatEineNachweisbareScopeSchranke`.\n'
+              printf 'Ein neues, in root eingebautes MCP-Werkzeug hat hier noch keinen Vertragseintrag.\n'
+              printf 'Das schreibt dieser Bump bewusst NICHT automatisch: die Begruendung, ob die\n'
+              printf 'Schranke im Rumpf statt in einer Annotation steht, kann keine Maschine liefern\n'
+              printf '(Karte 1011).\n\n'
+              printf '## Vertragseintrag fehlt fuer (worker/Auto-Bump, Karte 1011)\n\n'
+              printf 'In `mcp-scope-vertrag.properties` fehlt ein `ausnahme.<Klasse>#<methode>`-Eintrag\n'
+              printf '(mit Begruendung) ODER eine `@PreAuthorize(...SCOPE_...)`-Schranke fuer:\n\n'
+              while IFS= read -r w; do
+                [ -n "$w" ] && printf -- '- `%s`\n' "$w"
+              done <<< "$WERKZEUGE"
+              printf '\nErst danach ist dieser PR mergebar.\n\n'
+            else
+              printf '**Verify:** `mvn clean verify -DskipITs` mit der neuen root-Version lief im Auto-Bump-Job gruen — sonst waere dieser PR nicht entstanden.\n\n'
+            fi
             printf '**Vor dem Merge beachten:** Der Merge auf `master` loest `release-all` aus (Release + DEV + PROD Blue-Green). Nicht mergen, waehrend ein anderer Consumer deployt — die NAS-Runner sind ephemer und recyceln sonst mitten im Blue-Green (PROD 502). Nach dem Deploy `/nosec/version` auf PROD pruefen.\n\n'
-            printf '_Erzeugt von `Plaintext-Gmbh/plaintext-scripts/.github/workflows/root-autobump.yaml` (Karte 322, reusable seit Paket S)._\n'
+            printf '_Erzeugt von `Plaintext-Gmbh/plaintext-scripts/.github/workflows/root-autobump.yaml` (Karte 322, reusable seit Paket S; Scope-Vertrag-Erkennung seit Karte 1011)._\n'
           } > "$RUNNER_TEMP/pr-body.md"
           URL="$(gh pr create --repo "$GITHUB_REPOSITORY" --base master --head "$BUMP_BRANCH" \
             --title "chore: plaintext-root ${OLD} -> ${NEW} (Auto-Bump)" --body-file "$RUNNER_TEMP/pr-body.md")"
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "### Bump-PR erstellt: $URL" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$SCOPE_ONLY" = "true" ]; then
+            # Fehlt das Label im Repo, meldet --add-label das per Exit-Code — weich behandeln:
+            # der PR steht, das Label ist eine Zusatzinfo, kein Abbruchgrund.
+            gh label create braucht-hand --repo "$GITHUB_REPOSITORY" --color "d93f0b" \
+              --description "Wartet auf einen Handgriff, den keine Maschine leisten darf/kann" 2>/dev/null || true
+            gh pr edit "$URL" --repo "$GITHUB_REPOSITORY" --add-label braucht-hand \
+              || echo "::warning::Label braucht-hand konnte nicht gesetzt werden — PR steht trotzdem."
+            echo "### Braucht einen Handgriff: Scope-Vertrag" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # ── Meldung: roter Verify = root-Release ist fuer uns kaputt ──────
       - name: Pushover bei rotem Verify
@@ -413,7 +525,9 @@ jobs:
         # dadurch meldete auch ein Scheitern der PR-Erstellung "Auto-Bump rot: baut NICHT",
         # obwohl der Build gruen war (Lauf 30616330278). Eine falsche Alarmmeldung ist teurer
         # als keine: sie diskreditiert den Bump.
-        if: failure() && steps.verify.outcome == 'failure'
+        # Karte 1011: NICHT bei scope_only — dort entsteht trotz rotem Verify ein PR (siehe
+        # oben), ein zusaetzlicher "baut NICHT"-Alarm waere hier irrefuehrend.
+        if: failure() && steps.verify.outcome == 'failure' && steps.scope.outputs.scope_only != 'true'
         env:
           APP: ${{ secrets.PUSHOVER_APP_TOKEN }}
           USR: ${{ secrets.PUSHOVER_USER_KEY }}
@@ -431,7 +545,9 @@ jobs:
       # verifiziert — es fehlt nur der letzte Handgriff. Das ist eine Bringschuld an den
       # Menschen, keine Fehlermeldung.
       - name: Pushover wenn nur die PR-Erstellung fehlt
-        if: failure() && steps.verify.outcome == 'success'
+        # Karte 1011: gilt jetzt auch fuer scope_only — auch dort wollte der Job einen PR
+        # eroeffnen, und "Actions duerfen keine PRs erstellen" trifft beide Faelle gleich.
+        if: failure() && (steps.verify.outcome == 'success' || steps.scope.outputs.scope_only == 'true')
         env:
           APP: ${{ secrets.PUSHOVER_APP_TOKEN }}
           USR: ${{ secrets.PUSHOVER_USER_KEY }}
@@ -463,5 +579,6 @@ jobs:
             echo "| Guard laufender Deploy | \`${{ steps.busy.outputs.skip == 'true' && 'gebremst' || steps.busy.outcome }}\` |"
             echo "| Guard offener Bump-PR | \`${{ steps.openpr.outputs.skip == 'true' && 'gebremst' || steps.openpr.outcome }}\` |"
             echo "| Verify | \`${{ steps.verify.outcome || 'nicht gelaufen' }}\` |"
+            echo "| Scope-Vertrag-Luecke (Karte 1011) | \`${{ steps.scope.outputs.scope_only || 'entfaellt' }}\` |"
             echo "| PR | ${{ steps.pr.outputs.url || '—' }} |"
           } >> "$GITHUB_STEP_SUMMARY"
