@@ -65,7 +65,12 @@ load_build_conf() {
         [[ -z "$key" ]] && continue
         value="${value%%#*}"
         value="${value%"${value##*[![:space:]]}"}"
-        export "$key"="$value"
+        # Bereits gesetzte Umgebungsvariablen gewinnen (Karte "lokal bauen/deployen",
+        # 29.08.2026): ein Aufruf wie `MVN_RELEASE_DEPLOY=false ./build 8` konnte vorher
+        # nichts ausrichten — die Datei ueberschrieb den Wunsch des Aufrufers stumm.
+        if [[ -z "${!key+x}" ]]; then
+            export "$key"="$value"
+        fi
     done < "$config_file"
 
     return 0
