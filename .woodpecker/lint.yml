@@ -1,0 +1,42 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  plaintext-scripts unter Woodpecker: shellcheck + namespace-lint
+#
+#  WARUM HIER: plaintext-scripts ist die Build-Bibliothek ALLER Plaintext-Apps. Ein
+#  Tippfehler in tui-build-logic.sh bricht den naechsten Release in fuenf Repos
+#  gleichzeitig -- deshalb laufen beide Pruefungen bei jedem Pull Request und bei
+#  jedem Push auf master, genau wie die GitHub-Fassung es tat.
+#
+#  KEIN SECRET: Beide Skripte lesen nur den Arbeitsbaum. Damit ist diese Pipeline
+#  auch fuer `pull_request` unbedenklich -- anders als die Deploy-Pipelines der Apps,
+#  deren Secrets bewusst nicht fuer PR-Ereignisse freigegeben sind.
+#
+#  BILD: koalaman/shellcheck-alpine bringt shellcheck mit; bash und git kommen per
+#  apk dazu (beide Skripte haben eine bash-Shebang, und der Klon braucht git).
+#  Auf ubuntu-latest war shellcheck vorinstalliert -- diese Zeile ist der Ersatz
+#  dafuer, nicht mehr.
+# ═══════════════════════════════════════════════════════════════════════════════
+when:
+  # Drei Wege hinein, jeder genau einmal. `manual` muss dabeistehen, sonst verwirft
+  # Woodpecker einen Lauf ueber den "Run pipeline"-Knopf mit "filtered out all steps".
+  - event: pull_request
+  - event: push
+    branch: master
+  - event: manual
+
+steps:
+  shellcheck:
+    image: koalaman/shellcheck-alpine:stable
+    environment:
+      # Wie in der GitHub-Fassung: ohne shellcheck ist der Lauf ein Fehler, keine Warnung.
+      SHELLCHECK_PFLICHT: '1'
+    commands:
+      - apk add --no-cache bash git >/dev/null
+      - . ./.woodpecker/waechter.sh
+      - ./quality/shellcheck.sh .
+
+  namespace-lint:
+    image: koalaman/shellcheck-alpine:stable
+    commands:
+      - apk add --no-cache bash git >/dev/null
+      - . ./.woodpecker/waechter.sh
+      - ./quality/namespace-lint.sh .

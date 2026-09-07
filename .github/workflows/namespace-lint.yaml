@@ -25,6 +25,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: CI-Motor pruefen (.ci-engine)
+        id: motor
+        run: |
+          MOTOR=github
+          [ -f .ci-engine ] && MOTOR="$(head -1 .ci-engine | tr -d '[:space:]')"
+          case "$MOTOR" in
+            github)     echo "zustaendig=true"  >> "$GITHUB_OUTPUT" ;;
+            woodpecker) echo "zustaendig=false" >> "$GITHUB_OUTPUT"
+                        echo "::notice::.ci-engine sagt 'woodpecker' — dieser Lauf gehoert nach https://ci.plaintext.ch." ;;
+            *)          echo "::error::.ci-engine enthaelt '$MOTOR' — weder 'github' noch 'woodpecker'."; exit 1 ;;
+          esac
 
       - name: Auf den alten Namespace pruefen
+        if: steps.motor.outputs.zustaendig == 'true'
         run: ./quality/namespace-lint.sh .
