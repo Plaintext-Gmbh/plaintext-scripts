@@ -90,8 +90,12 @@ pruefe "kein Tag -> POM"                     "1.0.0"    "$(hoechste_version '1.0
 pruefe "numerisch, nicht lexikalisch"       "1.100.0"  "$(hoechste_version '1.99.0' '1.100.0')"
 pruefe "Folge-Release nach abgebrochenem Lauf (Tag 2.1710.0, POM 2.1709.0-SNAPSHOT) = 2.1711.0" \
        "2.1711.0 2.1711.0-SNAPSHOT" "$(compute_release_versions "$(hoechste_version '2.1709.0-SNAPSHOT' '2.1710.0')" 2)"
-pruefe "do_release rechnet ab versionsbasis" "ja" \
-       "$(sed -n '/^do_release() {/,/^}/p' "$SKRIPT" | grep -q 'compute_release_versions "$(versionsbasis' && echo ja || echo nein)"
+# Seit dem Release-Lock (30.08.2026) rechnet nicht mehr do_release selbst, sondern der
+# gesperrte Abschnitt release_nummer_beanspruchen. Beim Rebase dieses PRs auf master ist der
+# Fall genau daran rot geworden — geprueft wird deshalb ueber BEIDE Funktionen, wie es der
+# Regressionswaechter weiter unten schon vormacht.
+pruefe "der Release-Pfad rechnet ab versionsbasis" "ja" \
+       "$( { sed -n '/^do_release() {/,/^}/p' "$SKRIPT"; sed -n '/^release_nummer_beanspruchen() {/,/^}/p' "$SKRIPT"; } | grep -q 'compute_release_versions "$(versionsbasis' && echo ja || echo nein)"
 pruefe "Lokal-Release-Plan rechnet ab versionsbasis" "ja" \
        "$(sed -n '/^do_local_release() {/,/^}/p' "$SKRIPT" | grep -q 'compute_release_versions "$(versionsbasis' && echo ja || echo nein)"
 
