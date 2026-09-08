@@ -62,7 +62,8 @@ ensure_podman_running() {
 
 # Auto-detect NAS IP: Use NAT IP when running on Zorin VM
 #
-# Karte 1134 (08.09.2026): der Zweig unten ist NICHT mehr das IP-Literal 192.168.1.224.
+# Karte 1134 (08.09.2026): der Zweig unten nimmt einen NAMEN, wo einer traegt — das reine
+# IP-Literal 192.168.1.224 reicht im CI-Runner nicht mehr.
 # Seit der Runner kein `network_mode: host` mehr hat (Karte 988), legt der Twingate-Client
 # im Container eine Route `192.168.1.224 dev sdwan0` an und zieht jeden Zugriff ueber das
 # LITERAL in den Tunnel — der fuehrt nicht zum NAS zurueck, weil der Client auf demselben
@@ -76,13 +77,29 @@ ensure_podman_running() {
 # `extra_hosts` im Runner-Stack schlaegt den DNS-Weg, den Twingate ebenfalls uebernimmt —
 # aber eben nur fuer NAMEN. Deshalb steht hier einer.
 #
-# nas.plaintext.ch ist ein A-Record auf 192.168.1.224, DNS-only, exakt wie maven.plaintext.ch.
-# Ausserhalb des Runners ist der Austausch damit verhaltensgleich: der Name loest ueberall
-# auf dieselbe Adresse auf (oeffentlich, im LAN und auf dem NAS selbst).
+# nas.plaintext.ch ist ein A-Record auf 192.168.1.224, DNS-only, angelegt wie maven.plaintext.ch.
+#
+# WARUM DER NAME NICHT BEDINGUNGSLOS GESETZT WIRD: der LAN-Resolver liefert ihn nicht.
+# Gemessen, mit Messprobe statt Vermutung — ein zweiter, frisch angelegter A-Record auf eine
+# OEFFENTLICHE Adresse (203.0.113.7), damit die Erklaerung "Rebind-Schutz" ausscheidet:
+#     dig @1.1.1.1      <probe>.plaintext.ch  -> 203.0.113.7   (sofort da)
+#     dig @192.168.1.1  <probe>.plaintext.ch  -> NOERROR, 0 Antworten
+#     dig @192.168.1.1  nas.plaintext.ch      -> NOERROR, 0 Antworten
+#     dig @192.168.1.1  maven.plaintext.ch    -> 192.168.1.224, TTL zaehlt runter
+# Neu angelegte Namen der Zone kommen im LAN also nicht an, alte schon. Genau dort haengt
+# aber der Woodpecker-Agent, und dessen deploy.yml sourct diese Datei fuer 68 SSH-Aufrufe.
+# Ein bedingungsloser Name haette jeden App-Deploy stillgelegt.
+#
+# Deshalb: Name, WENN er aufloest — sonst das Literal, das ausserhalb des Runners nie
+# ausgefallen ist. Im CI-Runner loest er immer auf, weil `extra_hosts` ihn in /etc/hosts
+# schreibt; dort ist die Bedingung also eine Konstante. Faellt `getent` ganz aus (musl-Images
+# kennen es nicht), gilt das Literal — der Zweig faellt in die sichere Richtung.
 if [ "$(hostname)" = "plaintext-zorin" ]; then
     NAS_HOST="192.100.0.1"
-else
+elif getent hosts nas.plaintext.ch >/dev/null 2>&1; then
     NAS_HOST="nas.plaintext.ch"
+else
+    NAS_HOST="192.168.1.224"
 fi
 
 DEPLOY_SERVER="mad@${NAS_HOST}"
