@@ -1,5 +1,26 @@
 #!/bin/bash
 # Generiert die naechste Flyway-Versionsnummer und prueft auf Konflikte
+#
+# KARTE 1121 (08.09.2026) — WARUM HIER SEIT NEUEM GEFETCHT WIRD:
+# Bis dahin verglich dieses Skript die neue Nummer ausschliesslich mit den Migrationen im
+# LOKALEN Arbeitsstand (`find . -name "V*__*.sql"`). Ein Klon, der aelter ist als origin/master,
+# sieht die kollidierende Datei nicht — und meldet die eigene, gerade erzeugte Migration als
+# "hoechste existierende Version". Genau so entstand Karte 1120: `V1788709017` lag zweimal in
+# plaintext-guild (Modul -lists und Modul -portal), Flyway brach beim Kontextstart ab
+# ("Found more than one migration with version 1788709017"), und sichtbar wurde es als roter
+# Playwright-Lauf.
+#
+# Geprueft wird deshalb gegen die REMOTE-ZWEIGE, nicht nur gegen origin/master: die
+# gefaehrlichste Lage ist nicht der veraltete Klon, sondern der PARALLELE Zweig eines zweiten
+# Bearbeiters, dessen Migration noch gar nicht gemergt ist. `origin/master` allein faende den
+# nie.
+#
+# DAS ERSETZT DIE CI-REGEL NICHT. Ein Zweig, der noch nicht gepusht ist, steht in keinem Ref;
+# zwei Bearbeiter koennen dieselbe Sekunde also weiterhin zeitgleich ziehen. Die verbindliche
+# Pruefung ist quality/flyway-dubletten-lint.sh im CI-Lauf jedes Repos — dieses Skript hier
+# macht den Fall nur seltener und meldet ihn frueher.
+
+set -u
 
 # Verwende Unix-Timestamp (Sekunden seit 1970-01-01)
 NEXT_VERSION=$(date +%s)
@@ -11,33 +32,113 @@ echo ""
 echo "Generierte Versionsnummer: $NEXT_VERSION"
 echo ""
 
-# Finde alle existierenden Flyway-Migrationen
-echo "Pruefe existierende Migrationen..."
-MIGRATION_FILES=$(find . -type f -name "V*__*.sql" 2>/dev/null | sort)
+# ── Remote-Stand holen ────────────────────────────────────────────────────────
+# LAUT, nicht leise. Ein stillschweigend uebersprungener Fetch ist der Zustand, den dieses
+# Skript vorher hatte — und er sah aus wie ein erfolgreicher Lauf. `timeout` deshalb, weil ein
+# haengendes ssh (VPN aus, Agent ohne Schluessel) das Skript sonst unbegrenzt blockiert.
+IM_GIT=0
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    IM_GIT=1
+    echo "Hole den Remote-Stand (git fetch origin) ..."
+    if timeout 30 git fetch -q --prune origin 2>/dev/null; then
+        echo "  Remote-Stand aktuell."
+    else
+        echo "  WARNUNG: 'git fetch origin' ist fehlgeschlagen oder lief in den Timeout (30 s)."
+        echo "           Verglichen wird jetzt nur mit dem, was der Klon gerade kennt — eine"
+        echo "           Migration, die inzwischen auf einem anderen Zweig liegt, bleibt unsichtbar."
+        echo "           Netz/VPN pruefen und erneut aufrufen."
+    fi
+else
+    echo "Kein Git-Arbeitsverzeichnis — verglichen wird nur mit den Dateien unter '$PWD'."
+fi
+echo ""
 
-if [ -z "$MIGRATION_FILES" ]; then
+# ── Alle bekannten Migrationsnummern einsammeln ───────────────────────────────
+# Quelle 1: der Arbeitsstand (auch noch nicht committete Dateien).
+# Quelle 2: JEDER Remote-Zweig (refs/remotes/origin/*), nicht nur master.
+#
+# ROH traegt drei Spalten: Version, PFAD, Herkunft. Entscheidend ist, dass fuer die
+# Dublettensuche danach auf (Version, PFAD) entdoppelt wird — dieselbe Datei taucht in jedem
+# Remote-Zweig auf, und ohne die Entdopplung meldete das Skript jede einzelne Migration als
+# "mehrfach vergeben". Ausserdem bleibt `target/` draussen: der Maven-Bau kopiert die
+# Migrationen dorthin, und diese Kopie ist keine zweite Migration.
+echo "Pruefe existierende Migrationen..."
+
+ROH=""
+
+LOKAL=$(find . \( -name .git -o -name target -o -name node_modules \) -prune -o \
+        -type f -name "V*__*.sql" -print 2>/dev/null \
+        | grep -E '(^|/)db/migration/V[0-9]+__' | sed 's#^\./##' | sort)
+if [ -n "$LOKAL" ]; then
+    ROH=$(printf '%s\n' "$LOKAL" | sed 's#.*/V\([0-9][0-9]*\)__.*#\1\t&\tArbeitsstand#')
+fi
+
+ZWEIGE=0
+if [ "$IM_GIT" -eq 1 ]; then
+    while IFS= read -r ref; do
+        [ -n "$ref" ] || continue
+        case "$ref" in */HEAD) continue ;; esac
+        ZWEIGE=$((ZWEIGE + 1))
+        TREFFER=$(git ls-tree -r --name-only "$ref" 2>/dev/null \
+            | grep -E '(^|/)db/migration/V[0-9]+__' \
+            | sed "s#.*/V\([0-9][0-9]*\)__.*#\1\t&\t${ref#refs/remotes/}#")
+        [ -n "$TREFFER" ] && ROH=$(printf '%s\n%s' "$ROH" "$TREFFER")
+    done < <(git for-each-ref --format='%(refname)' refs/remotes/origin 2>/dev/null)
+    echo "  Beruecksichtigt: Arbeitsstand + $ZWEIGE Remote-Zweige unter refs/remotes/origin."
+fi
+
+ROH=$(printf '%s\n' "$ROH" | grep -v '^[[:space:]]*$')
+
+if [ -z "$ROH" ]; then
     echo "Keine Migrationen gefunden"
     echo ""
     echo "Version $NEXT_VERSION kann verwendet werden"
     exit 0
 fi
 
+# Je Migrationsdatei genau eine Zeile, egal in wie vielen Zweigen sie liegt.
+PFADE=$(printf '%s\n' "$ROH" | cut -f1,2 | sort -u)
+
+# ── Bereits doppelt vergebene Nummern ─────────────────────────────────────────
+# Der Fall aus Karte 1120: die Kollision besteht schon, bevor irgendjemand eine neue Nummer
+# zieht — und sie kann auch zwischen einem gemergten und einem noch offenen Zweig liegen.
+# Sie hier zu melden ist billiger als der rote CI-Lauf, der sie sonst findet.
+DUBLETTEN=$(printf '%s\n' "$PFADE" | cut -f1 | sort | uniq -d)
+if [ -n "$DUBLETTEN" ]; then
+    echo ""
+    echo "ACHTUNG: Diese Versionsnummern sind MEHRFACH vergeben:"
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        echo "  Version $d:"
+        while IFS=$'\t' read -r _ pfad; do
+            [ -n "$pfad" ] || continue
+            QUELLEN=$(printf '%s\n' "$ROH" | awk -F'\t' -v p="$pfad" '$2 == p { print $3 }' | sort -u | tr '\n' ' ')
+            echo "    $pfad"
+            echo "      gefunden in: $QUELLEN"
+        done < <(printf '%s\n' "$PFADE" | awk -F'\t' -v v="$d" '$1 == v')
+    done <<< "$DUBLETTEN"
+    echo ""
+    echo "  Solange zwei davon im selben Bau landen, bricht Flyway beim Kontextstart ab"
+    echo "  ('Found more than one migration with version ...'). Eine der Dateien umbenennen."
+    echo ""
+fi
+
 # Extrahiere die hoechste Versionsnummer
 MAX_VERSION=0
 MAX_VERSION_FILE=""
-
-while IFS= read -r file; do
-    # Extrahiere Versionsnummer aus Dateinamen (z.B. V820887909__...)
-    VERSION=$(basename "$file" | sed 's/^V\([0-9]*\)__.*/\1/')
-
-    if [ "$VERSION" -gt "$MAX_VERSION" ]; then
-        MAX_VERSION=$VERSION
-        MAX_VERSION_FILE=$file
+while IFS=$'\t' read -r version pfad; do
+    [ -n "$version" ] || continue
+    if [ "$version" -gt "$MAX_VERSION" ] 2>/dev/null; then
+        MAX_VERSION=$version
+        MAX_VERSION_FILE=$pfad
     fi
-done <<< "$MIGRATION_FILES"
+done <<< "$PFADE"
+
+MAX_QUELLE=$(printf '%s\n' "$ROH" | awk -F'\t' -v p="$MAX_VERSION_FILE" '$2 == p { print $3 }' | sort -u | tr '\n' ' ')
 
 echo "Hoechste existierende Version: $MAX_VERSION"
 echo "Datei: $MAX_VERSION_FILE"
+echo "Gefunden in: $MAX_QUELLE"
 echo ""
 
 # Vergleiche mit generierter Version

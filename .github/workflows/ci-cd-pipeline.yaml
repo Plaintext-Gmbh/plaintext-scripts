@@ -303,13 +303,25 @@ jobs:
   #     Woodpecker-Deploy aufhalten — er faerbt nur den GitHub-Lauf.
   # Folge: ein Repo im Woodpecker-Modus hat weiterhin einen GitHub-Lauf je Push, der genau
   # diesen einen Job ausfuehrt. Das ist der sichtbare Preis dieser Entscheidung.
+  #
+  # ZWEITER MIETER SEIT KARTE 1121 (08.09.2026): die Flyway-Dubletten-Pruefung. Sie sitzt hier
+  # und nicht in einem eigenen Job, weil sie exakt dieselben Zutaten braucht (die beiden
+  # Checkouts) und in Sekunden durch ist — ein eigener Job kostete einen zweiten Runner-Start
+  # fuer einen Aufruf von `git ls-files`. Deshalb heisst der Job jetzt "Repo-Lint"; die JOB-ID
+  # bleibt `namespace-lint`, damit nichts bricht, was sie referenziert.
   namespace-lint:
-    name: Namespace-Lint
+    name: Repo-Lint
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - name: Checkout Projekt
+        # OHNE `ref:` — und das ist fuer die Flyway-Pruefung im Schritt unten der entscheidende
+        # Punkt: bei `pull_request` checkt actions/checkout von sich aus refs/pull/N/merge aus,
+        # also den Stand NACH dem Merge nach master. Genau darauf beruht, dass die Kollision aus
+        # Karte 1120 (zwei Zweige, jeder fuer sich sauber) hier VOR dem Merge auffaellt. Wer hier
+        # ein `ref: ${{ github.event.pull_request.head.sha }}` ergaenzt, macht die Pruefung auf
+        # den haeufigsten Fall blind, ohne dass irgendetwas rot wird.
         uses: actions/checkout@v7
         with:
           path: projekt
@@ -327,6 +339,23 @@ jobs:
         # NICHT findet) — sonst waere ein kaputter Check von einem sauberen Repo nicht zu
         # unterscheiden.
         run: ./werkzeuge/quality/namespace-lint.sh projekt
+
+      - name: Auf doppelte Flyway-Versionsnummern pruefen
+        # Karte 1120/1121: zwei Migrationen mit derselben Nummer in verschiedenen Modulen
+        # (`V1788709017` in plaintext-guild-lists UND -portal). Flyway legt alle Module in EINEN
+        # Versionsraum und bricht beim Kontextstart ab — sichtbar wurde das als roter
+        # PLAYWRIGHT-Lauf, also an einer Stelle ohne jeden Bezug zur Ursache.
+        #
+        # `if: always()` (bzw. hier: der Lauf auch nach einem Namespace-Fund): bewusst NICHT
+        # gesetzt. Beide Lints im selben Job heisst, der zweite laeuft nur, wenn der erste
+        # gruen war. Das ist hier vertretbar — ein Namespace-Verstoss ist selten und wird sofort
+        # behoben; die Alternative waere ein zweiter Runner-Start je Push. Wer das anders
+        # gewichtet, setzt `if: always()` an DIESEN Schritt, nicht an den Job.
+        #
+        # Das Skript testet sich, wie namespace-lint.sh, in jedem Lauf zuerst selbst: es legt ein
+        # kuenstliches Duplikat an und bricht ab, wenn es das NICHT rot meldet. Ein gruener Lauf
+        # dieses Schritts belegt damit beides — dass das Repo sauber ist UND dass die Regel greift.
+        run: ./werkzeuge/quality/flyway-dubletten-lint.sh projekt
 
   # ── Build + Test + Coverage ────────────────────────────────────
   ci:
