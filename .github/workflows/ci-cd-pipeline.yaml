@@ -309,6 +309,32 @@ jobs:
   # Checkouts) und in Sekunden durch ist — ein eigener Job kostete einen zweiten Runner-Start
   # fuer einen Aufruf von `git ls-files`. Deshalb heisst der Job jetzt "Repo-Lint"; die JOB-ID
   # bleibt `namespace-lint`, damit nichts bricht, was sie referenziert.
+  #
+  # ── WAS DIESER JOB BEWUSST NICHT FAENGT: `[skip ci]` (Karte 1128, Restluecke 3) ────────────
+  # Ein Commit mit `[skip ci]`, `[ci skip]` oder `[skip-ci]` in der BETREFFZEILE laesst GitHub
+  # bei `push` und `pull_request` gar keinen Lauf entstehen. Kein Lauf heisst: auch dieser Job
+  # nicht. Wer eine Flyway-Migration in einem so betitelten Commit mergt, kommt an beiden
+  # Lints vorbei. Das ist HIER NICHT ZU SCHLIESSEN, und zwar nicht aus Bequemlichkeit —
+  # der Skip greift, bevor irgendein Job dieser Datei existiert. Ein `if:` kann nichts
+  # ueberstimmen, was nie gestartet ist.
+  #
+  # ES BLEIBT ALSO OFFEN — ABER NICHT UNBEGRENZT, und diese Schranke ist gemessen, nicht
+  # angenommen: `schedule` ist vom Skip-Marker NICHT betroffen. Die ci-cd.yaml aller vier
+  # Anwendungsrepos hat einen naechtlichen `schedule`-Eintrag, dieser Job haengt an keinem
+  # anderen und hat keine `if:`-Bedingung — er laeuft in jedem dieser Laeufe mit. Nachgemessen
+  # am 08.09.2026 an plaintext-schuetu, Lauf 34198709276 (Ereignis `schedule`):
+  #     skip-pruefung        : success
+  #     pipeline / Repo-Lint : success      <-- laeuft
+  #     pipeline / Build & Test, Deploy, Sonar, Verify DEV/PROD : skipped
+  # Eine per `[skip ci]` durchgerutschte Dublette faellt damit spaetestens beim naechsten
+  # naechtlichen Lauf auf, also innerhalb von 24 Stunden — auf master statt in einem PR, aber
+  # immer noch VOR dem naechsten Deploy und weit vor einem roten Playwright-Lauf.
+  #
+  # WER DAS ENGER HABEN WILL, hat genau zwei Hebel, und beide liegen ausserhalb dieser Datei:
+  # den Skip-Marker bei Merges mit Anwendungscode nicht setzen (Rollenregel, nicht erzwingbar),
+  # oder eine Branch-Protection-Regel, die "Repo-Lint" als required check fuehrt — dann laesst
+  # GitHub den Merge ohne den Lauf nicht zu. Letzteres ginge heute nur in plaintext-root, dem
+  # einzigen Repo der Familie mit Branch Protection.
   namespace-lint:
     name: Repo-Lint
     runs-on: ubuntu-latest
@@ -356,6 +382,39 @@ jobs:
         # kuenstliches Duplikat an und bricht ab, wenn es das NICHT rot meldet. Ein gruener Lauf
         # dieses Schritts belegt damit beides — dass das Repo sauber ist UND dass die Regel greift.
         run: ./werkzeuge/quality/flyway-dubletten-lint.sh projekt
+
+      - name: Auf doppelte Flyway-Nummern in den NACHBARREPOS pruefen
+        # ── KARTE 1128, Restluecke 1 aus Karte 1121 ────────────────────────────────────────
+        # Der Schritt darueber prueft nur DIESES Repo. Flyway scannt aber `classpath:db/migration`
+        # ueber den GANZEN Klassenpfad, und der endet nicht am Repo: jede der vier Anwendungen
+        # zieht plaintext-root-* als Parent und Abhaengigkeit, plaintext-guild zusaetzlich neun
+        # Module aus dem app-Repo (plaintext-app-interfaces, plaintext-z-wiki, -z-mailbox,
+        # -z-rechnungen, -z-postkonto, -z-kontakte, -z-auszahlungen, -z-countdown,
+        # -z-kalenderhost). Eine root-Migration und eine app-Migration mit derselben Nummer sind
+        # in BEIDEN Repos gruen und brechen den Kontextstart trotzdem ab.
+        #
+        # WARUM DAS SKRIPT DIE NUMMERN LIVE HOLT statt aus einer gepflegten Liste zu lesen, und
+        # welche zwei Bauformen dafuer verworfen wurden (zentraler Klon-Job / veroeffentlichte
+        # Nummernliste): ausfuehrlich im Kopf von quality/flyway-fremdrepo-lint.sh. Kurz: beide
+        # koennen nur nachtraeglich melden, was schon gemergt ist.
+        #
+        # WELCHER TOKEN UND WARUM NICHT github.token: `github.token` gilt nur fuer DIESES Repo;
+        # die Baum-API der vier anderen (privaten) Repos braucht ein uebergreifendes Leserecht.
+        # Genommen wird MVN_DEPLOY_TOKEN, weil dieser Workflow ihn OHNEHIN schon bekommt (er
+        # checkt damit oben plaintext-scripts aus) — es kommt also kein Geheimnis dazu.
+        # AUSDRUECKLICH NICHT AUTOBUMP_TOKEN: Karte 717 hat die Secret-Liste der aufrufenden
+        # Repos genau deshalb von `inherit` auf eine Aufzaehlung umgestellt, damit dieser
+        # Schreib-Token NICHT in den oeffentlichen plaintext-scripts-Workflow gelangt. Wer ihn
+        # hier einträgt, macht Karte 717 rueckgaengig.
+        #
+        # DER SCHRITT IST BLOCKIEREND, seine Vorwarnung auf offene Pull Requests dagegen nur
+        # eine Warnung. Begruendung fuer beides im Skriptkopf bzw. an Teil 2 des Skripts.
+        env:
+          GH_TOKEN: ${{ secrets.MVN_DEPLOY_TOKEN }}
+        run: |
+          ./werkzeuge/quality/flyway-fremdrepo-lint.sh projekt \
+            --eigenes "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}"
 
   # ── Build + Test + Coverage ────────────────────────────────────
   ci:
