@@ -1,0 +1,32 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "WARUM DIESES REPO DOCH RENOVATE BEKOMMT (Karte 1138, 08.09.2026).",
+    "Am 07.09.2026 wurde der Onboarding-PR #97 mit der Begruendung geschlossen, dieses Repo sei",
+    "'reines Shell ohne versionierte Abhaengigkeiten' (Karte 1115). Dieselbe Begruendung steht als",
+    "Kommentar in plaintext-config/.woodpecker/renovate.yml. Sie trifft nicht zu, und der",
+    "geschlossene PR #97 belegt es selbst: er listete runtime/Dockerfile und acht",
+    ".github/workflows/*.yaml als gefundene Package-Dateien.",
+    "runtime/Dockerfile ist das Basis-Image ALLER Plaintext-App-Container (M3: Jar im Volume,",
+    "plaintext-runtime:jre25). Der eclipse-temurin-Pin darin ist der einzige, der etwas bewirkt.",
+    "Die per-App-Dockerfile in app/iot/fwtool/schuetu sind tote Kopien, die seit M3 niemand mehr",
+    "baut — Renovate pflegte bis heute genau diese Kopien (app#813, iot#200, fwtool#96,",
+    "schuetu#239, alle am 08.09.2026 geschlossen) und das Original nicht.",
+    "ENG GEHALTEN: ignorePaths nimmt .github/workflows/** aus. Gepflegt wird vorerst NUR das",
+    "Basis-Image — das ist der Gegenstand von Karte 1138. Die Workflow-Actions mitzupflegen ist",
+    "eine eigene Entscheidung (PR #97 hatte dafuer genau einen Vorschlag vorhergesagt, node v24);",
+    "wer sie will, streicht die eine ignorePaths-Zeile. Bewusst ignorePaths und keine packageRule",
+    "mit enabled:false — so ist es in plaintext-dockercompose entschieden (Karte 1130).",
+    "WAS EIN MERGE HIER NICHT TUT: er rollt nichts aus. runtime/build-runtime.sh baut das Image",
+    "und laedt es von Hand auf den NAS, danach muessen die Container neu erzeugt werden. Ohne",
+    "diesen Schritt entsteht hier dieselbe Drift wie bei den toten Kopien — nur an der Stelle, an",
+    "der sie jemand sieht. Der Renovate-PR ist die Meldung 'es gibt eine neue JRE', nicht der",
+    "Rollout."
+  ],
+  "extends": [
+    "config:recommended"
+  ],
+  "ignorePaths": [
+    ".github/workflows/**"
+  ]
+}
