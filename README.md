@@ -544,12 +544,33 @@ exec "${PLAINTEXT_SCRIPTS_DIR:-$HOME/codeplain/plaintext-scripts}/ci/root-autobu
 ```
 
 Aufruf: `root-autobump.sh detect` (stdout + `GITHUB_OUTPUT`: current/parent/latest/behind/
-vollstaendig/fehlend/bump) bzw. `root-autobump.sh apply [version]`. Umgebung: `POM_FILE`
+vollstaendig/fehlend/bump/geprueft) bzw. `root-autobump.sh apply [version]`. Umgebung: `POM_FILE`
 (Default `pom.xml`), `ROOT_MAVEN_REPO` (Default `https://maven.plaintext.ch/releases`),
 `BUMP_IGNORIERE_MODULE` (s. u.). Ein Interfaces-Pin
 `<plaintext-root-interfaces.version>${plaintext-root.version}</...>` gilt als **gekoppelt**
 (folgt dem Bump von selbst); nur ein abweichendes Literal wird als „entkoppelt" gemeldet und
 nicht angefasst.
+
+**Rueckgabecodes von `detect` (Karte 1127).** Sie sind der Unterschied zwischen „nachgesehen,
+nichts zu tun" und „konnte nicht nachsehen":
+
+| Code | Bedeutung |
+|---|---|
+| `0` | Die Quelle wurde gelesen. Ob gebumpt wird, steht in `bump=` — auch „Release noch im Upload" ist ein `0` (kein Fehler, naechster Lauf). |
+| `1` | Harter Abbruch: die Antwort waere falsch (Property fehlt, Artefakt in root verschwunden, unbekannter Modus). |
+| `4` | **Nicht nachgesehen** — das Maven-Repo hat nicht geantwortet. Keine Aussage ueber den Rueckstand, weder „kein Bump" noch „Bump noetig". |
+
+Bis zum 07.09.2026 endete auch „kein Bump noetig" mit `1`, und der Workflow rief das Skript mit
+`|| true` auf: Ausfall und Ruhe sahen fuer die Ampel gleich aus. Als Twingate
+`maven.plaintext.ch` in den Tunnel zog, meldete der Lauf tagelang „kein Rueckstand" bei neun
+Releases Rueckstand — sichtbar nur an einer Zeile mitten im Log. Der Detect-Schritt im Workflow
+faengt seither nichts mehr ab; ein Lauf, der nicht nachsehen konnte, ist rot. Die Gegenprobe
+laesst sich jederzeit wiederholen:
+
+```bash
+ROOT_MAVEN_REPO="https://maven-gibt-es-nicht.plaintext.ch/releases" ci/root-autobump.sh detect
+echo $?   # 4, mit ::error title=Auto-Bump konnte nicht nachsehen
+```
 
 **Nur vollstaendige Releases (Massnahme 4, 29.08.2026 — „halbes Release sichtbar").**
 `mvn deploy` von root laedt 24 Module ueber rund 15 Minuten hoch; die `<release>`-Angabe der
@@ -710,7 +731,7 @@ A **Glass sound** plays whenever Claude Code finishes a response. Detection work
 | `tui-common.sh` | Terminal UI primitives (colors, box drawing, menu rendering) |
 | `tui-build-logic.sh` | Build, release, deploy, and version management logic |
 | `test-lokal-release.sh` | Guards for the release path (native `[skip ci]` subject, preflight order, rollback, release notes) |
-| `test-root-autobump.sh` | Vollstaendigkeitspruefung (Massnahme 4): halbes Release, komplett, Parent fehlt, Ausnahmen, Selbstkontrolle |
+| `test-root-autobump.sh` | Vollstaendigkeitspruefung (Massnahme 4): halbes Release, komplett, Parent fehlt, Ausnahmen, Selbstkontrolle; dazu Karte 1127: Repo antwortet nicht -> Exit 4 statt gruen |
 | `test-release-lock.sh` | Nachgestellte Race der Versionsvergabe: zwei parallele Laeufe mit und ohne Release-Lock, verwaister Lock, Fehlerfall, SIGTERM, NAS-Ausfall |
 | `ci/root-autobump.sh` | Kanonisches Auto-Bump-Skript fuer die App-Repos (siehe oben) |
 | `ci/reposilite-release.sh` | Bibliothek: ist ein Multi-Modul-Release im Maven-Repo vollstaendig? (Auto-Bump + Release-Selbstkontrolle) |
