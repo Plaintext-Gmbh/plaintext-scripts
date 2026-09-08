@@ -22,6 +22,10 @@
 #   F  Modulliste: auskommentierte Module und Module in <profiles> zaehlen nicht
 #   G  nicht pruefbar (5xx) zaehlt wie fehlend und wird mit HTTP-Code gemeldet
 #   H  Selbstkontrolle im Release-Job: nie fatal, Verzeichnis -> artifactId, ::warning in der CI
+#   I  (Karte 1127) Repo antwortet gar nicht      -> detect: Exit 4, ::error, KEINE Outputs
+#   J  (Karte 1127) Repo bricht mitten in der Modulpruefung weg -> detect: Exit 4, nicht "warten"
+#      Beide sind die Gegenprobe zum Fehler, um den es geht: "konnte nicht nachsehen" darf nie
+#      wie "kein Rueckstand" aussehen.
 #
 # Aufruf:  ./test-root-autobump.sh
 set -uo pipefail
@@ -143,8 +147,11 @@ pruefe "apply: Exit 0"                                "0"                    "$R
 pruefe "apply: Pin gebumpt"                           "1.638.0"              "$(pin)"
 pruefe "apply: parent gebumpt"                        "1.638.0"              "$(parent)"
 lauf detect
-pruefe "detect danach: kein Bump mehr (Exit 1)"       "1"                    "$RC"
+# Karte 1127: "kein Bump noetig" endete frueher mit Exit 1 — genau wie ein Netzfehler. Genau
+# diese Verwechslung liess den Ausfall des Maven-Repos als "kein Rueckstand" durchgehen.
+pruefe "detect danach: kein Bump mehr, aber NACHGESEHEN (Exit 0)" "0"        "$RC"
 pruefe "detect danach: bump=false"                    "false"                "$(ausgabe bump)"
+pruefe "detect danach: geprueft=true"                 "true"                 "$(ausgabe geprueft)"
 pruefe "detect danach: vollstaendig=true (keine Pruefung noetig, nichts behauptet)" "true" "$(ausgabe vollstaendig)"
 
 echo "== C: Metadata kennt 1.640.0, Parent-POM noch nicht da ======================"
@@ -238,7 +245,52 @@ pruefe "ohne mvn deploy: nichts zu pruefen, still"    "0:" "$RC:$AUS"
 AUS="$(cd "$Q" && CI='' release_vollstaendig_pruefen 9.9.9 2>&1)"; RC=$?
 pruefe "Parent fehlt: return 0, rote Zeile"           "0:ja" "$RC:$(printf '%s' "$AUS" | grep -q 'Parent-POM plaintext-root-parent-9.9.9.pom nicht im Release-Repo' && echo ja || echo nein)"
 
+echo "== I: Repo antwortet gar nicht (Karte 1127) ================================"
+# Der Fehler, um den es in Karte 1127 geht: bis zum 07.09.2026 endete `detect` sowohl bei
+# "kein Rueckstand" als auch bei "Repo nicht erreichbar" mit Exit 1, und der Workflow rief das
+# Skript mit `|| true` auf — beide Faelle waren fuer die Ampel derselbe gruene Schritt.
+consumer_pom 1.636.0 plaintext-root-common plaintext-root-web
+ROOT_MAVEN_REPO="file://$T/gibt-es-nicht" lauf detect
+pruefe "Repo weg: Exit 4 (nicht 0 und nicht 1)"       "4"                    "$RC"
+pruefe "Repo weg: ::error 'konnte nicht nachsehen'"   "ja" \
+       "$(printf '%s' "$AUS" | grep -q '::error title=Auto-Bump konnte nicht nachsehen::' && echo ja || echo nein)"
+pruefe "Repo weg: KEIN bump= in den Outputs (leer heisst 'keine Antwort')" "" "$(ausgabe bump)"
+pruefe "Repo weg: behauptet nicht 'kein Rueckstand'"  "0" \
+       "$(printf '%s' "$AUS" | grep -c 'bump=false' || true)"
+
+echo "== J: Repo bricht in der Modulpruefung weg (Karte 1127) ====================="
+# Die zweite Stelle mit HTTP-Zugriff: die Metadata ist noch lesbar, das Parent-POM des Release
+# nicht mehr. Frueher hiess das pauschal "Release noch im Upload, naechster Lauf" — Exit 0.
+# curl-Attrappe im PATH, damit genau EINE URL wegbricht und alles andere echt bleibt.
+mkdir -p "$T/bin"
+CURL_ECHT="$(command -v curl)"
+cat > "$T/bin/curl" <<EOF
+#!/usr/bin/env bash
+# Attrappe (Test J): beantwortet die URL aus \$CURL_KAPUTT wie ein weggebrochenes Repo
+# (Exit 7, keine Ausgabe -> %{http_code} bleibt leer und wird vom Aufrufer zu 000).
+for a in "\$@"; do case "\$a" in *"\${CURL_KAPUTT:-@@nie@@}"*) exit 7 ;; esac; done
+exec "$CURL_ECHT" "\$@"
+EOF
+chmod +x "$T/bin/curl"
+PATH="$T/bin:$PATH" CURL_KAPUTT="plaintext-root-parent-1.638.0.pom" lauf detect
+pruefe "Modulpruefung weg: Exit 4"                    "4"                    "$RC"
+pruefe "Modulpruefung weg: nennt das Parent-POM"      "ja" \
+       "$(printf '%s' "$AUS" | grep -q 'Parent-POM von 1.638.0 nicht lesbar' && echo ja || echo nein)"
+pruefe "Modulpruefung weg: geprueft=false"            "false"                "$(ausgabe geprueft)"
+pruefe "Modulpruefung weg: keine 'naechster Lauf'-Beruhigung" "0" \
+       "$(printf '%s' "$AUS" | grep -c 'naechster Lauf' || true)"
+# Gegenprobe zur Attrappe selbst: ohne kaputte URL laeuft derselbe Aufruf normal durch.
+PATH="$T/bin:$PATH" lauf detect
+pruefe "Attrappe untaetig: wieder Exit 0"             "0"                    "$RC"
+
 echo "== Verdrahtung ============================================================="
+# Karte 1127: das `|| true` im Detect-Schritt war der eigentliche Befund. Es darf nicht
+# zurueckkommen — ein Lauf, der nicht nachsehen konnte, muss rot sein.
+WF="$HIER/.github/workflows/root-autobump.yaml"
+pruefe "Workflow: Detect-Schritt ohne '|| true'"      "0" \
+       "$(grep -c 'root-autobump.sh detect || true' "$WF" || true)"
+pruefe "Workflow: Detect-Schritt ruft das Skript nackt auf" "1" \
+       "$(grep -c 'run: bash .plaintext-scripts/ci/root-autobump.sh detect$' "$WF" || true)"
 pruefe "root-autobump.sh sourct die Bibliothek" "ja" "$(grep -q 'reposilite-release.sh' "$SKRIPT" && echo ja || echo nein)"
 pruefe "tui-build-logic.sh sourct die Bibliothek" "ja" "$(grep -q 'ci/reposilite-release.sh' "$TUI" && echo ja || echo nein)"
 # Seit dem Release-Lock (30.08.2026) steht der Build nicht mehr in do_release selbst, sondern

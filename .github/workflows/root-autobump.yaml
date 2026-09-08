@@ -144,9 +144,24 @@ jobs:
       # Parent — ein Bump in diesem Fenster sah ein halbes Release (Verify rot, unaufloesbarer
       # PR). Ist das Release noch im Upload, meldet das Skript `vollstaendig=false` + `fehlend`
       # und bump=false, Exit 0: kein Fehler, naechster Lauf. Der Cron des Aufrufers kommt wieder.
+      #
+      # KARTE 1127 — hier stand `|| true`. Das war der Grund, warum der Ausfall des Maven-Repos
+      # tagelang niemandem auffiel: `detect` endete mit 1 sowohl bei "kein Rueckstand" als auch
+      # bei "maven-metadata.xml nicht abrufbar". `|| true` machte aus beidem einen gruenen
+      # Schritt; ohne geschriebene Outputs ist `steps.detect.outputs.bump` dann leer, alle
+      # Folgeschritte haengen an `== 'true'` und werden uebersprungen — der Lauf endet gruen und
+      # behauptet damit "kein Rueckstand", obwohl er nichts gesehen hat. Real gemessen am
+      # 08.09.2026, Lauf 34195670774 (plaintext-iot): `success`, im Log
+      # `##[error]maven-metadata.xml fuer plaintext-root-parent nicht abrufbar` — bei 9 Releases
+      # Rueckstand.
+      #
+      # Jetzt trennt das Skript die beiden Faelle ueber den Rueckgabecode (0 = nachgesehen,
+      # 1 = harter Abbruch, 4 = nicht nachgesehen), und dieser Schritt faengt nichts mehr ab:
+      # ein Lauf, der nicht nachsehen konnte, ist ROT. Ob gebumpt wird, entscheidet weiterhin
+      # allein `steps.detect.outputs.bump` — nicht der Exitcode.
       - name: Neueste root-Version ermitteln
         id: detect
-        run: bash .plaintext-scripts/ci/root-autobump.sh detect || true
+        run: bash .plaintext-scripts/ci/root-autobump.sh detect
 
       # ── Guard 1: NAS-Last ────────────────────────────────────────────
       # Karte 875/882: hier stand `[ "$(printf '%.0f' "$LOAD")" -ge 8 ]`. printf RUNDET — die
@@ -564,6 +579,25 @@ jobs:
             echo "### Braucht einen Handgriff: Scope-Vertrag" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      # ── Meldung: die Quelle hat nicht geantwortet (Karte 1127) ───────
+      # Der Autobump laeuft nachts. Ein roter Lauf allein faellt erst am naechsten Morgen auf —
+      # und genau diese Verzoegerung hat den Ausfall vom 06.09. so lange getragen. Deshalb hier
+      # dieselbe Behandlung wie beim roten Verify: eine Meldung, die sagt, dass NICHTS gemessen
+      # wurde. Kein `if: failure()` an einem Verify-Schritt, sondern am detect selbst.
+      - name: Pushover wenn der Bump nicht nachsehen konnte
+        if: failure() && steps.detect.outcome == 'failure'
+        env:
+          PUSHOVER_APP_TOKEN: ${{ secrets.PUSHOVER_APP_TOKEN }}
+          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+        run: |
+          [ -n "${PUSHOVER_APP_TOKEN:-}" ] && [ -n "${PUSHOVER_USER_KEY:-}" ] || exit 0
+          curl -s --max-time 20 \
+            -F "token=${PUSHOVER_APP_TOKEN}" \
+            -F "user=${PUSHOVER_USER_KEY}" \
+            -F "title=Auto-Bump ${GITHUB_REPOSITORY}: nicht nachgesehen" \
+            -F "message=Der Auto-Bump konnte die root-Version nicht ermitteln (maven.plaintext.ch antwortet nicht). Das ist KEINE Aussage ueber den Rueckstand — der Lauf ist bewusst rot statt still gruen. Lauf: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            https://api.pushover.net/1/messages.json || true
+
       # ── Meldung: roter Verify = root-Release ist fuer uns kaputt ──────
       - name: Pushover bei rotem Verify
         # Nur wenn wirklich der VERIFY rot war. Vorher hing die Bedingung an steps.apply —
@@ -619,6 +653,7 @@ jobs:
             echo "| neueste | \`${{ steps.detect.outputs.latest || 'n/a' }}\` |"
             echo "| Rueckstand | \`${{ steps.detect.outputs.behind || 'n/a' }}\` Release(s) |"
             echo "| Release vollstaendig | \`${{ steps.detect.outputs.vollstaendig || 'n/a' }}\`${{ steps.detect.outputs.fehlend && format(' — fehlt: {0}', steps.detect.outputs.fehlend) || '' }} |"
+            echo "| Quelle gelesen | \`${{ steps.detect.outputs.geprueft || 'NEIN — Maven-Repo hat nicht geantwortet' }}\` |"
             echo "| Bump noetig | \`${{ steps.detect.outputs.bump || 'nein' }}\` |"
             echo "| Guard NAS-Last | \`${{ steps.load.outputs.skip == 'true' && 'gebremst' || steps.load.outcome }}\` |"
             echo "| Guard laufender Deploy | \`${{ steps.busy.outputs.skip == 'true' && 'gebremst' || steps.busy.outcome }}\` |"
