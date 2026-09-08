@@ -17,7 +17,8 @@ TUI_TITLE=MY PROJECT BUILD SYSTEM
 # ── Deployment ───────────────────────────────────────────────
 DEPLOY_PATH=/volume1/docker/myproject
 DEPLOY_USER=mad
-#NAS_HOST=192.168.1.224        # auto-detected by hostname if unset
+#NAS_HOST=nas.plaintext.ch     # auto-detected by hostname if unset (Karte 1134: Name,
+                               # nicht IP-Literal — im CI-Runner erreicht nur der Name den NAS)
 #REGISTRY_PORT=6666
 #NAS_REMOTE_TEMP=/volume1/docker/temp
 #COMPOSE_FILE=docker-compose.yaml

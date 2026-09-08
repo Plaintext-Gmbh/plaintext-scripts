@@ -1385,7 +1385,11 @@ jobs:
           umask 077
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H 192.168.1.224 >> ~/.ssh/known_hosts 2>/dev/null || true
+          # Karte 1134: Name statt IP-Literal. Der Runner hat kein Host-Netz mehr (Karte 988);
+          # das Literal zieht Twingate in den Tunnel, nur der Name laeuft ueber extra_hosts
+          # aufs Bridge-Gateway. Gescannt wird unter dem Namen, unter dem auch verbunden wird —
+          # sonst passt der Eintrag in known_hosts nicht zum spaeteren `ssh mad@<host>`.
+          ssh-keyscan -H nas.plaintext.ch >> ~/.ssh/known_hosts 2>/dev/null || true
           ssh-keyscan -H 192.168.0.7 >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Build & Deploy
