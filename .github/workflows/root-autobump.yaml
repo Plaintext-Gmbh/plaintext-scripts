@@ -330,13 +330,57 @@ jobs:
           # von aussen nicht erreichbar, keine echten Daten.
           CTR="ci-postgres-autobump-${PGPORT}"
           docker rm -f -v "$CTR" 2>/dev/null || true
-          docker run -d --name "$CTR" --network host \
+
+          # Karte 988: Der NAS-Runner soll `network_mode: host` verlieren (Docker-Socket UND
+          # Host-Netz zugleich ist die Kombination, die die Karte verbietet). Ohne Host-Netz
+          # ist `localhost` im Runner NICHT mehr der Host, ein Postgres mit `--network host`
+          # waere also unerreichbar. Der Runner bekommt darum sein eigenes Bridge-Netz und
+          # nennt es dem Job in CI_DOCKER_NETWORK; der Postgres-Sibling kommt ins SELBE Netz
+          # und wird ueber den Container-Namen angesprochen (DNS gibt es nur in
+          # user-defined Netzen, im default-bridge nicht).
+          #
+          # Der Zweig ist Absicht und kein Uebergangsprovisorium: solange die Compose des
+          # Runners noch nicht ausgerollt ist, ist die Variable leer und es bleibt exakt beim
+          # bisherigen Weg. Damit ist diese Fassung in BEIDEN Netzzustaenden lauffaehig —
+          # Skript und Compose koennen unabhaengig voneinander vor und zurueck.
+          if [ -n "${CI_DOCKER_NETWORK:-}" ]; then
+            NETZ_ARG="--network ${CI_DOCKER_NETWORK}"
+            PGHOST="$CTR"
+          else
+            NETZ_ARG="--network host"
+            PGHOST="localhost"
+          fi
+          # Positivkontrolle fuer die Vererbung: CI_DOCKER_NETWORK kommt aus der ENVIRONMENT
+          # des Runner-CONTAINERS, nicht aus dem Workflow. Ob eine Container-Variable im
+          # Schritt ueberhaupt ankommt, ist eine Annahme — RUNNER_NAME kommt aus derselben
+          # Quelle und ist heute schon gesetzt. Steht dort "<nicht vererbt>", ist die Kette
+          # kaputt und CI_DOCKER_NETWORK waere still leer geblieben (mit Fallback auf
+          # host-Netz, was ohne Host-Netz sofort und laut scheitert statt zu schleichen).
+          echo "Runner-Umgebung: RUNNER_NAME=${RUNNER_NAME:-<nicht vererbt>} CI_DOCKER_NETWORK=${CI_DOCKER_NETWORK:-<leer>}"
+          echo "Postgres-Netz: ${CI_DOCKER_NETWORK:-host} — erreichbar als ${PGHOST}:${PGPORT}"
+
+          docker run -d --name "$CTR" $NETZ_ARG \
             -e POSTGRES_DB="$DB_NAME" -e POSTGRES_USER=plaintext -e POSTGRES_PASSWORD=plaintext \
             postgres:18-alpine postgres -p "$PGPORT"
+
+          # Die Bereitschaftsprobe ist zugleich die Positivkontrolle fuer das Netz: antwortet
+          # sie nicht, ist der Verify-Build ohne Datenbank losgelaufen. Bis Karte 988 lief die
+          # Schleife im Fehlerfall 60x3 s stumm durch und der Build startete trotzdem —
+          # deshalb bricht der Schritt jetzt hart ab, statt den Fehler zu verschleppen.
+          BEREIT=nein
           for _ in $(seq 1 60); do
-            PGPASSWORD=plaintext psql -h localhost -p "$PGPORT" -U plaintext -d postgres -c "SELECT 1" >/dev/null 2>&1 && break
+            PGPASSWORD=plaintext psql -h "$PGHOST" -p "$PGPORT" -U plaintext -d postgres -c "SELECT 1" >/dev/null 2>&1 && { BEREIT=ja; break; }
             sleep 3
           done
+          if [ "$BEREIT" != ja ]; then
+            echo "::error::Test-Postgres ${CTR} war nach 180 s nicht erreichbar (${PGHOST}:${PGPORT}, Netz ${CI_DOCKER_NETWORK:-host})."
+            docker logs --tail 50 "$CTR" 2>&1 || true
+            exit 1
+          fi
+
+          # Port und DB stehen in den Inputs; die URL wird hier gebaut, weil erst hier
+          # feststeht, unter welchem Namen der Postgres erreichbar ist.
+          echo "SPRING_DATASOURCE_URL=jdbc:postgresql://${PGHOST}:${PGPORT}/${DB_NAME}" >> "$GITHUB_ENV"
 
       - name: Setup JDK ${{ inputs.java-version }}
         if: steps.apply.outcome == 'success'
@@ -352,9 +396,10 @@ jobs:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.MVN_DEPLOY_TOKEN }}
           CI: 'true'
-          # Port und DB aus den Inputs — in den vier Kopien standen sie hier ein zweites Mal
-          # als Literal und mussten mit env.PGPORT/DB_NAME von Hand synchron gehalten werden.
-          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:${{ inputs.pgport }}/${{ inputs.db-name }}
+          # SPRING_DATASOURCE_URL steht hier NICHT mehr: sie wird im Schritt "Test-Postgres
+          # starten" nach GITHUB_ENV geschrieben, weil der Hostname vom Netz des Runners
+          # abhaengt (Karte 988 — localhost nur noch im Host-Netz-Fallback). Port und DB
+          # kommen weiterhin ausschliesslich aus den Inputs, nirgends als zweites Literal.
           SPRING_DATASOURCE_USERNAME: plaintext
           SPRING_DATASOURCE_PASSWORD: plaintext
         run: |
