@@ -13,7 +13,7 @@ This repository provides a reusable TUI-based build system and developer tools:
 - **Blue-green deployments** to a Synology NAS with zero downtime
 - **Health checks** with automatic rollback on failure
 - **Database backups** (PostgreSQL) before production deployments
-- **Interactive TUI menu** and CLI multi-command execution (e.g. `./build 56`)
+- **Interactive TUI menu** and CLI multi-command execution (e.g. `./build 36`)
 
 **Developer Tools**
 - **Voice-to-Claude** — Voice-controlled interaction with Claude Code (speech-to-text, screenshots, clipboard, batch mode)
@@ -116,7 +116,7 @@ Die erste gefundene Datei gewinnt; eine zweite wird nicht mehr gelesen.
 | `COMPOSE_FILE` | `docker-compose.yaml` | Docker Compose filename |
 | `DB_NAME` | `${IMAGE_NAME}` | PostgreSQL database name |
 | `DB_CONTAINER_PREFIX` | `${IMAGE_NAME}` | Database container name prefix |
-| `DEV_PORT` | `1121` | DEV environment port |
+| ~~`DEV_PORT`~~ | — | **entfallen mit Karte 1149 (09.09.2026)**: die DEV/INT-Stufe ist abgebaut. Steht der Wert noch in einer `build-conf.txt`, wird er nirgends mehr gelesen. |
 | `PROD_PORT` | `1122` | PROD environment port |
 | `MVN_RELEASE_DEPLOY` | `false` | Run `mvn deploy` instead of `mvn package` on release |
 | `MIGRATION_GUARD_STRICT` | `false` | If `true`, block an automatic Blue-Green rollback even when the DB migration state can't be read (fail-closed). Default fails open (warn + proceed). |
@@ -153,7 +153,7 @@ abgewaehlten Slot stoppen — alles unter dem NAS-Deploy-Lock und mit demselben
 ```bash
 rollback --zeigen                 # Zustand aller Apps (aktive Farbe, Gegenslot, Image, Alter, Guard)
 rollback --zeigen schuetu         # nur eine App
-rollback iot int                  # zurueck auf die andere Farbe (fragt vorher)
+rollback iot prod                 # zurueck auf die andere Farbe (fragt vorher)
 rollback app prod --ja            # ohne Rueckfrage
 rollback app prod --erzwingen     # Guard uebergehen; sagt vorher, was schiefgehen kann
 ```
@@ -164,7 +164,8 @@ Drei Dinge, die man wissen muss:
   `plaintext-runtime:jre25`. Die Fassung steht in `jars/<env>-<slot>/app.jar` — `rollback --zeigen`
   liest sie aus dem Manifest, und nach dem Start wird sie gegen `/nosec/version` gemessen.
 * **Der alte Slot faehrt beim Start seinerseits Flyway** — aber er nimmt nichts zurueck. Gemessen
-  am 09.09.2026 an `plaintext-iot-int`: Rank vor und nach dem Rueckschalten 73. Und weil in allen
+  am 09.09.2026 an `plaintext-iot-int` (damals gab es die INT-Stufe noch): Rank vor und nach
+  dem Rueckschalten 73. Und weil in allen
   vier `application.yml` `validate-on-migrate: false` steht, startet er auf einem NEUEREN Schema
   **klaglos**. Es gibt kein zweites Netz unter dem Guard.
 * **Der Marker bleibt unberuehrt.** `migver-<env>` haelt den Migrationsstand des letzten
@@ -183,15 +184,15 @@ Rueckgabe: `0` ok, `1` Fehler/Abbruch, `2` Bedienfehler, `3` der Guard hat block
 | `./build 2` | Major release (X.0.0) |
 | `./build 3` | Minor release (x.X.0) |
 | `./build 4` | Patch release (x.x.X) |
-| `./build 5` | Minor release + deploy DEV (with health check) |
+| ~~`./build 5`~~ | **entfallen (Karte 1149)** — war „Release + deploy DEV". Bricht mit einer Erklaerung ab, **bevor** eine Version vergeben wird. |
 | `./build 6` | Deploy last release to PROD (with health check) |
-| `./build 56` | Release + deploy DEV + PROD (multi-command) |
+| `./build 36` | Release + deploy PROD (multi-command; frueher `56`) |
 | `./build 8` | Lokal-Release: Release + Tag + Blue-Green **PROD direkt**, ohne CI (nur wo der Wrapper es verdrahtet, z.B. plaintext-app) |
 
 ### Versionierung — was die Nummern bedeuten
 
 Das Schema ist `MAJOR.MINOR.PATCH`, aber **kein SemVer**: die Nummer sagt nichts ueber
-Kompatibilitaet. Der Standard-Release (`./build 3`, `5`, `56` und jeder CI-Release auf
+Kompatibilitaet. Der Standard-Release (`./build 3`, `36` und jeder CI-Release auf
 `master`) zaehlt **MINOR um eins hoch** — die Nummer ist ein Release-Zaehler (plaintext-app
 steht bei 2.17xx.0, plaintext-root bei 1.6xx.0). `./build 4` zaehlt PATCH hoch, `./build 2`
 MAJOR (setzt MINOR und PATCH auf 0); beides wird von Hand gewaehlt, nicht aus dem Inhalt
@@ -247,13 +248,13 @@ fremder frischer Lock, Fehlerfall, SIGTERM, NAS-Ausfall.
 
 ### Lokal-Release (zweiter Weg neben CI/CD)
 
-`./build local-release [1|2|3] [prod|dev-prod]` (plaintext-app: `./build 8`) macht den kompletten
+`./build local-release [1|2|3] [prod]` (plaintext-app: `./build 8`) macht den kompletten
 Release von der Entwicklermaschine aus: Versionsschritt, Release-Commit, Git-Tag, Push, Build,
 Jar/Image aufs NAS und Blue-Green-Deploy mit Healthcheck — ohne GitHub Actions. Die CI bleibt
 der Standardweg (push/PR-merge auf master); der Lokal-Release ist fuer den Fall, dass die
 Runner belegt sind oder ein Release bewusst von Hand ausgerollt werden soll.
 
-Was ihn vom blossen `./build 56` unterscheidet:
+Was ihn vom blossen `./build 36` unterscheidet:
 
 - Der Release-Commit traegt das native `[skip ci]` in der Betreffzeile — sonst startet der Push
   die CI-Pipeline, die parallel einen zweiten Release deployt. Seit dem Zustandsbericht

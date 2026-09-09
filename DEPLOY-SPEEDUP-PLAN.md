@@ -5,6 +5,11 @@ gemountete Volume deployen) bzw. nur geänderte Module austauschen. Gilt zentral
 (app, root, iot, schuetu, fwtool) über `plaintext-scripts` (geteilter Workflow + `tui-build-logic.sh`)
 und `plaintext-dockercompose` (gitops, blue-green).
 
+> **Stand 09.09.2026 (Karte 1149):** Dieses Papier beschreibt den Zustand VOR dem Abbau der
+> DEV/INT-Stufe. `release-all` ist seither `./build 36` statt `./build 56`, und `deploy_to_dev`
+> gibt es nicht mehr — der Schritt "erst INT, dann PROD" ist ersatzlos entfallen. Die Messungen
+> und Vorschlaege unten bleiben als Beleg stehen; nur die Reihenfolge hat sich verkuerzt.
+
 ## Ist-Zustand (Befund)
 
 - CI-Runner läuft **auf dem NAS** (`runs-on: [self-hosted, nas]`) → **kein Netzwerk-Transfer**;
