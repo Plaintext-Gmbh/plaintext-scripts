@@ -281,6 +281,16 @@ Trockenlauf ohne Seiteneffekte: `LOKAL_RELEASE_NUR_VORFLUG=true ./build 8`.
 CI-Sperre bewusst uebergehen: `LOKAL_RELEASE_IGNORIERE_CI=true ./build 8`.
 Sicherungen bewacht `./test-lokal-release.sh`.
 
+**Dieser Klon selbst muss auf `master` stehen** (Karte 1154, Vorfall 1151): jeder ausrollende Weg
+(`./build 3/36/6/local-release`) bricht ab, wenn die Build-Logik aus einem anderen Zweig geladen
+wurde. Grund: `~/codeplain/plaintext-scripts` stand am 09.09.2026 elf Tage auf einem laengst
+geloeschten Zweig — ein Handstart haette PROD ohne NAS-Deploy-Lock und ohne Migrations-Backup
+ausgerollt (gemessen: 0 statt 22 Vorkommen von `deploy_lock`). Geprueft wird nur der **Zweigname**,
+ohne `git fetch`: das kostet kein Netz, und ein Abbruch wegen klemmendem WLAN waere die falsche Art
+Strenge. Der Abstand zum zuletzt bekannten `origin/master` erscheint als Warnung.
+Einen Zweig dieser Bibliothek bewusst an einem echten Release erproben:
+`PLAINTEXT_SCRIPTS_ZWEIG_EGAL=1 ./build 8`. Bewacht von `./test-skript-klon-zweig.sh`.
+
 ## GitHub Actions
 
 ### Welcher CI-Motor faehrt? (`.ci-engine`)

@@ -202,6 +202,7 @@ show_usage() {
     echo -e "    Release + Tag + Push (Commit mit [skip ci]) + Build + Blue-Green-Deploy von dieser Maschine"
     echo -e "    ${YELLOW}prod${NC} = PROD (Default und einziges Ziel; ${YELLOW}dev-prod${NC} entfiel mit Karte 1149)"
     echo -e "    Nur Vorflug: ${YELLOW}LOKAL_RELEASE_NUR_VORFLUG=true${NC}   CI-Sperre uebergehen: ${YELLOW}LOKAL_RELEASE_IGNORIERE_CI=true${NC}"
+    echo -e "    Diese Build-Logik muss selbst von ${YELLOW}master${NC} kommen (Karte 1154); Zweig erproben: ${YELLOW}PLAINTEXT_SCRIPTS_ZWEIG_EGAL=1${NC}"
 }
 
 # NAS remote temp path for image transfer
@@ -1533,6 +1534,14 @@ deploy_to_dev() {
 deploy_to_prod() {
     local WITH_HEALTH_CHECK=${1:-false}
 
+    # Lokaler Lauf (nicht CI): kommt diese Deploy-Logik selbst von master? `./build 6` rollt aus,
+    # ohne lokal_vorflug zu durchlaufen — ohne diesen Aufruf waere genau der Weg, der PROD am
+    # kuerzesten anfasst, der einzige ungepruefte (Karte 1154). VOR der ersten Meldung, damit ein
+    # Abbruch nicht wie ein angefangener Deploy aussieht.
+    if [ "${CI:-}" != "true" ] && ! skript_klon_zweig_pruefen; then
+        return 1
+    fi
+
     echo -e "${BLUE}=== Deploying to PROD Server (Blue-Green) ===${NC}"
 
     # Lokaler Lauf (nicht CI): ein gerade laufender CI-Rollout benutzt dieselben Slots und
@@ -2534,6 +2543,95 @@ release_stand_nachziehen() {
     return 0
 }
 
+# ── Die Build-Logik dieses Laufs muss selbst von 'master' kommen ───────────────────────
+# VORFALL (Karten 1151/1154, 09.09.2026): ~/codeplain/plaintext-scripts — der Klon, den JEDES
+# lokale ./build sourct — stand elf Tage auf `lokal-release-schnell`, einem Zweig, den GitHub beim
+# Merge von PR #89 laengst geloescht hatte. Ein Handstart haette in dieser Zeit PROD **ohne
+# NAS-Deploy-Lock** und ohne die Migrations-Backup-Logik ausgerollt; gemessen wurden 0 statt 22
+# Vorkommen von `deploy_lock` in dieser Datei. Der Vorflug prueft den Zweig der App seit dem
+# 29.08.2026 — nur seinen eigenen prueft er nicht. Das war die Luecke.
+#
+# WAS GEPRUEFT WIRD, UND WARUM NUR DAS (Entscheidung Daniel, 09.09.2026: "Abbrechen, mit Tuere"):
+#   * ABBRUCH nur am ZWEIGNAMEN ('master'). Das kostet keinen Netzzugriff, ist damit auf einem
+#     Zug, im Hotelnetz und bei toter Leitung identisch entscheidbar — und es haette den Vorfall
+#     gefangen, denn dort war der Zweig falsch, nicht bloss alt.
+#   * BEWUSST KEIN `git fetch`: ein fetch bei jedem Release-/Deploy-Start kostet Zeit und
+#     schlaegt ohne Netz fehl. Ein Abbruch, weil das WLAN klemmt, waere die falsche Art Strenge
+#     — die Sicherung wuerde binnen einer Woche umgangen und waere dann gar keine mehr. Den
+#     frischen Stand der APP zieht `release_stand_nachziehen` ohnehin mit Netz nach; dort ist ein
+#     Fehlschlag richtig, weil ohne Netz kein Release moeglich ist.
+#   * Der Abstand zum LOKAL bekannten `origin/master` wird gemeldet, aber nur als WARNUNG: die
+#     Zahl stammt aus dem zuletzt gefetchten Stand und kann selbst veraltet sein. Aus einer
+#     Zahl, der man nicht trauen kann, darf kein Abbruch werden.
+#
+# DIE TUERE: PLAINTEXT_SCRIPTS_ZWEIG_EGAL=1 macht aus dem Abbruch eine Warnung — damit sich ein
+# Zweig dieser Bibliothek weiterhin an einem echten Release erproben laesst. Sie steht in der
+# Abbruchmeldung; eine Tuere, die man nicht findet, ist keine.
+#
+# WO DIESE PRUEFUNG HAENGT: in `lokal_vorflug` (jeder lokale Release-Weg: ./build 3/36,
+# local-release) und am Anfang von `deploy_to_prod` (./build 6 rollt aus, OHNE den Vorflug zu
+# durchlaufen). Nicht im reinen Bau (`do_build_snapshot`) und nicht in `do_run`: die rollen
+# nichts aus, und eine Sperre ohne Schaden dahinter erzieht nur zum Umgehen.
+skript_klon_zweig_pruefen() {
+    # Einmal je Lauf: do_local_release durchlaeuft Vorflug UND deploy_to_prod, und der Klon
+    # wechselt mitten im Lauf seinen Zweig nicht.
+    [ "${SKRIPT_KLON_GEPRUEFT:-nein}" == "ja" ] && return 0
+
+    # Nicht der fest verdrahtete Pfad, sondern der Klon, aus dem DIESE Datei geladen wurde:
+    # ein Wrapper darf auf einen anderen Checkout zeigen (Worktree), geprueft gehoert der,
+    # dessen Code gerade laeuft.
+    local KLON
+    KLON="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    if ! git -C "$KLON" rev-parse --git-dir >/dev/null 2>&1; then
+        # Kopie ohne .git (Tarball, rsync): der Zweig ist nicht feststellbar. Kein Abbruch —
+        # aber sichtbar sagen, dass hier niemand mehr sieht, wie alt diese Logik ist.
+        echo -e "${YELLOW}⚠ ${KLON} ist kein git-Klon — das Alter der Build-Logik ist nicht pruefbar.${NC}"
+        SKRIPT_KLON_GEPRUEFT="ja"
+        return 0
+    fi
+
+    local ZWEIG STAND TUERE
+    ZWEIG=$(git -C "$KLON" rev-parse --abbrev-ref HEAD 2>/dev/null)
+    STAND=$(git -C "$KLON" log --oneline -1 2>/dev/null)
+    case "${PLAINTEXT_SCRIPTS_ZWEIG_EGAL:-}" in
+        ""|0|false|nein) TUERE="nein" ;;
+        *)               TUERE="ja" ;;
+    esac
+
+    if [ "$ZWEIG" != "master" ]; then
+        if [ "$TUERE" == "ja" ]; then
+            echo -e "${YELLOW}⚠ Build-Logik laeuft aus Zweig '${ZWEIG}' statt 'master' — durchgelassen, weil PLAINTEXT_SCRIPTS_ZWEIG_EGAL gesetzt ist.${NC}"
+            echo -e "${YELLOW}  Klon: ${KLON}   Stand: ${STAND}${NC}"
+            SKRIPT_KLON_GEPRUEFT="ja"
+            return 0
+        fi
+        echo -e "${RED}✗ Die Build-Logik dieses Laufs kommt nicht von 'master'.${NC}" >&2
+        echo -e "${RED}  Klon:      ${KLON}${NC}" >&2
+        echo -e "${RED}  Zweig:     '${ZWEIG}'   erwartet: 'master'${NC}" >&2
+        echo -e "${RED}  Stand:     ${STAND}${NC}" >&2
+        echo -e "${YELLOW}  Warum das abbricht: ein Seitenzweig hier rollt PROD mit veralteter Deploy-Logik aus.${NC}" >&2
+        echo -e "${YELLOW}  Am 09.09.2026 waeren das elf Tage ohne NAS-Deploy-Lock und ohne Migrations-Backup gewesen (Karte 1151).${NC}" >&2
+        echo -e "${YELLOW}  Richten:   git -C ${KLON} checkout master && git -C ${KLON} pull --ff-only${NC}" >&2
+        echo -e "${YELLOW}  Zweig bewusst erproben:  PLAINTEXT_SCRIPTS_ZWEIG_EGAL=1 ./build ...${NC}" >&2
+        echo -e "${YELLOW}  Es wurde NICHTS veraendert: keine Version, kein Tag, kein Push, kein Deploy.${NC}" >&2
+        return 1
+    fi
+
+    # Ohne fetch: `origin/master` ist der zuletzt geholte Stand. Fehlt die Referenz, gibt
+    # rev-list einen Fehler und die leere Ausgabe fuehrt zu keiner Aussage — richtig so.
+    local ZURUECK
+    ZURUECK=$(git -C "$KLON" rev-list --count "HEAD..origin/master" 2>/dev/null)
+    if [ -n "$ZURUECK" ] && [ "$ZURUECK" != "0" ]; then
+        echo -e "${YELLOW}⚠ Build-Logik ist ${ZURUECK} Commit(s) hinter dem zuletzt bekannten origin/master (ohne fetch gemessen, kann aelter sein).${NC}"
+        echo -e "${YELLOW}  Faellig: git -C ${KLON} pull --ff-only${NC}"
+    else
+        echo -e "${GREEN}✓ Build-Logik von master (${KLON})${NC}"
+    fi
+    SKRIPT_KLON_GEPRUEFT="ja"
+    return 0
+}
+
 # Gemeinsamer Vorflug jedes LOKALEN Release-Laufs (do_release ausserhalb der CI, do_local_release):
 #   1. Git: Release-Branch, sauberer Arbeitsbaum, origin per fast-forward nachgezogen.
 #      do_release macht `git add -A` — alles Ungespeicherte ginge sonst in den Release. Wer das
@@ -2543,6 +2641,13 @@ release_stand_nachziehen() {
 # Idempotent: ein zweiter Aufruf im selben Lauf kostet nur ein fetch.
 lokal_vorflug() {
     local BRANCH="${1:-${RELEASE_BRANCH:-master}}"
+
+    # Vorflug 0: der Klon, aus dem diese Build-Logik stammt (siehe skript_klon_zweig_pruefen).
+    # Zuerst, weil er ohne Netz und ohne Seiteneffekt entscheidbar ist — und weil eine veraltete
+    # Deploy-Logik jede folgende Pruefung wertlos macht: sie prueft dann nicht das, was ausrollt.
+    if ! skript_klon_zweig_pruefen; then
+        return 1
+    fi
 
     local AKTUELLER_BRANCH
     AKTUELLER_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
