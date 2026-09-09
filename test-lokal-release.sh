@@ -115,10 +115,10 @@ pruefe "do_release prueft den Vorflug ausserdem VOR dem Release-Lock" "ja" \
        [ -n "${Z1:-}" ] && [ -n "${Z2:-}" ] && [ "$Z1" -lt "$Z2" ] && echo ja || echo nein)"
 # Karte 1149 (09.09.2026): hier standen deploy_to_dev UND deploy_to_prod. Die DEV/INT-Stufe ist
 # abgebaut; deploy_to_dev ist nur noch die Abbruchmeldung und hat keine Sperre mehr zu halten.
-for fn in deploy_to_prod; do
-    pruefe "$fn: lokal CI-Rollout-Sperre" "ja" \
-        "$(koerper "$fn" | grep -q 'lokal_release_ci_frei' && echo ja || echo nein)"
-done
+# Bis Karte 1149 lief das als Schleife ueber deploy_to_dev UND deploy_to_prod. Eine Schleife
+# ueber genau ein Element ist shellcheck SC2043 — also ein gerader Aufruf.
+pruefe "deploy_to_prod: lokal CI-Rollout-Sperre" "ja" \
+    "$(koerper deploy_to_prod | grep -q 'lokal_release_ci_frei' && echo ja || echo nein)"
 
 # Gegenprobe zum Abbau: deploy_to_dev darf NICHT mehr deployen. Ohne diese Pruefung koennte
 # jemand die Funktion "zur Vollstaendigkeit" wieder mit Leben fuellen, ohne dass es auffaellt —
