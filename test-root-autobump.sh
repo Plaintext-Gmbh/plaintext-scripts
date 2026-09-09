@@ -39,6 +39,26 @@ for f in "$SKRIPT" "$LIB" "$TUI"; do [ -r "$f" ] || { echo "nicht lesbar: $f" >&
 FEHLER=0
 pruefe() { if [ "$2" = "$3" ]; then printf '  ok   %s\n' "$1"
            else printf '  FEHL %s\n       erwartet: %s\n       erhalten: %s\n' "$1" "$2" "$3"; FEHLER=1; fi; }
+# ── Karte 1155: kein `... | grep -q` und kein `... | head -1` unter `set -o pipefail` ─────────
+# `grep -q` steigt beim ERSTEN Treffer aus und schliesst das Leseende. Der Schreiber der Pipe
+# (awk/sed/grep -v) liest die 164-KB-Datei danach noch bis zum Ende und schreibt seinen naechsten
+# Puffer-Block (stdio, 4 KB) in eine geschlossene Pipe: SIGPIPE, Rueckgabewert 141. `pipefail`
+# reicht das als Pipeline-Fehler durch — die Pruefung meldete "nein", obwohl das Muster dasteht.
+# Bedingung ist also nicht die Groesse allein, sondern ein WEITERER Schreibvorgang nach dem
+# Treffer: Koerper ueber ~4 KB mit dem Treffer im ersten Block trifft es, `printf "$BLOCK"` mit
+# einem einzigen write() nicht. Gemessen am 09.09.2026: test-lokal-release.sh 26 von 40 Laeufen
+# rot, test-versionsschritt.sh 18 von 40 — ohne dass am geprueften Code etwas gefehlt haette.
+#
+# Gefaehrlicher als das falsche Rot ist das falsche GRUEN bei den invertierten Pruefungen
+# (`... | grep_q MUSTER && echo nein || echo ja`): dort faellt der Fehlschlag auf "in Ordnung".
+# Gemessen an einer absichtlich eingebauten Regression in einem 16-KB-Funktionskoerper: 15 von 20
+# Laeufen meldeten "ja" — die Sicherung schwieg genau im Regressionsfall.
+#
+# `grep_q` liest die Eingabe VOLLSTAENDIG (grep -c) und meldet denselben Rueckgabewert wie
+# `grep -q`: 0 = mindestens ein Treffer, 1 = keiner. Optionen und Muster gehen unveraendert durch,
+# die Aussage jeder Pruefung bleibt damit gleich — nur der Wettlauf ist weg. Aus demselben Grund
+# steht statt `| head -1` jetzt `| sed -n 1p`: sed liest bis EOF, head steigt vorher aus.
+grep_q() { local n; n=$(grep -c "$@") || true; [ "${n:-0}" -gt 0 ]; }
 
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
@@ -125,12 +145,12 @@ pruefe "detect: vollstaendig=false"                   "false"                "$(
 pruefe "detect: fehlend nennt das Modul"              "plaintext-admin-cron" "$(ausgabe fehlend)"
 pruefe "detect: latest bleibt sichtbar"               "1.638.0"              "$(ausgabe latest)"
 pruefe "detect: Meldung 'noch unvollstaendig ... naechster Lauf'" "ja" \
-       "$(printf '%s' "$AUS" | grep -q 'Release 1.638.0 noch unvollstaendig (fehlt: plaintext-admin-cron), naechster Lauf' && echo ja || echo nein)"
+       "$(printf '%s' "$AUS" | grep_q 'Release 1.638.0 noch unvollstaendig (fehlt: plaintext-admin-cron), naechster Lauf' && echo ja || echo nein)"
 pruefe "detect: kein ::error"                         "0"                    "$(printf '%s' "$AUS" | grep -c '::error' || true)"
 lauf apply 1.638.0
 pruefe "apply: verweigert (Exit != 0)"                "ja"                   "$([ "$RC" -ne 0 ] && echo ja || echo nein)"
 pruefe "apply: nennt das fehlende Modul"              "ja" \
-       "$(printf '%s' "$AUS" | grep -q 'unvollstaendig (fehlt: plaintext-admin-cron)' && echo ja || echo nein)"
+       "$(printf '%s' "$AUS" | grep_q 'unvollstaendig (fehlt: plaintext-admin-cron)' && echo ja || echo nein)"
 pruefe "apply: pom unveraendert (Pin)"                "1.636.0"              "$(pin)"
 pruefe "apply: pom unveraendert (parent)"             "1.636.0"              "$(parent)"
 
@@ -160,7 +180,7 @@ lauf detect
 pruefe "detect: Exit 0"                               "0"                    "$RC"
 pruefe "detect: bump=false"                           "false"                "$(ausgabe bump)"
 pruefe "detect: Meldung 'Parent-POM nicht abrufbar'"  "ja" \
-       "$(printf '%s' "$AUS" | grep -q 'Parent-POM nicht abrufbar' && echo ja || echo nein)"
+       "$(printf '%s' "$AUS" | grep_q 'Parent-POM nicht abrufbar' && echo ja || echo nein)"
 lauf apply 1.640.0
 pruefe "apply: verweigert"                            "ja"                   "$([ "$RC" -ne 0 ] && echo ja || echo nein)"
 pruefe "apply: Pin unveraendert"                      "1.638.0"              "$(pin)"
@@ -172,7 +192,7 @@ consumer_pom 1.636.0 plaintext-root-common plaintext-admin-verschwunden
 lauf detect
 pruefe "detect: Abbruch (Exit != 0)"                  "ja"                   "$([ "$RC" -ne 0 ] && echo ja || echo nein)"
 pruefe "detect: ::error nennt das Artefakt"           "ja" \
-       "$(printf '%s' "$AUS" | grep -q '::error::.*plaintext-admin-verschwunden.*NICHT publiziert' && echo ja || echo nein)"
+       "$(printf '%s' "$AUS" | grep_q '::error::.*plaintext-admin-verschwunden.*NICHT publiziert' && echo ja || echo nein)"
 consumer_pom 1.636.0 plaintext-root-common plaintext-root-web
 
 echo "== E: BUMP_IGNORIERE_MODULE ================================================="
@@ -230,20 +250,20 @@ RED='' GREEN='' YELLOW='' NC=''
 export MVN_RELEASE_DEPLOY=true RELEASE_REPO_URL="$ROOT_MAVEN_REPO" REL_GROUP=ch/plaintext REL_ARTIFACT=plaintext-root-parent
 AUS="$(cd "$Q" && CI='' release_vollstaendig_pruefen 1.639.0 2>&1)"; RC=$?
 pruefe "komplett: return 0"                           "0" "$RC"
-pruefe "komplett: gruene Zeile mit Modulzahl"         "ja" "$(printf '%s' "$AUS" | grep -q 'Release 1.639.0 vollstaendig im Release-Repo (3 Module)' && echo ja || echo nein)"
+pruefe "komplett: gruene Zeile mit Modulzahl"         "ja" "$(printf '%s' "$AUS" | grep_q 'Release 1.639.0 vollstaendig im Release-Repo (3 Module)' && echo ja || echo nein)"
 rm "$G/plaintext-root-web/1.639.0/plaintext-root-web-1.639.0.pom"
 AUS="$(cd "$Q" && CI='' release_vollstaendig_pruefen 1.639.0 2>&1)"; RC=$?
 pruefe "unvollstaendig: trotzdem return 0 (nie fatal)" "0" "$RC"
 pruefe "unvollstaendig: nennt die artifactId (nicht das Verzeichnis)" "ja" \
-       "$(printf '%s' "$AUS" | grep -q 'UNVOLLSTAENDIG — es fehlt: plaintext-root-web' && echo ja || echo nein)"
+       "$(printf '%s' "$AUS" | grep_q 'UNVOLLSTAENDIG — es fehlt: plaintext-root-web' && echo ja || echo nein)"
 pruefe "unvollstaendig: ohne CI keine ::warning"      "0" "$(printf '%s' "$AUS" | grep -c '::warning' || true)"
 AUS="$(cd "$Q" && CI=true release_vollstaendig_pruefen 1.639.0 2>&1)"; RC=$?
 pruefe "unvollstaendig, CI: ::warning-Annotation"     "ja" \
-       "$(printf '%s' "$AUS" | grep -q '^::warning title=Release 1.639.0 unvollstaendig::fehlt in .*plaintext-root-web' && echo ja || echo nein)"
+       "$(printf '%s' "$AUS" | grep_q '^::warning title=Release 1.639.0 unvollstaendig::fehlt in .*plaintext-root-web' && echo ja || echo nein)"
 AUS="$(cd "$Q" && MVN_RELEASE_DEPLOY=false release_vollstaendig_pruefen 1.639.0 2>&1)"; RC=$?
 pruefe "ohne mvn deploy: nichts zu pruefen, still"    "0:" "$RC:$AUS"
 AUS="$(cd "$Q" && CI='' release_vollstaendig_pruefen 9.9.9 2>&1)"; RC=$?
-pruefe "Parent fehlt: return 0, rote Zeile"           "0:ja" "$RC:$(printf '%s' "$AUS" | grep -q 'Parent-POM plaintext-root-parent-9.9.9.pom nicht im Release-Repo' && echo ja || echo nein)"
+pruefe "Parent fehlt: return 0, rote Zeile"           "0:ja" "$RC:$(printf '%s' "$AUS" | grep_q 'Parent-POM plaintext-root-parent-9.9.9.pom nicht im Release-Repo' && echo ja || echo nein)"
 
 echo "== I: Repo antwortet gar nicht (Karte 1127) ================================"
 # Der Fehler, um den es in Karte 1127 geht: bis zum 07.09.2026 endete `detect` sowohl bei
@@ -253,7 +273,7 @@ consumer_pom 1.636.0 plaintext-root-common plaintext-root-web
 ROOT_MAVEN_REPO="file://$T/gibt-es-nicht" lauf detect
 pruefe "Repo weg: Exit 4 (nicht 0 und nicht 1)"       "4"                    "$RC"
 pruefe "Repo weg: ::error 'konnte nicht nachsehen'"   "ja" \
-       "$(printf '%s' "$AUS" | grep -q '::error title=Auto-Bump konnte nicht nachsehen::' && echo ja || echo nein)"
+       "$(printf '%s' "$AUS" | grep_q '::error title=Auto-Bump konnte nicht nachsehen::' && echo ja || echo nein)"
 pruefe "Repo weg: KEIN bump= in den Outputs (leer heisst 'keine Antwort')" "" "$(ausgabe bump)"
 pruefe "Repo weg: behauptet nicht 'kein Rueckstand'"  "0" \
        "$(printf '%s' "$AUS" | grep -c 'bump=false' || true)"
@@ -275,7 +295,7 @@ chmod +x "$T/bin/curl"
 PATH="$T/bin:$PATH" CURL_KAPUTT="plaintext-root-parent-1.638.0.pom" lauf detect
 pruefe "Modulpruefung weg: Exit 4"                    "4"                    "$RC"
 pruefe "Modulpruefung weg: nennt das Parent-POM"      "ja" \
-       "$(printf '%s' "$AUS" | grep -q 'Parent-POM von 1.638.0 nicht lesbar' && echo ja || echo nein)"
+       "$(printf '%s' "$AUS" | grep_q 'Parent-POM von 1.638.0 nicht lesbar' && echo ja || echo nein)"
 pruefe "Modulpruefung weg: geprueft=false"            "false"                "$(ausgabe geprueft)"
 pruefe "Modulpruefung weg: keine 'naechster Lauf'-Beruhigung" "0" \
        "$(printf '%s' "$AUS" | grep -c 'naechster Lauf' || true)"
@@ -297,7 +317,7 @@ pruefe "tui-build-logic.sh sourct die Bibliothek" "ja" "$(grep -q 'ci/reposilite
 # im ungesperrten Teil do_release_bauen_und_veroeffentlichen — die Selbstkontrolle ist mit
 # umgezogen und muss weiterhin unmittelbar hinter `mvn clean deploy` stehen.
 pruefe "der Release-Pfad ruft die Selbstkontrolle nach mvn clean deploy" "ja" \
-       "$(sed -n '/^do_release_bauen_und_veroeffentlichen() {/,/^}/p' "$TUI" | grep -A6 'mvn clean deploy' | grep -q 'release_vollstaendig_pruefen "${NEW_VERSION}"' && echo ja || echo nein)"
+       "$(sed -n '/^do_release_bauen_und_veroeffentlichen() {/,/^}/p' "$TUI" | grep -A6 'mvn clean deploy' | grep_q 'release_vollstaendig_pruefen "${NEW_VERSION}"' && echo ja || echo nein)"
 pruefe "release_vollstaendig_pruefen: kein fataler Ausstieg" "0" \
        "$(sed -n '/^release_vollstaendig_pruefen() {/,/^}/p' "$TUI" | grep -v '^\s*#' | grep -cE 'return [1-9]|exit ' || true)"
 

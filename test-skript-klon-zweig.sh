@@ -33,6 +33,26 @@ SKRIPT="$(cd "$(dirname "$SKRIPT")" && pwd)/$(basename "$SKRIPT")"
 FEHLER=0
 pruefe() { if [ "$2" = "$3" ]; then printf '  ok   %s\n' "$1"
            else printf '  FEHL %s\n       erwartet: %s\n       erhalten: %s\n' "$1" "$2" "$3"; FEHLER=1; fi; }
+# ── Karte 1155: kein `... | grep -q` und kein `... | head -1` unter `set -o pipefail` ─────────
+# `grep -q` steigt beim ERSTEN Treffer aus und schliesst das Leseende. Der Schreiber der Pipe
+# (awk/sed/grep -v) liest die 164-KB-Datei danach noch bis zum Ende und schreibt seinen naechsten
+# Puffer-Block (stdio, 4 KB) in eine geschlossene Pipe: SIGPIPE, Rueckgabewert 141. `pipefail`
+# reicht das als Pipeline-Fehler durch — die Pruefung meldete "nein", obwohl das Muster dasteht.
+# Bedingung ist also nicht die Groesse allein, sondern ein WEITERER Schreibvorgang nach dem
+# Treffer: Koerper ueber ~4 KB mit dem Treffer im ersten Block trifft es, `printf "$BLOCK"` mit
+# einem einzigen write() nicht. Gemessen am 09.09.2026: test-lokal-release.sh 26 von 40 Laeufen
+# rot, test-versionsschritt.sh 18 von 40 — ohne dass am geprueften Code etwas gefehlt haette.
+#
+# Gefaehrlicher als das falsche Rot ist das falsche GRUEN bei den invertierten Pruefungen
+# (`... | grep_q MUSTER && echo nein || echo ja`): dort faellt der Fehlschlag auf "in Ordnung".
+# Gemessen an einer absichtlich eingebauten Regression in einem 16-KB-Funktionskoerper: 15 von 20
+# Laeufen meldeten "ja" — die Sicherung schwieg genau im Regressionsfall.
+#
+# `grep_q` liest die Eingabe VOLLSTAENDIG (grep -c) und meldet denselben Rueckgabewert wie
+# `grep -q`: 0 = mindestens ein Treffer, 1 = keiner. Optionen und Muster gehen unveraendert durch,
+# die Aussage jeder Pruefung bleibt damit gleich — nur der Wettlauf ist weg. Aus demselben Grund
+# steht statt `| head -1` jetzt `| sed -n 1p`: sed liest bis EOF, head steigt vorher aus.
+grep_q() { local n; n=$(grep -c "$@") || true; [ "${n:-0}" -gt 0 ]; }
 koerper() { awk "/^$1\\(\\) \\{/,/^\\}/" "$SKRIPT"; }
 # Erste Zeile mit dem LITERAL $2 im Körper der Funktion $1 (leer = nicht gefunden).
 zeile_in() {
@@ -40,7 +60,7 @@ zeile_in() {
         $0 ~ ("^" fn "\\(\\) \\{") { drin=1 }
         drin && index($0, muster) > 0 && !gefunden { print NR; gefunden=1 }
         drin && /^\}/ { drin=0 }
-    ' "$SKRIPT" | head -1
+    ' "$SKRIPT" | sed -n 1p
 }
 
 echo "Skript-Klon-Zweig: Sicherung in $SKRIPT"
