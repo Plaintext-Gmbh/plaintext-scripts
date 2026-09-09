@@ -19,9 +19,14 @@
 # schon heute Release-Commits pusht und Bump-PRs eroeffnet, und das dem Hauptkonto gehoert.
 # Es gibt kein zweites Konto mehr, an dem etwas haengen kann.
 #
-# UNTERSCHIED ZUM GITHUB-SKRIPT: kein `gh` und kein `jq` vorausgesetzt — Woodpecker-Images
-# haben beides nicht zuverlaessig. Gesprochen wird direkt mit der REST-API (curl), die JSON-
-# Auswertung macht Python 3, das in den benutzten Images vorhanden ist.
+# UNTERSCHIED ZUM GITHUB-SKRIPT: kein `gh`, kein `jq` und kein Python. Gesprochen wird direkt
+# mit der REST-API (curl), ausgewertet wird mit grep/sed/base64.
+#
+# WARUM OHNE PYTHON (gemessen am 09.09.2026): `maven:3.9-eclipse-temurin-25` — das Image, in
+# dem die Woodpecker-Steps dieses Repos laufen — bringt bash und curl mit, aber KEIN python3
+# (`which python3` leer, Ubuntu 24.04). Ein `apt-get install` je Lauf waere der teurere Weg,
+# sobald das Paket-Repo einmal klemmt. Die JSON-Auswertung ist hier klein genug fuer sed:
+# gelesen werden zwei Felder, geschrieben wird ein Objekt aus drei kontrollierten Werten.
 #
 # AUFRUF (aus .woodpecker/pin.yml des jeweiligen App-Repos):
 #   MVN_DEPLOY_TOKEN=<token> REPO_NAME=plaintext-iot COMMIT_SHA=<sha> \
@@ -77,25 +82,18 @@ api() {  # api <methode> <pfad> [datei-mit-json]
 }
 
 # ── Aktuellen Stand drueben lesen ─────────────────────────────────────────────
+# Aus der Contents-Antwort werden genau zwei Felder gebraucht: `sha` (fuer das optimistische
+# Schreiben) und `content` (base64, mit \n-Escapes im JSON). Beide Muster sind an der Antwort
+# von GitHub gemessen, nicht geraten; fehlt die Datei drueben, bleiben beide leer und das
+# Skript legt sie an.
 RESP="$(api GET "/repos/${MVN_REPO}/contents/${TARGET}?ref=${PIN_BRANCH}" || true)"
-read -r SHA OLD_VERS OLD_UPD <<EOF
-$(printf '%s' "$RESP" | python3 -c '
-import base64,json,sys
-try:
-    d=json.load(sys.stdin)
-except Exception:
-    print(". . ."); raise SystemExit
-sha=d.get("sha") or "."
-alt=base64.b64decode(d.get("content") or "").decode("utf-8","replace")
-vers=upd="."
-for z in alt.splitlines():
-    if z.startswith("versions="): vers=z.split("=",1)[1].strip() or "."
-    if z.startswith("updated="):  upd=z.split("=",1)[1].strip() or "."
-print(sha, vers, upd)')
-EOF
-[ "$SHA" = "." ] && SHA=""
-[ "$OLD_VERS" = "." ] && OLD_VERS=""
-[ "$OLD_UPD" = "." ] && OLD_UPD="1970-01-01T00:00:00Z"
+SHA="$(printf '%s' "$RESP" | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)"
+ALT="$(printf '%s' "$RESP" \
+       | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+       | sed 's/\\n//g' | base64 -d 2>/dev/null || true)"
+OLD_VERS="$(printf '%s' "$ALT" | sed -n 's/^versions=//p' | head -1)"
+OLD_UPD="$(printf '%s' "$ALT" | sed -n 's/^updated=//p' | head -1)"
+OLD_UPD="${OLD_UPD:-1970-01-01T00:00:00Z}"
 
 OLD_TS="$(date -u -d "$OLD_UPD" +%s 2>/dev/null || echo 0)"
 AGE_D=$(( ( $(date -u +%s) - OLD_TS ) / 86400 ))
@@ -116,20 +114,19 @@ GRUND="Pin geaendert (${OLD_VERS:-neu} -> ${VERS})"
 ok=false
 for versuch in 1 2 3 4 5; do
   NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  INHALT="$(printf 'repo=%s\nversions=%s\nupdated=%s\ncommit=%s\n' \
+                   "$REPO_NAME" "$VERS" "$NOW" "${COMMIT_SHA:0:9}" | base64 -w0)"
   RUMPF="$(mktemp)"
-  printf 'repo=%s\nversions=%s\nupdated=%s\ncommit=%s\n' \
-         "$REPO_NAME" "$VERS" "$NOW" "${COMMIT_SHA:0:9}" \
-    | base64 -w0 \
-    | REPO_NAME="$REPO_NAME" VERS="$VERS" PIN_BRANCH="$PIN_BRANCH" SHA="$SHA" python3 -c '
-import json,os,sys
-name = os.environ["REPO_NAME"]
-vers = os.environ["VERS"]
-d = {"branch": os.environ["PIN_BRANCH"],
-     "message": "chore(pins): " + name + " benutzt " + vers + " [skip ci]",
-     "content": sys.stdin.read().strip()}
-if os.environ.get("SHA"):
-    d["sha"] = os.environ["SHA"]
-json.dump(d, sys.stdout)' > "$RUMPF"
+  # Von Hand gebautes JSON: alle drei Werte sind kontrolliert — Repo-Name und Version sind
+  # oben gegen ein Muster geprueft, der Inhalt ist base64. Es kommt nichts aus einer fremden
+  # Quelle hinein, das hier escaped werden muesste.
+  if [ -n "$SHA" ]; then
+    printf '{"branch":"%s","message":"chore(pins): %s benutzt %s [skip ci]","content":"%s","sha":"%s"}' \
+           "$PIN_BRANCH" "$REPO_NAME" "$VERS" "$INHALT" "$SHA" > "$RUMPF"
+  else
+    printf '{"branch":"%s","message":"chore(pins): %s benutzt %s [skip ci]","content":"%s"}' \
+           "$PIN_BRANCH" "$REPO_NAME" "$VERS" "$INHALT" > "$RUMPF"
+  fi
 
   ANTWORT="$(api PUT "/repos/${MVN_REPO}/contents/${TARGET}" "$RUMPF" || true)"
   rm -f "$RUMPF"
@@ -138,7 +135,7 @@ json.dump(d, sys.stdout)' > "$RUMPF"
   echo "WARNUNG: Versuch ${versuch} fehlgeschlagen: $(printf '%s' "$ANTWORT" | head -c 300)" >&2
   sleep $(( versuch * 4 ))
   SHA="$(api GET "/repos/${MVN_REPO}/contents/${TARGET}?ref=${PIN_BRANCH}" \
-         | python3 -c 'import json,sys; print((json.load(sys.stdin) or {}).get("sha",""))' 2>/dev/null || true)"
+         | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)"
 done
 
 if [ "$ok" != true ]; then
