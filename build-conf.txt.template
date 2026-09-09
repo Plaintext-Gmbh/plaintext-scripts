@@ -28,8 +28,11 @@ DB_NAME=myproject
 DB_CONTAINER_PREFIX=myproject
 
 # ── Ports ────────────────────────────────────────────────────
-DEV_PORT=1121
-#PROD_PORT=1122
+# Karte 1149 (09.09.2026): DEV_PORT ist entfallen — die DEV/INT-Stufe ist abgebaut, und die
+# INT-Route im nginx gibt es nicht mehr. Blue-Green laeuft nur noch zwischen prod-blue und
+# prod-green. Ein DEV_PORT in einer bestehenden build-conf.txt schadet nicht, wird aber
+# nirgends mehr gelesen.
+PROD_PORT=1122
 
 # ── Maven ────────────────────────────────────────────────────
 MVN_RELEASE_DEPLOY=true

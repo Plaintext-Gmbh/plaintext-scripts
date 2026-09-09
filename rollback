@@ -48,10 +48,12 @@
 #
 #  AUFRUF
 #    rollback --zeigen [<app>]          Zustand, aendert nichts. Ohne <app>: alle Apps.
-#    rollback <app> <umgebung> [Opt]    Rueckschalten auf die andere Farbe.
+#    rollback <app> prod [Opt]          Rueckschalten auf die andere Farbe.
 #
 #    <app>        app | guild | iot | schuetu   (auch 'plaintext-app' o.ae.)
-#    <umgebung>   int | prod
+#    <umgebung>   prod   (KARTE 1149, 09.09.2026: 'int' ist entfallen — die DEV/INT-Stufe ist
+#                 abgebaut. Der Name bleibt als Argument stehen, damit ein alter Aufruf eine
+#                 Erklaerung bekommt statt einer Ratlosigkeit.)
 #    --ja             keine Rueckfrage (fuer Skripte; bei prod trotzdem der Warnblock)
 #    --erzwingen      Migrations-Guard uebergehen. Sagt vorher, was schiefgehen kann.
 #    --stehenlassen   den abgewaehlten (neuen) Slot laufen lassen statt zu stoppen
@@ -111,9 +113,21 @@ fi
 if [ -z "$APP" ]; then verwendung >&2; exit 2; fi
 APP="${APP#plaintext-}"
 if [ "$ZEIGEN" != "true" ] && [ -z "$UMGEBUNG" ]; then
-    fehler "Ohne --zeigen braucht es die Umgebung: rollback $APP int|prod"; exit 2
+    fehler "Ohne --zeigen braucht es die Umgebung: rollback $APP prod"; exit 2
 fi
-case "${UMGEBUNG:-int}" in int|prod) ;; *) fehler "Umgebung muss int oder prod sein, nicht '$UMGEBUNG'."; exit 2 ;; esac
+# Karte 1149 (09.09.2026): 'int' war die zweite Umgebung. Die Stufe ist abgebaut; der Name wird
+# hier ausdruecklich abgefangen, damit ein alter Aufruf (oder ein altes Skript) eine Erklaerung
+# bekommt statt "Umgebung muss ... sein".
+case "${UMGEBUNG:-prod}" in
+    prod) ;;
+    int)
+        fehler "Die Umgebung 'int' gibt es nicht mehr (Karte 1149, 09.09.2026)."
+        hinweis "${YELLOW}  Die DEV/INT-Stufe ist abgebaut: acht Container, vier Datenbanken, die${NC}"
+        hinweis "${YELLOW}  INT-Route im nginx und active-int sind weg. Blue-Green laeuft nur noch${NC}"
+        hinweis "${YELLOW}  zwischen prod-blue und prod-green: rollback $APP prod${NC}"
+        exit 2 ;;
+    *) fehler "Umgebung muss 'prod' sein, nicht '$UMGEBUNG'."; exit 2 ;;
+esac
 case "${ZIEL_WUNSCH:-blue}" in blue|green) ;; *) fehler "--ziel muss blue oder green sein."; exit 2 ;; esac
 
 APP_DIR="$CONFIG_DIR/plaintext-$APP"
@@ -129,7 +143,8 @@ cd "$SCRIPT_DIR" || exit 1
 # shellcheck source=/dev/null
 source "$SKRIPTE_DIR/tui-build-logic.sh"
 
-PORT_INT="${DEV_PORT:-}"; PORT_PROD="${PROD_PORT:-}"
+# Karte 1149: DEV_PORT (die INT-Route) wird nicht mehr gelesen — die Stufe ist abgebaut.
+PORT_PROD="${PROD_PORT:-}"
 
 # ── Fakten vom NAS in EINEM Aufruf ────────────────────────────────────────────
 # Absichtlich ein Rundlauf statt zehn: `--zeigen` soll auch ueber alle Apps schnell sein.
@@ -198,7 +213,8 @@ fassung_vergleich() {
     if [ "$(printf '%s\n%s\n' "$ZIEL" "$AKT" | sort -V | head -1)" == "$ZIEL" ]; then echo aelter; else echo neuer; fi
 }
 
-port_von() { case "$1" in int) printf '%s' "$PORT_INT" ;; prod) printf '%s' "$PORT_PROD" ;; esac; }
+# Karte 1149: PORT_INT wird nicht mehr gebraucht — die INT-Route im nginx ist entfallen.
+port_von() { case "$1" in prod) printf '%s' "$PORT_PROD" ;; esac; }
 
 # ── Zustand zeigen (aendert nichts) ───────────────────────────────────────────
 zeigen_eine_umgebung() {
@@ -248,7 +264,8 @@ zeigen_eine_umgebung() {
 if [ "$ZEIGEN" == "true" ]; then
     echo -e "${BLUE}=== ${IMAGE_NAME} (${DEPLOY_PATH}) ===${NC}"
     RC=0
-    for E in ${UMGEBUNG:-int prod}; do zeigen_eine_umgebung "$E" || RC=1; done
+    # Karte 1149: nur noch prod. Vorher stand hier "int prod".
+    for E in ${UMGEBUNG:-prod}; do zeigen_eine_umgebung "$E" || RC=1; done
     exit "$RC"
 fi
 

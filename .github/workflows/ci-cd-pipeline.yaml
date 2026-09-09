@@ -1,15 +1,18 @@
 # Reusable CI/CD Pipeline for all Plaintext projects
 #
-# Jobs: CI (Build+Test+Coverage) → Deploy → Verify DEV → Verify PROD
+# Jobs: CI (Build+Test+Coverage) → Deploy → Verify PROD
 #
 # deploy-target values:
 #   ci-only      – Build + Test only (no deployment)
-#   snapshot-dev – Snapshot build + deploy to DEV
-#   release-dev  – Release + deploy to DEV
-#   release-all  – Release + deploy to DEV + deploy to PROD
+#   release-all  – Release + deploy to PROD (Blue-Green)
 #   release-only – Release (Maven-Artefakt in den Reposilite), KEIN Container-Deploy
 #                  (Karte 776: Projekt stillgelegt, Bibliothek lebt weiter)
-#   prod-single  – Build + Recreate der EINEN PROD-Instanz (kein blue-green, kein DEV)
+#   prod-single  – Build + Recreate der EINEN PROD-Instanz (kein blue-green)
+#
+# ENTFALLEN mit Karte 1149 (09.09.2026), weil die DEV/INT-Stufe abgebaut ist:
+#   snapshot-dev, release-dev  – deployten ausschliesslich nach INT; der Deploy-Step bricht
+#                                jetzt mit einer Erklaerung ab statt still nichts zu tun
+#   Job "Verify DEV"           – pollte <dev-url>/nosec/version; siehe Kasten dort
 
 name: Build And Deploy Pipeline
 
@@ -17,7 +20,7 @@ on:
   workflow_call:
     inputs:
       deploy-target:
-        description: 'Deployment target: ci-only | snapshot-dev | release-dev | release-all | release-only | prod-single'
+        description: 'Deployment target: ci-only | release-all | release-only | prod-single (snapshot-dev/release-dev entfallen mit Karte 1149)'
         required: true
         type: string
       project-name:
@@ -1416,17 +1419,26 @@ jobs:
         run: |
           chmod +x ./build
           case "$DEPLOY_TARGET" in
-            snapshot-dev)
-              echo "=== Snapshot Build + Deploy DEV ==="
-              ./build build deploy
-              ;;
-            release-dev)
-              echo "=== Release + Deploy DEV ==="
-              ./build release deploy-healthcheck
+            snapshot-dev|release-dev)
+              # Karte 1149 (09.09.2026): Diese beiden Ziele deployten AUSSCHLIESSLICH auf die
+              # INT-Stufe. Die ist abgebaut — es gibt kein Ziel mehr. Bewusst ein harter
+              # Abbruch und kein stiller Erfolg: Wer "release-dev" waehlt, will etwas
+              # ausrollen; ein gruener Lauf, der nichts ausgerollt hat, waere die teuerste
+              # Antwort.
+              echo "FEHLER: deploy-target '$DEPLOY_TARGET' gibt es nicht mehr." >&2
+              echo "  Die DEV/INT-Stufe ist mit Karte 1149 (09.09.2026) abgebaut." >&2
+              echo "  Gemeint ist vermutlich 'release-all' (Release + Blue-Green auf PROD)" >&2
+              echo "  oder 'release-only' (nur das Maven-Artefakt, kein Container)." >&2
+              exit 1
               ;;
             release-all)
-              echo "=== Release + Deploy DEV + PROD ==="
-              ./build 56
+              # Karte 1149: frueher `./build 56` — Release + Deploy INT + Deploy PROD.
+              # `5` = `release deploy-healthcheck`, `3` = `release`; `6` ist unveraendert
+              # `deploy-prod-healthcheck`. Die Flagge, die 5 von 3 trennt
+              # (DEPLOY_WITH_HEALTHCHECK), wird in do_release an genau EINER Stelle gelesen:
+              # im Abschlussblock, der deploy_to_dev ruft. Der Release-Teil ist identisch.
+              echo "=== Release + Deploy PROD (INT abgebaut, Karte 1149) ==="
+              ./build 36
               ;;
             release-only)
               # Karte 776: fuer ein Projekt, dessen CONTAINER stillgelegt ist, dessen
@@ -1440,7 +1452,7 @@ jobs:
               ./build release
               ;;
             prod-single)
-              echo "=== Single PROD instance (kein blue-green, kein DEV) ==="
+              echo "=== Single PROD instance (kein blue-green) ==="
               ./build build prod-single
               ;;
             *)
@@ -1488,152 +1500,24 @@ jobs:
           echo "| **Version** | $(mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>/dev/null || grep -m1 '<version>' pom.xml | sed 's/.*<version>//;s/<\/version>.*//' | tr -d ' ') |" >> $GITHUB_STEP_SUMMARY
           echo "| **Release** | $(git describe --tags --abbrev=0 --match '[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || echo 'n/a') |" >> $GITHUB_STEP_SUMMARY
 
-  # ── Verify DEV ─────────────────────────────────────────────────
-  verify-dev:
-    name: Verify DEV
-    # Kein eigener `.ci-engine`-Waechter noetig: `needs: deploy` genuegt. Anders als bei `sonar`
-    # steht in der Bedingung unten weder `always()` noch `!cancelled()` — ein uebersprungener
-    # `deploy` ueberspringt diesen Job also mit. (Wer hier je ein `always()` einbaut, muss den
-    # Waechter nachziehen, sonst pollt Woodpeckers Deploy-Ergebnis von GitHub aus mit.)
-    needs: deploy
-    # Karte 776: `release-only` deployt bewusst keinen Container — es gibt dann auch kein DEV
-    # zu verifizieren. Ohne diesen Ausschluss wuerde der Verify-Schritt eine stillgelegte
-    # Umgebung anpingen und den ansonsten gelungenen Release rot faerben.
-    if: inputs.deploy-target != 'ci-only' && inputs.deploy-target != 'release-only' && inputs.dev-url != ''
-    # Bleibt auf `runner` (NAS): dev-url ist bei allen Aufrufern eine LAN-Adresse
-    # (http://192.168.1.224:<port>), DEV hat keinen oeffentlichen Hostnamen. Anders als PROD
-    # (verify-prod-runner) gibt es hier nichts, was ein GitHub-Runner erreichen koennte.
-    runs-on: ${{ fromJSON(inputs.runner) }}
-
-    steps:
-      # EHRLICH MARKIERT (Zustandsbericht 29.08.2026, Massnahme 3): dieser Schritt ist in der
-      # sichtbaren Historie NIE gelaufen — alle Aufrufer setzen runner=[self-hosted, nas], und
-      # root nimmt ubuntu-latest nur fuer pull_request, wo verify-dev uebersprungen wird. Ob
-      # der Service-Key (22.03.2026) 192.168.1.224 freigibt, ist von hier nicht pruefbar. Wer
-      # verify-dev auf einen GitHub-Runner setzt, betritt einen unverifizierten Pfad; scheitert
-      # Twingate still, endet der Poll unten nach 7,5 min mit up=false und einer Warnung.
-      - name: Connect to Twingate (unverifizierter Pfad, siehe Kommentar)
-        if: runner.environment != 'self-hosted'
-        uses: twingate/github-action@v1
-        with:
-          service-key: ${{ secrets.TWINGATE_SERVICE_KEY }}
-
-      - name: Version Check DEV
-        id: verify_dev
-        env:
-          DEV_URL: ${{ inputs.dev-url }}
-        run: |
-          echo "Verifying DEV at $DEV_URL/nosec/version ..."
-          # WICHTIG: Der Deploy-Job ist die AUTORITATIVE Gesundheits-Schranke (Blue-Green-Healthcheck
-          # vor dem Traffic-Switch). Dieser Poll bestaetigt nur und ist Voraussetzung fuer die E2E-Tests.
-          # Ein transienter Ausfall (langsamer Re-Start, nginx-Upstream-Glitch am int-Slot) darf die
-          # Pipeline daher NICHT rot faerben -> bei Timeout: Warnung + up=false (KEIN exit 1).
-          # E2E-Tests laufen nur bei up=true; echte Test-Fehlschlaege faerben weiterhin rot.
-          up=false
-          for i in $(seq 1 90); do
-            if RESPONSE=$(curl -sf "$DEV_URL/nosec/version" 2>/dev/null); then
-              echo "DEV running: $RESPONSE"
-              echo "## Verify DEV" >> $GITHUB_STEP_SUMMARY
-              echo "Version: \`$RESPONSE\` :white_check_mark:" >> $GITHUB_STEP_SUMMARY
-              up=true; break
-            fi
-            echo "Waiting for DEV... ($i/90)"
-            sleep 5
-          done
-          if [ "$up" != "true" ]; then
-            echo "::warning title=Verify DEV::DEV /nosec/version nach 7.5 min nicht erreichbar — Deploy-Gate war bereits gruen, daher nur Warnung (kein Fehlschlag); E2E uebersprungen."
-            echo "## Verify DEV" >> $GITHUB_STEP_SUMMARY
-            echo ":warning: DEV nach 7.5 min nicht erreichbar (transient; Deploy war erfolgreich) — E2E uebersprungen." >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "up=$up" >> "$GITHUB_OUTPUT"
-
-      # ── Java Integration Tests (Maven Failsafe) ──
-      - name: Checkout
-        if: inputs.integration-tests-enabled || inputs.playwright-enabled
-        uses: actions/checkout@v7
-
-      - name: Setup JDK ${{ inputs.java-version }}
-        if: inputs.integration-tests-enabled
-        uses: actions/setup-java@v6
-        with:
-          java-version: ${{ inputs.java-version }}
-          distribution: temurin
-          # Karte 911: `cache: maven` NUR fuer GitHub-hosted Runner. Auf den self-hosted
-          # NAS-Runnern ist ~/.m2 ein persistentes Docker-Volume (github-runners_m2-cache,
-          # 41 GB) — der Actions-Cache ist dort redundant UND schaedlich: er laedt einen
-          # 35-GB-Eintrag herunter (bricht bei 62 % ab) und laedt das Volume danach wieder
-          # hoch. Leerer Wert schaltet Restore und Save ab (setup-java: `if (cache)`),
-          # deshalb `cache-jdk` explizit an, damit der JDK-Cache unveraendert bleibt.
-          cache: ${{ !contains(inputs.runner, 'self-hosted') && 'maven' || '' }}
-          cache-jdk: 'true'
-          server-id: plaintext
-          server-username: GITHUB_ACTOR
-          server-password: GITHUB_TOKEN
-
-      - name: Install Playwright Browser
-        if: inputs.integration-tests-enabled
-        run: npx playwright install --with-deps chromium
-
-      - name: Integration Tests (DEV)
-        if: inputs.integration-tests-enabled && steps.verify_dev.outputs.up == 'true'
-        # Sicherheitsnetz: 'mvn verify' startet via spring-boot-maven-plugin teils einen lokalen
-        # Server (pre-integration-test). Fehlt auf dem Runner die DB, haengt der Start sonst
-        # praktisch unbegrenzt (Default-Job-Timeout 6h) -> Pipeline wird nie gruen, obwohl der
-        # Deploy laengst erfolgreich war. Hartes Step-Limit -> schneller, klarer Fehlschlag.
-        timeout-minutes: 12
-        run: mvn verify -B -Dsurefire.skip=true "-Dtest.server.url=$DEV_URL"
-        env:
-          GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_TOKEN: ${{ secrets.MVN_DEPLOY_TOKEN }}
-          DEV_URL: ${{ inputs.dev-url }}
-
-      - name: Upload Integration Test Results (DEV)
-        if: inputs.integration-tests-enabled && failure()
-        uses: actions/upload-artifact@v7
-        continue-on-error: true  # Artefakt-Upload ist nur Convenience/Reporting; darf die Pipeline nicht wegen Storage-Quota o.ae. scheitern lassen
-        with:
-          name: integration-test-results-dev
-          path: '**/target/failsafe-reports/*.xml'
-          retention-days: 1
-
-      - name: Upload Screenshots (DEV)
-        if: inputs.integration-tests-enabled && failure()
-        uses: actions/upload-artifact@v7
-        continue-on-error: true  # Artefakt-Upload ist nur Convenience/Reporting; darf die Pipeline nicht wegen Storage-Quota o.ae. scheitern lassen
-        with:
-          name: playwright-screenshots-dev
-          path: '**/target/screenshots/'
-          retention-days: 1
-          if-no-files-found: ignore
-
-      # ── Node.js Playwright Tests ──
-      - name: Setup Node.js
-        if: inputs.playwright-enabled
-        uses: actions/setup-node@v7
-        with:
-          node-version: '22'
-
-      - name: Install Node.js Playwright
-        if: inputs.playwright-enabled
-        run: |
-          npm ci
-          npx playwright install --with-deps chromium
-
-      - name: Playwright E2E Tests (DEV)
-        if: inputs.playwright-enabled && steps.verify_dev.outputs.up == 'true'
-        timeout-minutes: 10
-        run: npx playwright test
-        env:
-          BASE_URL: ${{ inputs.dev-url }}
-
-      - name: Upload Playwright Report (DEV)
-        if: inputs.playwright-enabled && failure()
-        uses: actions/upload-artifact@v7
-        continue-on-error: true  # Artefakt-Upload ist nur Convenience/Reporting; darf die Pipeline nicht wegen Storage-Quota o.ae. scheitern lassen
-        with:
-          name: playwright-report-dev
-          path: playwright-report/
-          retention-days: 1
+  # ── Verify DEV: ENTFALLEN (Karte 1149, 09.09.2026) ────────────
+  # Hier stand der Job `Verify DEV`: er pollte `<dev-url>/nosec/version` bis zu 7,5 Minuten und
+  # haengte daran wahlweise Java-Integrationstests (`-Dtest.server.url`) und einen Node-
+  # Playwright-Lauf (`BASE_URL`). Alle drei zeigten auf die INT-Stufe auf dem NAS.
+  #
+  # Die INT-Stufe ist abgebaut (Auftrag Daniel: "Es soll die dev umgebung nicht mehr geben, wir
+  # gehen mit blue green vorwaerts"). Damit hat dieser Job kein Ziel mehr.
+  #
+  # WAS DABEI NICHT VERLOREN GING: Der Poll war ausdruecklich nur eine Bestaetigung, kein Gate —
+  # ein Fehlschlag war eine Warnung und faerbte den Lauf nicht rot, weil der Blue-Green-
+  # Healthcheck vor dem Traffic-Switch die autoritative Schranke ist. Die Oberflaechentests sind
+  # seit den Karten 1096/1098 ohnehin dort, wo sie hingehoeren: als Java-Integrationstests im
+  # PR-Lauf, mit einer Wegwerf-Datenbank als `services:`-Eintrag und einer Anwendung, die der
+  # Test selbst auf einem zufaelligen Port startet. Sie brauchten diese Stufe nicht mehr.
+  #
+  # Der Input `dev-url` bleibt vorerst DEFINIERT (required: false, default: ''), damit ein
+  # Aufrufer, der ihn noch setzt, keinen Workflow-Fehler ausloest. Er wird nirgends mehr
+  # gelesen. Wenn alle Aufrufer ihn los sind, kann er weg.
 
   # ── Verify PROD ────────────────────────────────────────────────
   verify-prod:

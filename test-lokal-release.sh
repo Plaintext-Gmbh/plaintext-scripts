@@ -16,7 +16,8 @@
 #   2. Der Default fuer den Marker liegt in do_release AUSSERHALB des CI-Guards — sonst faellt
 #      die CI wieder auf "kein Marker" zurueck.
 #   3. Der Vorflug (lokal_vorflug: Branch, Arbeitsbaum, origin, CI, Maven) laeuft VOR do_release —
-#      und do_release selbst ruft ihn ausserhalb der CI ebenfalls (./build 3/5/56 lokal).
+#      und do_release selbst ruft ihn ausserhalb der CI ebenfalls (./build 3/36 lokal; 5 und 56
+#      sind mit Karte 1149 entfallen).
 #   4. Das NAS wird VOR do_release auf Erreichbarkeit geprueft (kein Tag ohne Deploy).
 #   5. Das GitHub-Release mit Notes entsteht NACH dem Tag-Push und ist nie fatal (jeder Pfad
 #      der Funktion endet mit return 0).
@@ -112,10 +113,28 @@ pruefe "gesperrter Abschnitt: Vorflug VOR versions:set" "ja" \
 pruefe "do_release prueft den Vorflug ausserdem VOR dem Release-Lock" "ja" \
     "$(Z1=$(zeile_in do_release 'lokal_vorflug'); Z2=$(zeile_in do_release 'release_lock_nehmen'); \
        [ -n "${Z1:-}" ] && [ -n "${Z2:-}" ] && [ "$Z1" -lt "$Z2" ] && echo ja || echo nein)"
-for fn in deploy_to_dev deploy_to_prod; do
+# Karte 1149 (09.09.2026): hier standen deploy_to_dev UND deploy_to_prod. Die DEV/INT-Stufe ist
+# abgebaut; deploy_to_dev ist nur noch die Abbruchmeldung und hat keine Sperre mehr zu halten.
+for fn in deploy_to_prod; do
     pruefe "$fn: lokal CI-Rollout-Sperre" "ja" \
         "$(koerper "$fn" | grep -q 'lokal_release_ci_frei' && echo ja || echo nein)"
 done
+
+# Gegenprobe zum Abbau: deploy_to_dev darf NICHT mehr deployen. Ohne diese Pruefung koennte
+# jemand die Funktion "zur Vollstaendigkeit" wieder mit Leben fuellen, ohne dass es auffaellt —
+# und dann liefe ein Deploy gegen Container, die es nicht mehr gibt.
+pruefe "Karte 1149: deploy_to_dev deployt nicht mehr" "ja" \
+    "$(koerper deploy_to_dev | grep -qE 'deploy_blue_green|switch_active|deploy_lock_acquire' && echo nein || echo ja)"
+pruefe "Karte 1149: deploy_to_dev bricht ab (return 1)" "ja" \
+    "$(koerper deploy_to_dev | grep -q 'return 1' && echo ja || echo nein)"
+# `zeile_in` vergleicht mit index(), also als LITERALE Zeichenkette — kein regulaerer Ausdruck.
+pruefe "Karte 1149: do_release weist die DEV-Wahl VOR dem Release-Lock ab" "ja" \
+    "$(Z1=$(zeile_in do_release 'Es gibt keine DEV/INT-Stufe mehr'); Z2=$(zeile_in do_release 'release_lock_nehmen'); \
+       [ -n "${Z1:-}" ] && [ -n "${Z2:-}" ] && [ "$Z1" -lt "$Z2" ] && echo ja || echo nein)"
+# Kommentarzeilen zaehlen NICHT als Befund: der Rumpf erklaert oben, warum die INT-Vorlagen weg
+# sind, und nennt sie dabei. Geprueft wird, was ausgefuehrt wird.
+pruefe "Karte 1149: setup_blue_green legt keine INT-Slots mehr an" "ja" \
+    "$(koerper setup_blue_green | grep -v '^\s*#' | grep -qE 'int-blue|int-green|active-int' && echo nein || echo ja)"
 
 # 6. Massnahmen 1-5 (29.08.2026, PROD 502 durch zwei parallele Lokal-Releases)
 # M1: deploy_blue_green exportiert die Slots; die Aufrufer stoppen NUR diese; stop_slot schuetzt
@@ -123,8 +142,6 @@ pruefe "M1: deploy_blue_green exportiert BG_ALT_SLOT/BG_NEU_SLOT" "ja" \
     "$(koerper deploy_blue_green | grep -q 'BG_ALT_SLOT="\$ACTIVE_SLOT"' && koerper deploy_blue_green | grep -q 'BG_NEU_SLOT="\$INACTIVE_SLOT"' && echo ja || echo nein)"
 pruefe "M1: deploy_to_prod uebernimmt BG_ALT_SLOT nach dem Deploy" "ja" \
     "$(koerper deploy_to_prod_gesperrt | grep -q 'ACTIVE_SLOT="\${BG_ALT_SLOT:-' && echo ja || echo nein)"
-pruefe "M1: deploy_to_dev uebernimmt BG_ALT_SLOT nach dem Deploy" "ja" \
-    "$(koerper deploy_to_dev_gesperrt | grep -q 'OLD_SLOT="\${BG_ALT_SLOT:-' && echo ja || echo nein)"
 pruefe "M1: alter PROD-Slot wird mit Versions-Schutz gestoppt" "ja" \
     "$(koerper deploy_to_prod_gesperrt | grep -q 'stop_slot "prod" "\$ACTIVE_SLOT" "\$RELEASE_VERSION"' && echo ja || echo nein)"
 pruefe "M1: stop_slot verweigert den aktiven Slot (Marker)" "ja" \
@@ -134,8 +151,6 @@ pruefe "M1: stop_slot verweigert Container mit der neuen Version" "ja" \
 # M2: Deploy-Lock auf dem NAS um den ganzen Rollout, Freigabe auf jedem Pfad
 pruefe "M2: deploy_to_prod haelt den NAS-Deploy-Lock" "ja" \
     "$(koerper deploy_to_prod | grep -q 'deploy_lock_acquire "prod"' && koerper deploy_to_prod | grep -q 'deploy_lock_release "prod"' && echo ja || echo nein)"
-pruefe "M2: deploy_to_dev haelt den NAS-Deploy-Lock" "ja" \
-    "$(koerper deploy_to_dev | grep -q 'deploy_lock_acquire "int"' && koerper deploy_to_dev | grep -q 'deploy_lock_release "int"' && echo ja || echo nein)"
 pruefe "M2: Staging-Kopie unter Lock" "ja" \
     "$(koerper stage_jar_to_nas | grep -q 'deploy_lock_acquire "staging"' && echo ja || echo nein)"
 pruefe "M2: Lock wird nur vom Besitzer geloest" "ja" \

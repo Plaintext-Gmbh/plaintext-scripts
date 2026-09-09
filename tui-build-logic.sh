@@ -179,15 +179,15 @@ show_usage() {
     echo -e "  ${GREEN}./build 2${NC}                  - Major release (X.0.0)"
     echo -e "  ${GREEN}./build 3${NC}                  - Minor release (x.X.0)"
     echo -e "  ${GREEN}./build 4${NC}                  - Patch release (x.x.X)"
-    echo -e "  ${GREEN}./build 5${NC}                  - Minor release + deploy to DEV (with health check)"
     echo -e "  ${GREEN}./build 6${NC}                  - Deploy last release to PROD (with health check)"
+    echo -e "  ${YELLOW}./build 5${NC}                  - ENTFALLEN (Karte 1149): war 'Release + Deploy DEV'"
     echo ""
     echo -e "  ${GREEN}./build s${NC}                  - Run SonarQube analysis"
     echo ""
     echo -e "${BLUE}Multi-command execution:${NC}"
-    echo -e "  ${GREEN}./build 56${NC}                 - Execute 5, then 6 (stops on first failure)"
-    echo -e "  ${GREEN}./build 56s${NC}                - Release + Deploy DEV + PROD + SonarQube"
-    echo -e "  ${GREEN}./build 356${NC}                - Execute 3, then 5, then 6"
+    echo -e "  ${GREEN}./build 36${NC}                 - Execute 3, then 6 (stops on first failure)"
+    echo -e "  ${GREEN}./build 36s${NC}                - Release + Deploy PROD + SonarQube"
+    echo -e "  ${YELLOW}./build 56 / 56s / 356${NC}     - ENTFALLEN (Karte 1149): DEV/INT gibt es nicht mehr"
     echo ""
     echo -e "${BLUE}Legacy commands (still supported):${NC}"
     echo -e "  ${GREEN}./build build${NC}              - Build with Maven (SNAPSHOT)"
@@ -198,9 +198,9 @@ show_usage() {
     echo -e "  ${GREEN}./build deploy-prod${NC}        - Deploy last release to PROD"
     echo ""
     echo -e "${BLUE}Lokal-Release (zweiter Weg neben CI/CD; Wrapper muss ihn verdrahten, plaintext-app: ./build 8):${NC}"
-    echo -e "  ${GREEN}./build local-release [1|2|3] [prod|dev-prod]${NC}"
+    echo -e "  ${GREEN}./build local-release [1|2|3] [prod]${NC}"
     echo -e "    Release + Tag + Push (Commit mit [skip ci]) + Build + Blue-Green-Deploy von dieser Maschine"
-    echo -e "    ${YELLOW}prod${NC} = direkt PROD (Default), ${YELLOW}dev-prod${NC} = erst DEV, dann PROD"
+    echo -e "    ${YELLOW}prod${NC} = PROD (Default und einziges Ziel; ${YELLOW}dev-prod${NC} entfiel mit Karte 1149)"
     echo -e "    Nur Vorflug: ${YELLOW}LOKAL_RELEASE_NUR_VORFLUG=true${NC}   CI-Sperre uebergehen: ${YELLOW}LOKAL_RELEASE_IGNORIERE_CI=true${NC}"
 }
 
@@ -1300,8 +1300,6 @@ setup_blue_green() {
     ssh ${DEPLOY_SERVER} "
         mkdir -p ${DEPLOY_PATH}/nginx/conf.d
         mkdir -p ${DEPLOY_PATH}/nginx/templates
-        mkdir -p ${DEPLOY_PATH}/${IMAGE_NAME}-int-blue/logs
-        mkdir -p ${DEPLOY_PATH}/${IMAGE_NAME}-int-green/logs
         mkdir -p ${DEPLOY_PATH}/${IMAGE_NAME}-prod-blue/logs
         mkdir -p ${DEPLOY_PATH}/${IMAGE_NAME}-prod-green/logs
         mkdir -p ${DEPLOY_PATH}/backups/scheduled
@@ -1310,17 +1308,17 @@ setup_blue_green() {
     # Transfer nginx configs via SSH pipe (avoids scp permission issues)
     echo -e "${BLUE}Transferring nginx configuration...${NC}"
     cat "${DEPLOY_DIR}/nginx/nginx.conf" | ssh ${DEPLOY_SERVER} "cat > ${DEPLOY_PATH}/nginx/nginx.conf"
-    cat "${DEPLOY_DIR}/nginx/templates/int-blue.conf" | ssh ${DEPLOY_SERVER} "cat > ${DEPLOY_PATH}/nginx/templates/int-blue.conf"
-    cat "${DEPLOY_DIR}/nginx/templates/int-green.conf" | ssh ${DEPLOY_SERVER} "cat > ${DEPLOY_PATH}/nginx/templates/int-green.conf"
+    # Karte 1149 (09.09.2026): die beiden INT-Vorlagen (int-blue.conf/int-green.conf) sind
+    # entfallen — mit der INT-Stufe ist auch die INT-Route aus nginx.conf verschwunden. Wer sie
+    # hier wieder eintraegt, ohne den zugehoerigen server{}-Block in nginx.conf, bekommt ein
+    # nginx, das gar nicht mehr startet: die Variable $<app>_int_backend_host waere undefiniert.
     cat "${DEPLOY_DIR}/nginx/templates/prod-blue.conf" | ssh ${DEPLOY_SERVER} "cat > ${DEPLOY_PATH}/nginx/templates/prod-blue.conf"
     cat "${DEPLOY_DIR}/nginx/templates/prod-green.conf" | ssh ${DEPLOY_SERVER} "cat > ${DEPLOY_PATH}/nginx/templates/prod-green.conf"
 
     # Set initial upstream configs (blue active)
     echo -e "${BLUE}Setting initial upstream configs (blue active)...${NC}"
     ssh ${DEPLOY_SERVER} "
-        cp ${DEPLOY_PATH}/nginx/templates/int-blue.conf ${DEPLOY_PATH}/nginx/conf.d/int-upstream.conf
         cp ${DEPLOY_PATH}/nginx/templates/prod-blue.conf ${DEPLOY_PATH}/nginx/conf.d/prod-upstream.conf
-        echo 'blue' > ${DEPLOY_PATH}/active-int
         echo 'blue' > ${DEPLOY_PATH}/active-prod
     "
 
@@ -1427,7 +1425,12 @@ ensure_nas_reachable() {
 # $3 = optionales Zeitbudget, $4 = optionaler Container-Name fuer die Logausgabe im Timeout-Pfad.
 check_version() {
     local EXPECTED_VERSION=$1
-    local VERSION_URL=${2:-"http://${NAS_HOST}:${DEV_PORT:-1121}/nosec/version"}
+    # Karte 1149 (09.09.2026): Die Vorgabe stand auf ${DEV_PORT:-1121}, also auf der INT-Route
+    # des nginx. Die gibt es nicht mehr; ein Aufruf ohne $2 haette still gegen einen toten Port
+    # gepollt und nach 120 s mit HTTP 000 aufgegeben — das sieht aus wie ein kranker Container
+    # und ist keiner. Alle heutigen Aufrufer geben $2 ausdruecklich an (PROD_PORT); die Vorgabe
+    # ist nur noch das Netz darunter und zeigt deshalb ebenfalls auf PROD.
+    local VERSION_URL=${2:-"http://${NAS_HOST}:${PROD_PORT:-1122}/nosec/version"}
     # 120s reichen fuer dev und den blue-green-PROD-Pfad. Der Single-PROD-Deploy (fwtool) braucht
     # unter Last mehr: am 03.08. und 05.08.2026 scheiterte er zweimal identisch nach 120s mit
     # HTTP 000, obwohl das Jar korrekt lag -- der jeweilige Rerun war gruen, und selbst der
@@ -1497,84 +1500,33 @@ check_version() {
     return 1
 }
 
-# Function to deploy to dev server (blue-green)
+# ── DIE DEV/INT-STUFE IST ABGEBAUT (Karte 1149, 09.09.2026) ───────────────────────────────
+# Hier standen `deploy_to_dev` und `deploy_to_dev_gesperrt`: Blue-Green-Deploy auf die
+# INT-Slots, externer Healthcheck ueber den INT-Port des nginx, bei Fehlschlag Rueckschalten
+# unter dem Migrations-Guard, danach `write_migration_marker "int"`.
+#
+# Auftrag Daniel, 09.09.2026: "Es soll die dev umgebung nicht mehr geben, wir gehen mit blue
+# green vorwaerts, aber es soll den rollback weg geben." Die acht INT-Container, die vier
+# INT-Datenbanken, die INT-Route im nginx und `active-int` sind weg — es gibt kein Ziel mehr.
+#
+# WARUM EIN HARTER ABBRUCH UND KEIN STILLES `return 0`: Wer einen DEV-Deploy anfordert, will
+# etwas ausgerollt haben. Ein gruener Lauf, der nichts ausgerollt hat, ist der teuerste
+# Ausgang — er sieht aus wie ein Beleg und ist keiner. Deshalb bricht diese Funktion ab, und
+# zwar mit dem Weg, der stattdessen gemeint ist.
+#
+# WICHTIG: Die Aufrufer pruefen die DEV-Wahl inzwischen SCHON VOR dem Release ab (do_release
+# und do_local_release, siehe dort). Diese Funktion ist das Netz darunter, falls ein neuer
+# Aufrufer dazukommt.
 deploy_to_dev() {
-    local IMAGE_TAG=$1
-    local WITH_HEALTH_CHECK=${2:-false}
-
-    echo -e "${BLUE}=== Deploying to DEV Server (Blue-Green) ===${NC}"
-
-    # Lokaler Lauf (nicht CI): ein gerade laufender CI-Rollout benutzt dieselben Slots und
-    # dasselbe Staging-Jar — erst pruefen, dann anfassen. In der CI ist das die Concurrency-Gruppe.
-    if [ "${CI:-}" != "true" ] && ! lokal_release_ci_frei "${RELEASE_BRANCH:-master}"; then
-        return 1
-    fi
-    if ! ensure_nas_reachable; then
-        echo -e "${RED}✗ Cannot deploy - NAS not reachable${NC}"
-        return 1
-    fi
-    # Massnahme 2: Rollout unter dem NAS-Deploy-Lock (int), Freigabe auf jedem Pfad.
-    deploy_lock_acquire "int" || return 1
-    deploy_to_dev_gesperrt "$IMAGE_TAG" "$WITH_HEALTH_CHECK"
-    local RC=$?
-    deploy_lock_release "int"
-    return $RC
-}
-
-deploy_to_dev_gesperrt() {
-    local IMAGE_TAG=$1
-    local WITH_HEALTH_CHECK=${2:-false}
-
-    # Ensure NAS is reachable
-    if ! ensure_nas_reachable; then
-        echo -e "${RED}✗ Cannot deploy - NAS not reachable${NC}"
-        return 1
-    fi
-
-    # Aktiven (alten) Slot VOR dem Deploy merken - er bleibt am Leben, bis der externe Check ok ist.
-    local OLD_SLOT
-    OLD_SLOT=$(get_active_slot "int")
-    local NEW_SLOT
-    if [ "$OLD_SLOT" == "blue" ]; then NEW_SLOT="green"; else NEW_SLOT="blue"; fi
-
-    # Deploy to the inactive INT slot
-    if ! deploy_blue_green "int" "$IMAGE_TAG"; then
-        echo -e "${RED}=== DEV Blue-Green Deployment FAILED ===${NC}"
-        return 1
-    fi
-    # Massnahme 1: ab hier gelten die Slots, die deploy_blue_green tatsaechlich benutzt hat.
-    OLD_SLOT="${BG_ALT_SLOT:-$OLD_SLOT}"
-    NEW_SLOT="${BG_NEU_SLOT:-$NEW_SLOT}"
-
-    # Additional external health check via nginx port
-    if [ "$WITH_HEALTH_CHECK" == "true" ]; then
-        echo ""
-        if ! check_version "$IMAGE_TAG"; then
-            echo -e "${RED}=== DEV external health check FAILED ===${NC}"
-            # Migrations-Guard (INT): kein blinder Rollback, wenn seit letztem Deploy migriert wurde.
-            if ! assert_rollback_safe "int"; then
-                echo -e "${RED}=== ⚠ ROLLBACK BLOCKIERT (INT): seit dem letzten Deploy sind DB-Migrationen gelaufen ===${NC}"
-                echo -e "${YELLOW}Der neue (migrierte) Slot bleibt aktiv. Forward-Fix deployen oder INT-DB manuell richten,${NC}"
-                echo -e "${YELLOW}danach ggf. 'switch_active int ${OLD_SLOT}'.${NC}"
-                return 1
-            fi
-            echo -e "${YELLOW}Rolling back: nginx zurück auf ${OLD_SLOT} (läuft noch)...${NC}"
-            switch_active "int" "$OLD_SLOT"
-            # Den fehlgeschlagenen neuen Slot stoppen (keine zwei Instanzen auf derselben DB).
-            stop_slot "int" "$NEW_SLOT"
-            echo -e "${YELLOW}Rolled back INT to ${OLD_SLOT}${NC}"
-            return 1
-        fi
-    fi
-
-    # Externer Check ok (oder nicht gefordert): JETZT erst den alten Slot stoppen (mit Versions-Schutz).
-    stop_slot "int" "$OLD_SLOT" "$IMAGE_TAG"
-
-    # Erfolgreicher, extern bestätigter INT-Deploy: Migrationsstand-Marker aktualisieren (best effort).
-    write_migration_marker "int"
-
-    echo -e "${GREEN}=== DEV Deployment completed! ===${NC}"
-    return 0
+    echo -e "${RED}✗ Es gibt keine DEV/INT-Stufe mehr (Karte 1149, 09.09.2026).${NC}" >&2
+    echo -e "${YELLOW}  Blue-Green laeuft nur noch zwischen prod-blue und prod-green.${NC}" >&2
+    echo -e "${YELLOW}  Gemeint ist vermutlich:${NC}" >&2
+    echo -e "${YELLOW}    ./build 36          Release + Blue-Green-Deploy auf PROD${NC}" >&2
+    echo -e "${YELLOW}    ./build 6           nur den letzten Release auf PROD ausrollen${NC}" >&2
+    echo -e "${YELLOW}    rollback <app> prod zurueck auf den anderen PROD-Slot${NC}" >&2
+    echo -e "${YELLOW}  Eine Testinstanz wird bei Bedarf ad hoc hochgezogen; die Oberflaechen-${NC}" >&2
+    echo -e "${YELLOW}  durchgaenge der CI bringen ihre eigene Wegwerf-Instanz mit.${NC}" >&2
+    return 1
 }
 
 # Function to deploy to prod server (blue-green)
@@ -1799,7 +1751,12 @@ do_build_snapshot() {
     echo -e "${GREEN}=== Build completed successfully! ===${NC}"
 
     if [ "$1" == "deploy" ]; then
+        # Karte 1149: `./build build deploy` (deploy-target snapshot-dev) rollte einen
+        # SNAPSHOT auf die INT-Slots aus. Die Stufe ist abgebaut; deploy_to_dev bricht mit
+        # einer Erklaerung ab. Ein Snapshot gehoert nicht auf PROD — deshalb gibt es hier
+        # keinen Ersatzweg, sondern nur den Hinweis.
         deploy_to_dev "latest"
+        return 1
     elif [ "$1" == "prod-single" ]; then
         if ! deploy_prod_single; then
             echo -e "${RED}=== Single-PROD-Deployment FEHLGESCHLAGEN ===${NC}"
@@ -2054,6 +2011,24 @@ do_release() {
         elif [ "$2" == "deploy-healthcheck" ]; then
             DEPLOY_WITH_HEALTHCHECK=true
         fi
+    fi
+
+    # Karte 1149 (09.09.2026): Die DEV/INT-Stufe ist abgebaut. `deploy` und
+    # `deploy-healthcheck` bedeuteten "auf INT ausrollen" und haben kein Ziel mehr. Die
+    # Zurueckweisung steht HIER — vor der Versionsvergabe, vor Commit, Tag und Push. Wer sie
+    # weiter nach unten schiebt, hinterlaesst bei einem Fehlversuch einen Release ohne Deploy.
+    if [ "$DEPLOY_REQUESTED" == "true" ] || [ "$DEPLOY_WITH_HEALTHCHECK" == "true" ] \
+       || [ "$DEPLOY_TO_BOTH" == "true" ]; then
+        echo -e "${RED}✗ Es gibt keine DEV/INT-Stufe mehr (Karte 1149, 09.09.2026).${NC}" >&2
+        echo -e "${YELLOW}  Damit gibt es auch './build 5', './build 56' und './build 7'${NC}" >&2
+        echo -e "${YELLOW}  nicht mehr — sie hiessen alle "erst INT, dann PROD".${NC}" >&2
+        echo -e "${YELLOW}  Stattdessen:${NC}" >&2
+        echo -e "${YELLOW}    ./build 36   Release + Blue-Green-Deploy auf PROD${NC}" >&2
+        echo -e "${YELLOW}    ./build 3    nur Release (Maven-Artefakt), kein Container${NC}" >&2
+        echo -e "${YELLOW}    ./build 6    letzten Release auf PROD ausrollen${NC}" >&2
+        echo -e "${YELLOW}  Es wurde NICHTS veraendert: keine Version vergeben, kein Tag,${NC}" >&2
+        echo -e "${YELLOW}  kein Push.${NC}" >&2
+        return 2
     fi
 
     case "$INCREMENT_TYPE" in
@@ -2351,29 +2326,22 @@ do_release_bauen_und_veroeffentlichen() {
     echo -e "${GREEN}=== Release ${NEW_VERSION} completed successfully! ===${NC}"
     echo -e "${GREEN}=== Next development version: ${NEXT_SNAPSHOT_VERSION} ===${NC}"
 
-    if [ "$DEPLOY_REQUESTED" == "true" ]; then
-        deploy_to_dev "${NEW_VERSION}"
-    elif [ "$DEPLOY_TO_PROD" == "true" ]; then
+    # Karte 1149: Hier standen vier Zweige; drei davon riefen deploy_to_dev. Die DEV-Wahl wird
+    # oben abgewiesen, bevor irgendetwas passiert — uebrig bleibt der PROD-Zweig.
+    if [ "$DEPLOY_TO_PROD" == "true" ]; then
         deploy_to_prod
-    elif [ "$DEPLOY_TO_BOTH" == "true" ]; then
-        deploy_to_dev "${NEW_VERSION}"
-        deploy_to_prod
-    elif [ "$DEPLOY_WITH_HEALTHCHECK" == "true" ]; then
-        if ! deploy_to_dev "${NEW_VERSION}" "true"; then
-            echo -e "${RED}=== Deployment with health check FAILED ===${NC}"
-            exit 1
-        fi
     fi
 }
 
 # ── Lokal-Release: zweiter Weg neben CI/CD ─────────────────────────────────────
 # Release (Version, Commit, Tag, Push) + Build + Blue-Green-Deploy — komplett von dieser
 # Maschine aus, ohne GitHub Actions. Aufruf ueber den Wrapper:
-#   plaintext-app: ./build 8   bzw.   ./build local-release [1|2|3] [prod|dev-prod]
+#   plaintext-app: ./build 8   bzw.   ./build local-release [1|2|3] [prod]
 #   $1 = Increment-Typ (1=MAJOR, 2=MINOR (Default), 3=PATCH)
-#   $2 = Ziel: "prod" (Default: direkt PROD) | "dev-prod" (erst DEV, dann PROD — wie CI release-all)
+#   $2 = Ziel: "prod" (Default und einziges Ziel). "dev-prod" ist mit Karte 1149 entfallen —
+#        die DEV/INT-Stufe gibt es nicht mehr.
 #
-# WARUM NICHT EINFACH ./build 56?
+# WARUM NICHT EINFACH ./build 36?
 #   1. Der Push des Release-Commits loest die CI aus (push auf master -> release-all). Die
 #      wuerde parallel zum lokalen Deploy einen ZWEITEN Release rechnen und gegen dieselben
 #      Slots und dasselbe Staging-Jar deployen. Deshalb traegt der Release-Commit das native
@@ -2420,8 +2388,16 @@ do_local_release() {
         *) echo -e "${RED}✗ Ungueltiger Increment-Typ '${INCREMENT_TYPE}' (1=MAJOR, 2=MINOR, 3=PATCH)${NC}"; return 1 ;;
     esac
     case "$ZIEL" in
-        prod|dev-prod) ;;
-        *) echo -e "${RED}✗ Ungueltiges Ziel '${ZIEL}' (prod | dev-prod)${NC}"; return 1 ;;
+        prod) ;;
+        # Karte 1149 (09.09.2026): `dev-prod` hiess "erst INT, dann PROD". Die INT-Stufe ist
+        # abgebaut. Eigener Zweig statt stiller Abweisung, damit die Meldung sagt, was passiert
+        # ist — `prod` tut heute genau das, was `dev-prod` einmal am Ende tat.
+        dev-prod)
+            echo -e "${RED}✗ Ziel 'dev-prod' gibt es nicht mehr (Karte 1149, 09.09.2026):${NC}" >&2
+            echo -e "${YELLOW}  die DEV/INT-Stufe ist abgebaut. Nimm 'prod' — Blue-Green mit${NC}" >&2
+            echo -e "${YELLOW}  Healthcheck auf dem inaktiven PROD-Slot, Rueckweg per 'rollback'.${NC}" >&2
+            return 1 ;;
+        *) echo -e "${RED}✗ Ungueltiges Ziel '${ZIEL}' (nur noch: prod)${NC}"; return 1 ;;
     esac
 
     # ── Vorflug 1-3: Git, CI, Maven (geteilt mit do_release im lokalen Lauf) ─
@@ -2456,7 +2432,7 @@ do_local_release() {
     echo -e "  Version:   ${CURRENT_VERSION} -> ${GREEN}${PLAN_NEU}${NC} (Tag ${PLAN_NEU}, Commit mit [skip ci])"
     echo -e "  Build:     mvn clean $([ "${MVN_RELEASE_DEPLOY:-false}" == "true" ] && echo deploy || echo package) ${MVN_TEST_FLAG:--DskipTests}"
     echo -e "  Transport: $([ "${JAR_VOLUME_DEPLOY}" == "true" ] && echo "Jar -> NAS-Staging (M3)" || echo "Image -> NAS-Registry")"
-    echo -e "  Deploy:    Blue-Green $([ "$ZIEL" == "dev-prod" ] && echo "DEV (int) -> PROD" || echo "PROD direkt") mit Healthcheck"
+    echo -e "  Deploy:    Blue-Green PROD mit Healthcheck"
     echo ""
     if [ "${LOKAL_RELEASE_NUR_VORFLUG:-false}" == "true" ]; then
         echo -e "${GREEN}=== Nur Vorflug (LOKAL_RELEASE_NUR_VORFLUG=true) — nichts veraendert. ===${NC}"
@@ -2484,14 +2460,9 @@ do_local_release() {
         return 1
     fi
 
-    # ── Deploy: Blue-Green ───────────────────────────────────────────────────
-    if [ "$ZIEL" == "dev-prod" ]; then
-        if ! deploy_to_dev "${NEW_VERSION}" "true"; then
-            echo -e "${RED}=== Lokal-Release ${NEW_VERSION}: DEV-Deploy FEHLGESCHLAGEN — PROD nicht angefasst ===${NC}"
-            lokal_release_melde 1 "Release ${NEW_VERSION}: DEV-Deploy fehlgeschlagen, PROD unveraendert."
-            return 1
-        fi
-    fi
+    # ── Deploy: Blue-Green PROD ──────────────────────────────────────────────
+    # Karte 1149: Hier stand davor ein INT-Deploy fuer ZIEL=dev-prod. Die Stufe ist abgebaut;
+    # das Ziel wird oben abgewiesen.
     if ! deploy_to_prod "true"; then
         echo -e "${RED}=== Lokal-Release ${NEW_VERSION}: PROD-Deploy FEHLGESCHLAGEN (siehe Rollback-Meldungen oben) ===${NC}"
         lokal_release_melde 1 "Release ${NEW_VERSION}: PROD-Deploy fehlgeschlagen. Rollback-Status im Terminal pruefen."
