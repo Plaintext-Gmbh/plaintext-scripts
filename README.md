@@ -142,6 +142,37 @@ Fail-open: if the marker is missing (first deploy after this change) or the DB i
 old behaviour is kept (unless `MIGRATION_GUARD_STRICT=true`). `MIGRATION_GUARD_DISABLE=true` turns
 the guard off entirely.
 
+### `./rollback` — der Rueckweg NACH einem abgeschlossenen Deploy (Karte 1149)
+
+Der Guard oben greift nur **waehrend** eines Deploys. Ist der Deploy durch, steht der alte Slot als
+`Exited (143)` da und es gab bis zum 09.09.2026 keinen bedienten Weg zurueck. Genau das macht
+`rollback`: alten Slot starten, Gesundheit pruefen, `switch_active`, von aussen nachmessen, den
+abgewaehlten Slot stoppen — alles unter dem NAS-Deploy-Lock und mit demselben
+`assert_rollback_safe` wie der Deploy.
+
+```bash
+rollback --zeigen                 # Zustand aller Apps (aktive Farbe, Gegenslot, Image, Alter, Guard)
+rollback --zeigen schuetu         # nur eine App
+rollback iot int                  # zurueck auf die andere Farbe (fragt vorher)
+rollback app prod --ja            # ohne Rueckfrage
+rollback app prod --erzwingen     # Guard uebergehen; sagt vorher, was schiefgehen kann
+```
+
+Drei Dinge, die man wissen muss:
+
+* **Das Image beweist nichts.** Alle vier Apps fahren M3 (Jar im Volume): jeder Slot laeuft auf
+  `plaintext-runtime:jre25`. Die Fassung steht in `jars/<env>-<slot>/app.jar` — `rollback --zeigen`
+  liest sie aus dem Manifest, und nach dem Start wird sie gegen `/nosec/version` gemessen.
+* **Der alte Slot faehrt beim Start seinerseits Flyway** — aber er nimmt nichts zurueck. Gemessen
+  am 09.09.2026 an `plaintext-iot-int`: Rank vor und nach dem Rueckschalten 73. Und weil in allen
+  vier `application.yml` `validate-on-migrate: false` steht, startet er auf einem NEUEREN Schema
+  **klaglos**. Es gibt kein zweites Netz unter dem Guard.
+* **Der Marker bleibt unberuehrt.** `migver-<env>` haelt den Migrationsstand des letzten
+  Vorwaerts-Deploys; ein Rollback migriert nichts, und ein Nachziehen wuerde den Guard beim
+  naechsten Versuch blind machen.
+
+Rueckgabe: `0` ok, `1` Fehler/Abbruch, `2` Bedienfehler, `3` der Guard hat blockiert.
+
 ## Build Commands
 
 | Command | Description |
@@ -730,6 +761,7 @@ A **Glass sound** plays whenever Claude Code finishes a response. Detection work
 |------|-------------|
 | `tui-common.sh` | Terminal UI primitives (colors, box drawing, menu rendering) |
 | `tui-build-logic.sh` | Build, release, deploy, and version management logic |
+| `rollback` | Bedienter Rueckweg blue <-> green NACH einem abgeschlossenen Deploy; `--zeigen` als Zustandsbericht (Karte 1149, siehe oben) |
 | `test-lokal-release.sh` | Guards for the release path (native `[skip ci]` subject, preflight order, rollback, release notes) |
 | `test-root-autobump.sh` | Vollstaendigkeitspruefung (Massnahme 4): halbes Release, komplett, Parent fehlt, Ausnahmen, Selbstkontrolle; dazu Karte 1127: Repo antwortet nicht -> Exit 4 statt gruen |
 | `test-release-lock.sh` | Nachgestellte Race der Versionsvergabe: zwei parallele Laeufe mit und ohne Release-Lock, verwaister Lock, Fehlerfall, SIGTERM, NAS-Ausfall |
