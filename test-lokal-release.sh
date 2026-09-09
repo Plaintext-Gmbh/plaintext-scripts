@@ -31,6 +31,26 @@ SKRIPT="${1:-$(dirname "$0")/tui-build-logic.sh}"
 FEHLER=0
 pruefe() { if [ "$2" = "$3" ]; then printf '  ok   %s\n' "$1"
            else printf '  FEHL %s\n       erwartet: %s\n       erhalten: %s\n' "$1" "$2" "$3"; FEHLER=1; fi; }
+# ── Karte 1155: kein `... | grep -q` und kein `... | head -1` unter `set -o pipefail` ─────────
+# `grep -q` steigt beim ERSTEN Treffer aus und schliesst das Leseende. Der Schreiber der Pipe
+# (awk/sed/grep -v) liest die 164-KB-Datei danach noch bis zum Ende und schreibt seinen naechsten
+# Puffer-Block (stdio, 4 KB) in eine geschlossene Pipe: SIGPIPE, Rueckgabewert 141. `pipefail`
+# reicht das als Pipeline-Fehler durch — die Pruefung meldete "nein", obwohl das Muster dasteht.
+# Bedingung ist also nicht die Groesse allein, sondern ein WEITERER Schreibvorgang nach dem
+# Treffer: Koerper ueber ~4 KB mit dem Treffer im ersten Block trifft es, `printf "$BLOCK"` mit
+# einem einzigen write() nicht. Gemessen am 09.09.2026: test-lokal-release.sh 26 von 40 Laeufen
+# rot, test-versionsschritt.sh 18 von 40 — ohne dass am geprueften Code etwas gefehlt haette.
+#
+# Gefaehrlicher als das falsche Rot ist das falsche GRUEN bei den invertierten Pruefungen
+# (`... | grep_q MUSTER && echo nein || echo ja`): dort faellt der Fehlschlag auf "in Ordnung".
+# Gemessen an einer absichtlich eingebauten Regression in einem 16-KB-Funktionskoerper: 15 von 20
+# Laeufen meldeten "ja" — die Sicherung schwieg genau im Regressionsfall.
+#
+# `grep_q` liest die Eingabe VOLLSTAENDIG (grep -c) und meldet denselben Rueckgabewert wie
+# `grep -q`: 0 = mindestens ein Treffer, 1 = keiner. Optionen und Muster gehen unveraendert durch,
+# die Aussage jeder Pruefung bleibt damit gleich — nur der Wettlauf ist weg. Aus demselben Grund
+# steht statt `| head -1` jetzt `| sed -n 1p`: sed liest bis EOF, head steigt vorher aus.
+grep_q() { local n; n=$(grep -c "$@") || true; [ "${n:-0}" -gt 0 ]; }
 # Erste Zeile, in der das Muster (LITERAL, kein Regex — index() statt ~, damit Klammern, $ und
 # Backslashes nicht escaped werden muessen) im Funktionskoerper der Funktion $1 steht
 # (leer = nicht gefunden).
@@ -39,7 +59,7 @@ zeile_in() {
         $0 ~ ("^" fn "\\(\\) \\{") { drin=1 }
         drin && index($0, muster) > 0 && !gefunden { print NR; gefunden=1 }
         drin && /^\}/ { drin=0 }
-    ' "$SKRIPT" | head -1
+    ' "$SKRIPT" | sed -n 1p
 }
 zeile_in_lokal() { zeile_in do_local_release "$1"; }
 koerper() { awk "/^$1\\(\\) \\{/,/^\\}/" "$SKRIPT"; }
@@ -54,13 +74,13 @@ echo "Release-Pfad: Sicherungen in $SKRIPT"
 # 1. Betreffzeile des Release-Commits traegt den Suffix (erste Zeile von COMMIT_MSG)
 BETREFF=$(grep -m1 -E '^\s*COMMIT_MSG="Release version ' "$SKRIPT")
 pruefe "Release-Commit-Betreff kennt RELEASE_COMMIT_SUFFIX" \
-    "ja" "$(printf '%s' "$BETREFF" | grep -q 'RELEASE_COMMIT_SUFFIX' && echo ja || echo nein)"
+    "ja" "$(printf '%s' "$BETREFF" | grep_q 'RELEASE_COMMIT_SUFFIX' && echo ja || echo nein)"
 
 # 1b. Der Default ist das NATIVE [skip ci] — und die Bindestrich-Form kommt im Code nicht mehr vor
 pruefe "do_release: Default ' [skip ci]' (nativ, mit Leerzeichen)" "ja" \
-    "$(koerper do_release | grep -q 'RELEASE_COMMIT_SUFFIX= \[skip ci\]' && echo ja || echo nein)"
+    "$(koerper do_release | grep_q 'RELEASE_COMMIT_SUFFIX= \[skip ci\]' && echo ja || echo nein)"
 pruefe "SNAPSHOT-Commit traegt natives [skip ci]" "ja" \
-    "$(release_pfad | grep -q 'Prepare next development iteration .*\[skip ci\]"' && echo ja || echo nein)"
+    "$(release_pfad | grep_q 'Prepare next development iteration .*\[skip ci\]"' && echo ja || echo nein)"
 # Kommentare duerfen die alte Form erklaeren; die Commit-Erzeugung nicht. (lokal_release_ci_frei
 # kennt beide Formen absichtlich — deshalb nur die beiden Release-Funktionen.)
 BINDESTRICH=$({ release_pfad; koerper do_local_release; } | grep -v '^\s*#' | grep -c 'skip-ci' || true)
@@ -101,7 +121,7 @@ pruefe "do_local_release setzt keinen eigenen Suffix" "0" \
 
 # 5. lokal_vorflug prueft den Arbeitsbaum; do_release ruft ihn ausserhalb der CI VOR dem Versionsschritt
 pruefe "lokal_vorflug prueft den Arbeitsbaum" "ja" \
-    "$(koerper lokal_vorflug | grep -q 'git status --porcelain' && echo ja || echo nein)"
+    "$(koerper lokal_vorflug | grep_q 'git status --porcelain' && echo ja || echo nein)"
 # Der Vorflug steht zweimal im Pfad: in do_release VOR dem Release-Lock (fail fast, damit ein
 # aussichtsloser Lauf niemanden warten laesst) und in release_nummer_beanspruchen NACH dem Lock
 # (frischer Stand, sonst rechnet der Wartende die veraltete Nummer). Massgeblich fuer diese
@@ -118,15 +138,15 @@ pruefe "do_release prueft den Vorflug ausserdem VOR dem Release-Lock" "ja" \
 # Bis Karte 1149 lief das als Schleife ueber deploy_to_dev UND deploy_to_prod. Eine Schleife
 # ueber genau ein Element ist shellcheck SC2043 — also ein gerader Aufruf.
 pruefe "deploy_to_prod: lokal CI-Rollout-Sperre" "ja" \
-    "$(koerper deploy_to_prod | grep -q 'lokal_release_ci_frei' && echo ja || echo nein)"
+    "$(koerper deploy_to_prod | grep_q 'lokal_release_ci_frei' && echo ja || echo nein)"
 
 # Gegenprobe zum Abbau: deploy_to_dev darf NICHT mehr deployen. Ohne diese Pruefung koennte
 # jemand die Funktion "zur Vollstaendigkeit" wieder mit Leben fuellen, ohne dass es auffaellt —
 # und dann liefe ein Deploy gegen Container, die es nicht mehr gibt.
 pruefe "Karte 1149: deploy_to_dev deployt nicht mehr" "ja" \
-    "$(koerper deploy_to_dev | grep -qE 'deploy_blue_green|switch_active|deploy_lock_acquire' && echo nein || echo ja)"
+    "$(koerper deploy_to_dev | grep_q -E 'deploy_blue_green|switch_active|deploy_lock_acquire' && echo nein || echo ja)"
 pruefe "Karte 1149: deploy_to_dev bricht ab (return 1)" "ja" \
-    "$(koerper deploy_to_dev | grep -q 'return 1' && echo ja || echo nein)"
+    "$(koerper deploy_to_dev | grep_q 'return 1' && echo ja || echo nein)"
 # `zeile_in` vergleicht mit index(), also als LITERALE Zeichenkette — kein regulaerer Ausdruck.
 pruefe "Karte 1149: do_release weist die DEV-Wahl VOR dem Release-Lock ab" "ja" \
     "$(Z1=$(zeile_in do_release 'Es gibt keine DEV/INT-Stufe mehr'); Z2=$(zeile_in do_release 'release_lock_nehmen'); \
@@ -134,52 +154,52 @@ pruefe "Karte 1149: do_release weist die DEV-Wahl VOR dem Release-Lock ab" "ja" 
 # Kommentarzeilen zaehlen NICHT als Befund: der Rumpf erklaert oben, warum die INT-Vorlagen weg
 # sind, und nennt sie dabei. Geprueft wird, was ausgefuehrt wird.
 pruefe "Karte 1149: setup_blue_green legt keine INT-Slots mehr an" "ja" \
-    "$(koerper setup_blue_green | grep -v '^\s*#' | grep -qE 'int-blue|int-green|active-int' && echo nein || echo ja)"
+    "$(koerper setup_blue_green | grep -v '^\s*#' | grep_q -E 'int-blue|int-green|active-int' && echo nein || echo ja)"
 
 # 6. Massnahmen 1-5 (29.08.2026, PROD 502 durch zwei parallele Lokal-Releases)
 # M1: deploy_blue_green exportiert die Slots; die Aufrufer stoppen NUR diese; stop_slot schuetzt
 pruefe "M1: deploy_blue_green exportiert BG_ALT_SLOT/BG_NEU_SLOT" "ja" \
-    "$(koerper deploy_blue_green | grep -q 'BG_ALT_SLOT="\$ACTIVE_SLOT"' && koerper deploy_blue_green | grep -q 'BG_NEU_SLOT="\$INACTIVE_SLOT"' && echo ja || echo nein)"
+    "$(koerper deploy_blue_green | grep_q 'BG_ALT_SLOT="\$ACTIVE_SLOT"' && koerper deploy_blue_green | grep_q 'BG_NEU_SLOT="\$INACTIVE_SLOT"' && echo ja || echo nein)"
 pruefe "M1: deploy_to_prod uebernimmt BG_ALT_SLOT nach dem Deploy" "ja" \
-    "$(koerper deploy_to_prod_gesperrt | grep -q 'ACTIVE_SLOT="\${BG_ALT_SLOT:-' && echo ja || echo nein)"
+    "$(koerper deploy_to_prod_gesperrt | grep_q 'ACTIVE_SLOT="\${BG_ALT_SLOT:-' && echo ja || echo nein)"
 pruefe "M1: alter PROD-Slot wird mit Versions-Schutz gestoppt" "ja" \
-    "$(koerper deploy_to_prod_gesperrt | grep -q 'stop_slot "prod" "\$ACTIVE_SLOT" "\$RELEASE_VERSION"' && echo ja || echo nein)"
+    "$(koerper deploy_to_prod_gesperrt | grep_q 'stop_slot "prod" "\$ACTIVE_SLOT" "\$RELEASE_VERSION"' && echo ja || echo nein)"
 pruefe "M1: stop_slot verweigert den aktiven Slot (Marker)" "ja" \
-    "$(koerper stop_slot | grep -q 'get_active_slot "\$ENV_NAME"' && koerper stop_slot | grep -q 'VERWEIGERT' && echo ja || echo nein)"
+    "$(koerper stop_slot | grep_q 'get_active_slot "\$ENV_NAME"' && koerper stop_slot | grep_q 'VERWEIGERT' && echo ja || echo nein)"
 pruefe "M1: stop_slot verweigert Container mit der neuen Version" "ja" \
-    "$(koerper stop_slot | grep -q 'nosec/version' && echo ja || echo nein)"
+    "$(koerper stop_slot | grep_q 'nosec/version' && echo ja || echo nein)"
 # M2: Deploy-Lock auf dem NAS um den ganzen Rollout, Freigabe auf jedem Pfad
 pruefe "M2: deploy_to_prod haelt den NAS-Deploy-Lock" "ja" \
-    "$(koerper deploy_to_prod | grep -q 'deploy_lock_acquire "prod"' && koerper deploy_to_prod | grep -q 'deploy_lock_release "prod"' && echo ja || echo nein)"
+    "$(koerper deploy_to_prod | grep_q 'deploy_lock_acquire "prod"' && koerper deploy_to_prod | grep_q 'deploy_lock_release "prod"' && echo ja || echo nein)"
 pruefe "M2: Staging-Kopie unter Lock" "ja" \
-    "$(koerper stage_jar_to_nas | grep -q 'deploy_lock_acquire "staging"' && echo ja || echo nein)"
+    "$(koerper stage_jar_to_nas | grep_q 'deploy_lock_acquire "staging"' && echo ja || echo nein)"
 pruefe "M2: Lock wird nur vom Besitzer geloest" "ja" \
-    "$(koerper deploy_lock_release | grep -q 'DEPLOY_LOCK_TOKEN' && echo ja || echo nein)"
+    "$(koerper deploy_lock_release | grep_q 'DEPLOY_LOCK_TOKEN' && echo ja || echo nein)"
 pruefe "M2: nginx-Sicherungskopie je Lauf eindeutig" "ja" \
     "$(grep -q 'upstream.conf.\${DEPLOY_LOCK_TOKEN}.bak' "$SKRIPT" && ! grep -q 'upstream.conf.bak' "$SKRIPT" && echo ja || echo nein)"
 # M3: pg_dump schnell + fail-fast, Backup nur bei Migration
 pruefe "M3: pg_dump ohne -Z 9, mit --lock-wait-timeout" "ja" \
-    "$(koerper backup_prod_db | grep -q 'lock-wait-timeout' && ! koerper backup_prod_db | grep -q -- '-Z 9 ' && echo ja || echo nein)"
+    "$(koerper backup_prod_db | grep_q 'lock-wait-timeout' && ! koerper backup_prod_db | grep_q -- '-Z 9 ' && echo ja || echo nein)"
 pruefe "M3: PROD-Backup nur wenn backup_noetig" "ja" \
-    "$(koerper deploy_to_prod_gesperrt | grep -q 'if backup_noetig; then' && echo ja || echo nein)"
+    "$(koerper deploy_to_prod_gesperrt | grep_q 'if backup_noetig; then' && echo ja || echo nein)"
 pruefe "M3: backup_noetig ist fail-safe (unbekannt = sichern)" "ja" \
-    "$(koerper backup_noetig | grep -q 'nicht ermittelbar' && echo ja || echo nein)"
+    "$(koerper backup_noetig | grep_q 'nicht ermittelbar' && echo ja || echo nein)"
 # M4: Tests im Lokal-Release, wenn eine DB da ist
 Z_TESTFLAG=$(zeile_in_lokal 'lokal_release_testflag')
 pruefe "M4: Test-Flag wird im Lokal-Release ermittelt (vor do_release)" "ja" \
     "$([ -n "${Z_TESTFLAG:-}" ] && [ -n "${Z_RELEASE:-}" ] && [ "$Z_TESTFLAG" -lt "$Z_RELEASE" ] && echo ja || echo nein)"
 pruefe "M4: mit DB laufen die Unit-Tests wie in der CI" "ja" \
-    "$(koerper lokal_release_testflag | grep -q -- '-DskipITs -DexcludedGroups=quality-gate' && echo ja || echo nein)"
+    "$(koerper lokal_release_testflag | grep_q -- '-DskipITs -DexcludedGroups=quality-gate' && echo ja || echo nein)"
 # M5: CI-Sperre ignoriert Laeufe mit Skip-Marker (beide Formen, Paket S); Tag-Vorpruefung
 pruefe "M5: CI-Sperre ignoriert [skip-ci]- UND [skip ci]-Laeufe" "ja" \
-    "$(koerper lokal_release_ci_frei | grep -q 'index(\$5, "\[skip-ci\]") == 0 && index(\$5, "\[skip ci\]") == 0' && echo ja || echo nein)"
+    "$(koerper lokal_release_ci_frei | grep_q 'index(\$5, "\[skip-ci\]") == 0 && index(\$5, "\[skip ci\]") == 0' && echo ja || echo nein)"
 Z_TAG=$(zeile_in_lokal 'git ls-remote --tags origin')
 pruefe "M5: geplanter Tag wird VOR do_release auf origin geprueft" "ja" \
     "$([ -n "${Z_TAG:-}" ] && [ -n "${Z_RELEASE:-}" ] && [ "$Z_TAG" -lt "$Z_RELEASE" ] && echo ja || echo nein)"
 
 # 7. Rueckbau nimmt nur zurueck, was NICHT auf origin ist
 pruefe "Rueckbau prueft origin-Zugehoerigkeit" "ja" \
-    "$(koerper lokal_release_rueckbau | grep -q 'merge-base --is-ancestor HEAD' && echo ja || echo nein)"
+    "$(koerper lokal_release_rueckbau | grep_q 'merge-base --is-ancestor HEAD' && echo ja || echo nein)"
 
 # 8. GitHub-Release mit Notes: NACH dem Tag-Push, und nie fatal
 Z_TAGPUSH=$(zeile_in do_release 'git push origin "refs/tags/')
@@ -191,7 +211,7 @@ fi
 pruefe "release_notes_erzeugen: kein fataler Ausstieg (return 1 / exit)" "0" \
     "$(koerper release_notes_erzeugen | grep -v '^\s*#' | grep -cE 'return [1-9]|exit ' || true)"
 pruefe "release_notes_erzeugen: prueft auf gh" "ja" \
-    "$(koerper release_notes_erzeugen | grep -q 'command -v gh' && echo ja || echo nein)"
+    "$(koerper release_notes_erzeugen | grep_q 'command -v gh' && echo ja || echo nein)"
 
 if [ "$FEHLER" -eq 0 ]; then echo "alles ok"; else echo "FEHLER"; fi
 exit "$FEHLER"

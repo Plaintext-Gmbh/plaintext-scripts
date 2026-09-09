@@ -25,6 +25,26 @@ SKRIPT="${1:-$(dirname "$0")/tui-build-logic.sh}"
 FEHLER=0
 pruefe() { if [ "$2" = "$3" ]; then printf '  ok   %s\n' "$1"
            else printf '  FEHL %s\n       erwartet: %s\n       erhalten: %s\n' "$1" "$2" "$3"; FEHLER=1; fi; }
+# ── Karte 1155: kein `... | grep -q` und kein `... | head -1` unter `set -o pipefail` ─────────
+# `grep -q` steigt beim ERSTEN Treffer aus und schliesst das Leseende. Der Schreiber der Pipe
+# (awk/sed/grep -v) liest die 164-KB-Datei danach noch bis zum Ende und schreibt seinen naechsten
+# Puffer-Block (stdio, 4 KB) in eine geschlossene Pipe: SIGPIPE, Rueckgabewert 141. `pipefail`
+# reicht das als Pipeline-Fehler durch — die Pruefung meldete "nein", obwohl das Muster dasteht.
+# Bedingung ist also nicht die Groesse allein, sondern ein WEITERER Schreibvorgang nach dem
+# Treffer: Koerper ueber ~4 KB mit dem Treffer im ersten Block trifft es, `printf "$BLOCK"` mit
+# einem einzigen write() nicht. Gemessen am 09.09.2026: test-lokal-release.sh 26 von 40 Laeufen
+# rot, test-versionsschritt.sh 18 von 40 — ohne dass am geprueften Code etwas gefehlt haette.
+#
+# Gefaehrlicher als das falsche Rot ist das falsche GRUEN bei den invertierten Pruefungen
+# (`... | grep_q MUSTER && echo nein || echo ja`): dort faellt der Fehlschlag auf "in Ordnung".
+# Gemessen an einer absichtlich eingebauten Regression in einem 16-KB-Funktionskoerper: 15 von 20
+# Laeufen meldeten "ja" — die Sicherung schwieg genau im Regressionsfall.
+#
+# `grep_q` liest die Eingabe VOLLSTAENDIG (grep -c) und meldet denselben Rueckgabewert wie
+# `grep -q`: 0 = mindestens ein Treffer, 1 = keiner. Optionen und Muster gehen unveraendert durch,
+# die Aussage jeder Pruefung bleibt damit gleich — nur der Wettlauf ist weg. Aus demselben Grund
+# steht statt `| head -1` jetzt `| sed -n 1p`: sed liest bis EOF, head steigt vorher aus.
+grep_q() { local n; n=$(grep -c "$@") || true; [ "${n:-0}" -gt 0 ]; }
 
 # Die Funktion aus dem Skript schneiden und einzeln laden. Das ganze tui-build-logic.sh zu sourcen
 # geht nicht: es verlangt build-conf.txt und beendet sich sonst mit exit 1.
@@ -95,9 +115,9 @@ pruefe "Folge-Release nach abgebrochenem Lauf (Tag 2.1710.0, POM 2.1709.0-SNAPSH
 # Fall genau daran rot geworden — geprueft wird deshalb ueber BEIDE Funktionen, wie es der
 # Regressionswaechter weiter unten schon vormacht.
 pruefe "der Release-Pfad rechnet ab versionsbasis" "ja" \
-       "$( { sed -n '/^do_release() {/,/^}/p' "$SKRIPT"; sed -n '/^release_nummer_beanspruchen() {/,/^}/p' "$SKRIPT"; } | grep -q 'compute_release_versions "$(versionsbasis' && echo ja || echo nein)"
+       "$( { sed -n '/^do_release() {/,/^}/p' "$SKRIPT"; sed -n '/^release_nummer_beanspruchen() {/,/^}/p' "$SKRIPT"; } | grep_q 'compute_release_versions "$(versionsbasis' && echo ja || echo nein)"
 pruefe "Lokal-Release-Plan rechnet ab versionsbasis" "ja" \
-       "$(sed -n '/^do_local_release() {/,/^}/p' "$SKRIPT" | grep -q 'compute_release_versions "$(versionsbasis' && echo ja || echo nein)"
+       "$(sed -n '/^do_local_release() {/,/^}/p' "$SKRIPT" | grep_q 'compute_release_versions "$(versionsbasis' && echo ja || echo nein)"
 
 echo "== Regressionswaechter ===================================================="
 # Der alte Fehler in Reinform: die zweite Erhoehung auf der bereits erhoehten MINOR.
@@ -110,12 +130,12 @@ pruefe "SNAPSHOT traegt die Release-Nummer" "ja" \
 # release_nummer_beanspruchen — geprueft wird deshalb ueber beide Funktionen.
 RELEASE_PFAD="$(sed -n '/^do_release() {/,/^}/p' "$SKRIPT"; sed -n '/^release_nummer_beanspruchen() {/,/^}/p' "$SKRIPT")"
 pruefe "der Release-Pfad benutzt compute_release_versions" "ja" \
-       "$(printf '%s\n' "$RELEASE_PFAD" | grep -q 'compute_release_versions' && echo ja || echo nein)"
+       "$(printf '%s\n' "$RELEASE_PFAD" | grep_q 'compute_release_versions' && echo ja || echo nein)"
 pruefe "der Release-Pfad rechnet nicht selbst" "ja" \
-       "$(printf '%s\n' "$RELEASE_PFAD" | grep -qE '(MINOR|MAJOR|PATCH)=\$\(\(' && echo nein || echo ja)"
+       "$(printf '%s\n' "$RELEASE_PFAD" | grep_q -E '(MINOR|MAJOR|PATCH)=\$\(\(' && echo nein || echo ja)"
 # Und die Rechnung steht unter dem Release-Lock, nicht davor (sonst zwei Laeufe, eine Nummer).
 pruefe "gerechnet wird im gesperrten Abschnitt" "ja" \
-       "$(sed -n '/^release_nummer_beanspruchen() {/,/^}/p' "$SKRIPT" | grep -q 'compute_release_versions' && echo ja || echo nein)"
+       "$(sed -n '/^release_nummer_beanspruchen() {/,/^}/p' "$SKRIPT" | grep_q 'compute_release_versions' && echo ja || echo nein)"
 
 echo "== Syntax ================================================================="
 pruefe "Skript ist syntaktisch gueltig" "ja" "$(bash -n "$SKRIPT" 2>/dev/null && echo ja || echo nein)"

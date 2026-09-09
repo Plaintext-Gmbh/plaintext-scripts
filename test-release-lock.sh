@@ -35,6 +35,26 @@ SKRIPT="${1:-$(cd "$(dirname "$0")" && pwd)/tui-build-logic.sh}"
 FEHLER=0
 pruefe() { if [ "$2" = "$3" ]; then printf '  ok   %s\n' "$1"
            else printf '  FEHL %s\n       erwartet: %s\n       erhalten: %s\n' "$1" "$2" "$3"; FEHLER=1; fi; }
+# ── Karte 1155: kein `... | grep -q` und kein `... | head -1` unter `set -o pipefail` ─────────
+# `grep -q` steigt beim ERSTEN Treffer aus und schliesst das Leseende. Der Schreiber der Pipe
+# (awk/sed/grep -v) liest die 164-KB-Datei danach noch bis zum Ende und schreibt seinen naechsten
+# Puffer-Block (stdio, 4 KB) in eine geschlossene Pipe: SIGPIPE, Rueckgabewert 141. `pipefail`
+# reicht das als Pipeline-Fehler durch — die Pruefung meldete "nein", obwohl das Muster dasteht.
+# Bedingung ist also nicht die Groesse allein, sondern ein WEITERER Schreibvorgang nach dem
+# Treffer: Koerper ueber ~4 KB mit dem Treffer im ersten Block trifft es, `printf "$BLOCK"` mit
+# einem einzigen write() nicht. Gemessen am 09.09.2026: test-lokal-release.sh 26 von 40 Laeufen
+# rot, test-versionsschritt.sh 18 von 40 — ohne dass am geprueften Code etwas gefehlt haette.
+#
+# Gefaehrlicher als das falsche Rot ist das falsche GRUEN bei den invertierten Pruefungen
+# (`... | grep_q MUSTER && echo nein || echo ja`): dort faellt der Fehlschlag auf "in Ordnung".
+# Gemessen an einer absichtlich eingebauten Regression in einem 16-KB-Funktionskoerper: 15 von 20
+# Laeufen meldeten "ja" — die Sicherung schwieg genau im Regressionsfall.
+#
+# `grep_q` liest die Eingabe VOLLSTAENDIG (grep -c) und meldet denselben Rueckgabewert wie
+# `grep -q`: 0 = mindestens ein Treffer, 1 = keiner. Optionen und Muster gehen unveraendert durch,
+# die Aussage jeder Pruefung bleibt damit gleich — nur der Wettlauf ist weg. Aus demselben Grund
+# steht statt `| head -1` jetzt `| sed -n 1p`: sed liest bis EOF, head steigt vorher aus.
+grep_q() { local n; n=$(grep -c "$@") || true; [ "${n:-0}" -gt 0 ]; }
 
 # ── Werkstatt ──────────────────────────────────────────────────────────────────────────
 TESTDIR=$(mktemp -d)
@@ -226,7 +246,7 @@ release_lock_nehmen > "$TESTDIR/fall-c.log" 2>&1; C_RC=$?
 C_AUSGABE=$(cat "$TESTDIR/fall-c.log")
 pruefe "verwaister Lock wird uebernommen" "0" "$C_RC"
 pruefe "und die Uebernahme wird gemeldet" "ja" \
-       "$(printf '%s' "$C_AUSGABE" | grep -q 'Verwaister Deploy-Lock' && echo ja || echo nein)"
+       "$(printf '%s' "$C_AUSGABE" | grep_q 'Verwaister Deploy-Lock' && echo ja || echo nein)"
 pruefe "der neue Besitzer steht drin" "ja" \
        "$(grep -q "^uebernehmer-$$ " "$LOCK_PFAD/owner" && echo ja || echo nein)"
 release_lock_freigeben >/dev/null 2>&1
@@ -281,13 +301,13 @@ DEPLOY_LOCK_HELD=""; DEPLOY_LOCK_TOKEN="ohne-nas-$$"
 F_AUSGABE=$(release_lock_nehmen 2>&1); F_RC=$?
 pruefe "ohne NAS bricht der Release ab (kein stiller Rueckfall)" "1" "$F_RC"
 pruefe "und sagt warum"  "ja" \
-       "$(printf '%s' "$F_AUSGABE" | grep -q 'ohne NAS kein Release' && echo ja || echo nein)"
+       "$(printf '%s' "$F_AUSGABE" | grep_q 'ohne NAS kein Release' && echo ja || echo nein)"
 pruefe "und nennt den bewussten Ausweg" "ja" \
-       "$(printf '%s' "$F_AUSGABE" | grep -q 'RELEASE_LOCK_OHNE_NAS=true' && echo ja || echo nein)"
+       "$(printf '%s' "$F_AUSGABE" | grep_q 'RELEASE_LOCK_OHNE_NAS=true' && echo ja || echo nein)"
 F2_AUSGABE=$(RELEASE_LOCK_OHNE_NAS=true release_lock_nehmen 2>&1); F2_RC=$?
 pruefe "mit RELEASE_LOCK_OHNE_NAS=true laeuft er weiter" "0" "$F2_RC"
 pruefe "aber laut und mit benanntem Risiko" "ja" \
-       "$(printf '%s' "$F2_AUSGABE" | grep -q 'dieselbe' && echo ja || echo nein)"
+       "$(printf '%s' "$F2_AUSGABE" | grep_q 'dieselbe' && echo ja || echo nein)"
 release_lock_freigeben >/dev/null 2>&1
 NAS_ANTWORTET=ja
 
@@ -298,7 +318,7 @@ BLOCK_DO=$(sed -n '/^do_release() {/,/^}/p' "$SKRIPT")
 BLOCK_NUMMER=$(sed -n '/^release_nummer_beanspruchen() {/,/^}/p' "$SKRIPT")
 BLOCK_BAU=$(sed -n '/^do_release_bauen_und_veroeffentlichen() {/,/^}/p' "$SKRIPT")
 # Zeilennummer INNERHALB eines Blocks (0 = nicht enthalten).
-in_block() { printf '%s\n' "$1" | grep -n -- "$2" | head -1 | cut -d: -f1; }
+in_block() { printf '%s\n' "$1" | grep -n -- "$2" | sed -n 1p | cut -d: -f1; }
 
 G_NEHMEN=$(in_block "$BLOCK_DO" 'release_lock_nehmen')
 G_ABSCHNITT=$(in_block "$BLOCK_DO" '^    release_nummer_beanspruchen$')
@@ -314,7 +334,7 @@ pruefe "Freigabe steht direkt NACH dem Abschnitt" "ja" \
 pruefe "Build/Veroeffentlichung erst NACH der Freigabe" "ja" \
        "$([ "${G_FREI:-0}" -lt "${G_BAUEN:-0}" ] 2>/dev/null && echo ja || echo nein)"
 pruefe "do_release rechnet die Version NICHT mehr selbst" "ja" \
-       "$(printf '%s\n' "$BLOCK_DO" | grep -q 'compute_release_versions' && echo nein || echo ja)"
+       "$(printf '%s\n' "$BLOCK_DO" | grep_q 'compute_release_versions' && echo nein || echo ja)"
 
 G_NACHZIEHEN=$(in_block "$BLOCK_NUMMER" 'release_stand_nachziehen')
 G_RECHNEN=$(in_block "$BLOCK_NUMMER" 'compute_release_versions')
@@ -329,13 +349,13 @@ pruefe "Kollisionspruefung liegt im gesperrten Abschnitt" "ja" \
 pruefe "der Abschnitt endet mit dem Tag-Push" "ja" \
        "$([ "${G_KOLLISION:-0}" -lt "${G_TAGPUSH:-0}" ] 2>/dev/null && echo ja || echo nein)"
 pruefe "der Build liegt NICHT im gesperrten Abschnitt" "ja" \
-       "$(printf '%s\n' "$BLOCK_NUMMER" | grep -q 'mvn clean deploy' && echo nein || echo ja)"
+       "$(printf '%s\n' "$BLOCK_NUMMER" | grep_q 'mvn clean deploy' && echo nein || echo ja)"
 pruefe "Build und SNAPSHOT-Push liegen im ungesperrten Teil" "ja" \
-       "$(printf '%s\n' "$BLOCK_BAU" | grep -q 'mvn clean deploy' \
-          && printf '%s\n' "$BLOCK_BAU" | grep -q 'Pushing next SNAPSHOT commit' && echo ja || echo nein)"
+       "$(printf '%s\n' "$BLOCK_BAU" | grep_q 'mvn clean deploy' \
+          && printf '%s\n' "$BLOCK_BAU" | grep_q 'Pushing next SNAPSHOT commit' && echo ja || echo nein)"
 pruefe "beide Nachziehwege vorhanden (CI und lokal)" "ja" \
-       "$(printf '%s\n' "$BLOCK_NUMMER" | grep -q 'release_stand_nachziehen' \
-          && printf '%s\n' "$BLOCK_NUMMER" | grep -q 'lokal_vorflug' && echo ja || echo nein)"
+       "$(printf '%s\n' "$BLOCK_NUMMER" | grep_q 'release_stand_nachziehen' \
+          && printf '%s\n' "$BLOCK_NUMMER" | grep_q 'lokal_vorflug' && echo ja || echo nein)"
 
 # ══ Karte 1055: Lebenszeichen statt Alter ══════════════════════════════════════════════
 # Der gemessene Fall: plaintext-guild, 02.09.2026. Pipeline 119 wurde um 15:14:55 von einem
@@ -461,7 +481,7 @@ echo "== Fall K: die Verfallszeit muss innerhalb der Wartezeit erreichbar sein =
 # Der eigentliche Konstruktionsfehler bis zum 04.09.2026: DEPLOY_LOCK_STALE (3600) war groesser
 # als DEPLOY_LOCK_WAIT (1800). Ein Wartender gab damit IMMER auf, bevor er haette uebernehmen
 # duerfen — die Uebernahme-Regel war Dekoration. Geprueft werden die Vorgabewerte im Skript.
-vorgabe() { grep -o "$1:-[0-9]*" "$SKRIPT" | head -1 | sed 's/.*:-//'; }
+vorgabe() { grep -o "$1:-[0-9]*" "$SKRIPT" | sed -n 1p | sed 's/.*:-//'; }
 V_WAIT=$(vorgabe DEPLOY_LOCK_WAIT)
 V_STALE=$(vorgabe DEPLOY_LOCK_STALE)
 V_HB_STALE=$(vorgabe DEPLOY_LOCK_STALE_HEARTBEAT)
