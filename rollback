@@ -1,0 +1,422 @@
+#!/bin/bash
+# ═══════════════════════════════════════════════════════════════════════════════
+#  rollback — bedienter Rueckweg blue <-> green NACH einem abgeschlossenen Deploy
+#
+#  Karte 1149 (Auftrag Daniel, 09.09.2026): "es soll den rollback weg geben — also wieder von
+#  blue nach green oder umgekehrt."
+#
+#  WAS FEHLTE. Der Blue-Green-Mechanismus ist vollstaendig da (tui-build-logic.sh):
+#  `switch_active` biegt die nginx-conf um und schreibt die Farbe nach `active-<env>`, und
+#  `assert_rollback_safe` schuetzt vor dem gefaehrlichen Fall. Beides greift aber nur INNERHALB
+#  eines laufenden Deploys — im Fehlerpfad von deploy_to_dev/deploy_to_prod. Ist ein Deploy
+#  einmal durch, ist der alte Slot gestoppt (`Exited (143)`, gemessen am 09.09.2026 an allen
+#  vier Apps) und es gibt keinen bedienten Weg zurueck. Genau den fuellt dieses Skript.
+#
+#  WARUM HIER UND NICHT IN ~/scripts. Das Werkzeug benutzt `switch_active`, `assert_rollback_safe`,
+#  `check_container_health`, `check_version`, `stop_slot`, `nginx_reload_after_recreate` und den
+#  NAS-Deploy-Lock — es SOURCT tui-build-logic.sh, statt irgendetwas davon nachzubauen. Eine Kopie
+#  in ~/scripts wuerde beim naechsten Umbau des Guards oder der nginx-Vorlagen still falsch werden;
+#  hier liegt sie in derselben Datei-Nachbarschaft, im selben PR-Verfahren und unter demselben
+#  Lint-Gate (quality/shellcheck.sh findet jede Datei mit Bash-Shebang, auch ohne Endung —
+#  wie getflywaynr, modules, pushover, voice). Auf der Arbeitsmaschine liegt ein Symlink
+#  ~/scripts/rollback -> hierher, damit es neben deck/nassh/nasdb auf dem PATH steht; das Skript
+#  loest seinen eigenen Pfad ueber `readlink -f` auf und findet die Bibliothek trotzdem.
+#
+#  WARUM KEIN QUELLBAUM NOETIG IST. Gebraucht wird nur die build-conf.txt der App (IMAGE_NAME,
+#  DEPLOY_PATH, DB_NAME, DB_CONTAINER_PREFIX, DEV_PORT/PROD_PORT). Die liegt zentral in
+#  plaintext-config, also wird DIESES Verzeichnis als SCRIPT_DIR gesourct. Ein Rollback kopiert
+#  kein Jar und baut nichts — JAR_VOLUME_DEPLOY spielt hier deshalb keine Rolle.
+#
+#  DIE EIGENTLICHE GEFAHR (und warum der Guard Pflicht ist). Alle vier Apps fahren M3
+#  (Jar im Volume): jeder Slot laeuft auf demselben Image `plaintext-runtime:jre25`, die Fassung
+#  steckt im Jar unter jars/<env>-<slot>/app.jar. `docker inspect` beweist also NICHT, dass der
+#  gestoppte Slot noch die alte Fassung traegt — der Beleg ist die Implementation-Version im
+#  Manifest dieses Jars, und die zeigt dieses Skript an und prueft sie nach dem Start gegen
+#  /nosec/version. Beim Start faehrt der alte Slot seinerseits Flyway. Gemessen an den
+#  application.yml von app/guild/iot/schuetu steht dort `validate-on-migrate: false` und
+#  `out-of-order: true`: der alte Code startet auf einem NEUEREN Schema also KLAGLOS — Flyway
+#  meldet nichts, nimmt nichts zurueck, und der Fehler zeigt sich erst zur Laufzeit an der
+#  Spalte, die der alte Code nicht kennt. Es gibt kein zweites Netz darunter. Deshalb:
+#  `assert_rollback_safe` entscheidet, und ohne --erzwingen ist ein Nein hier ein Abbruch.
+#
+#  WAS DAS SKRIPT BEWUSST NICHT TUT: die DB zuruecksichern. Ein PROD-Deploy legt vor einer
+#  Migration ein Backup an (BACKUP_PATH / restore_prod_db); das Zurueckspielen bleibt Handarbeit
+#  und wird beim erzwungenen Rollback ausdruecklich als der eigentlich noetige Schritt benannt.
+#  Und es aendert den Marker migver-<env> NICHT: der haelt den Migrationsstand des letzten
+#  VORWAERTS-Deploys, ein Rollback migriert nichts, und ein stiller Marker-Nachzug wuerde den
+#  Guard beim naechsten Versuch blind machen.
+#
+#  AUFRUF
+#    rollback --zeigen [<app>]          Zustand, aendert nichts. Ohne <app>: alle Apps.
+#    rollback <app> <umgebung> [Opt]    Rueckschalten auf die andere Farbe.
+#
+#    <app>        app | guild | iot | schuetu   (auch 'plaintext-app' o.ae.)
+#    <umgebung>   int | prod
+#    --ja             keine Rueckfrage (fuer Skripte; bei prod trotzdem der Warnblock)
+#    --erzwingen      Migrations-Guard uebergehen. Sagt vorher, was schiefgehen kann.
+#    --stehenlassen   den abgewaehlten (neuen) Slot laufen lassen statt zu stoppen
+#    --ziel <farbe>   Zielfarbe explizit nennen (Standard: die inaktive)
+#
+#  RUECKGABE 0 ok · 1 Fehler/Abbruch · 2 Bedienfehler · 3 Migrations-Guard hat blockiert
+# ═══════════════════════════════════════════════════════════════════════════════
+set -o pipefail
+
+# Farben schon vor dem Sourcen (der Zeigen-Sammelmodus sourct nichts).
+GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
+
+# Eigenen Pfad ueber den Symlink hinweg aufloesen — ~/scripts/rollback zeigt hierher.
+SELBST="$(readlink -f "${BASH_SOURCE[0]}")"
+SKRIPTE_DIR="$(cd "$(dirname "$SELBST")" && pwd)"
+CONFIG_DIR="${PLAINTEXT_CONFIG_DIR:-$HOME/codeplain/plaintext-config}"
+
+hinweis() { echo -e "$*"; }
+fehler()  { echo -e "${RED}✗ $*${NC}" >&2; }
+
+verwendung() {
+    sed -n '/^#  AUFRUF/,/^#  RUECKGABE/p' "$SELBST" | sed 's/^#  \{0,1\}//'
+}
+
+# ── Argumente ─────────────────────────────────────────────────────────────────
+ZEIGEN=false; OHNE_RUECKFRAGE=false; ERZWINGEN=false; STEHENLASSEN=false
+APP=""; UMGEBUNG=""; ZIEL_WUNSCH=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --zeigen|-z)     ZEIGEN=true ;;
+        --ja|-y)         OHNE_RUECKFRAGE=true ;;
+        --erzwingen)     ERZWINGEN=true ;;
+        --stehenlassen)  STEHENLASSEN=true ;;
+        --ziel)          ZIEL_WUNSCH="$2"; shift ;;
+        --hilfe|-h|--help) verwendung; exit 0 ;;
+        -*)              fehler "Unbekannte Option: $1"; verwendung >&2; exit 2 ;;
+        *)               if [ -z "$APP" ]; then APP="$1"; elif [ -z "$UMGEBUNG" ]; then UMGEBUNG="$1";
+                         else fehler "Zu viele Argumente: $1"; exit 2; fi ;;
+    esac
+    shift
+done
+
+# ── Sammelmodus: ohne App EINEN Kindprozess je App ────────────────────────────
+# Nicht in einer Schleife im selben Prozess: load_build_conf EXPORTIERT IMAGE_NAME/DB_NAME/...
+# und laesst bereits gesetzte Variablen bewusst gewinnen (common-functions.sh). Die zweite App
+# wuerde also mit der Konfiguration der ersten laufen. Ein frischer Prozess ist der Fix.
+if [ "$ZEIGEN" == "true" ] && [ -z "$APP" ]; then
+    RC_GESAMT=0
+    for D in "$CONFIG_DIR"/plaintext-*/; do
+        [ -f "${D}build-conf.txt" ] || continue
+        N="$(basename "$D")"
+        "$SELBST" --zeigen "${N#plaintext-}" || RC_GESAMT=1
+    done
+    exit "$RC_GESAMT"
+fi
+
+if [ -z "$APP" ]; then verwendung >&2; exit 2; fi
+APP="${APP#plaintext-}"
+if [ "$ZEIGEN" != "true" ] && [ -z "$UMGEBUNG" ]; then
+    fehler "Ohne --zeigen braucht es die Umgebung: rollback $APP int|prod"; exit 2
+fi
+case "${UMGEBUNG:-int}" in int|prod) ;; *) fehler "Umgebung muss int oder prod sein, nicht '$UMGEBUNG'."; exit 2 ;; esac
+case "${ZIEL_WUNSCH:-blue}" in blue|green) ;; *) fehler "--ziel muss blue oder green sein."; exit 2 ;; esac
+
+APP_DIR="$CONFIG_DIR/plaintext-$APP"
+if [ ! -f "$APP_DIR/build-conf.txt" ]; then
+    fehler "Keine build-conf.txt fuer '$APP' (gesucht: $APP_DIR/build-conf.txt)."
+    hinweis "${YELLOW}  Bekannt sind:$(for d in "$CONFIG_DIR"/plaintext-*/; do [ -f "${d}build-conf.txt" ] && printf ' %s' "$(basename "${d%/}" | sed 's/^plaintext-//')"; done)${NC}"
+    exit 2
+fi
+
+# ── Bibliothek laden (SCRIPT_DIR + cwd, wie build es tut) ─────────────────────
+SCRIPT_DIR="$APP_DIR"
+cd "$SCRIPT_DIR" || exit 1
+# shellcheck source=/dev/null
+source "$SKRIPTE_DIR/tui-build-logic.sh"
+
+PORT_INT="${DEV_PORT:-}"; PORT_PROD="${PROD_PORT:-}"
+
+# ── Fakten vom NAS in EINEM Aufruf ────────────────────────────────────────────
+# Absichtlich ein Rundlauf statt zehn: `--zeigen` soll auch ueber alle Apps schnell sein.
+# `sudo -n` (nicht das blanke `sudo` der Bibliothek): /etc/sudoers.d/mad-docker gibt
+# NOPASSWD nur fuer /usr/bin/docker. Fehlt der Eintrag einmal, scheitert der Aufruf sofort
+# sichtbar, statt auf einer Passwortabfrage ohne Terminal haengen zu bleiben.
+declare -A F
+fakten_holen() {
+    local E="$1" ROH K V
+    ROH=$(ssh -o ConnectTimeout=10 "${DEPLOY_SERVER}" \
+        "DP='${DEPLOY_PATH}' IN='${IMAGE_NAME}' E='${E}' bash -s" <<'FERN'
+echo "aktiv=$(cat "$DP/active-$E" 2>/dev/null)"
+UP="$DP/nginx/conf.d/$E-upstream.conf"
+NG=unbekannt
+for f in blue green; do
+    T="$DP/nginx/templates/$E-$f.conf"
+    if [ -f "$UP" ] && [ -f "$T" ] && cmp -s "$UP" "$T"; then NG="$f"; fi
+done
+echo "nginx=$NG"
+for f in blue green; do
+    C="$IN-$E-$f"
+    if sudo -n docker inspect "$C" >/dev/null 2>&1; then
+        echo "${f}_da=ja"
+        echo "${f}_status=$(sudo -n docker inspect -f '{{.State.Status}}/Exit {{.State.ExitCode}}/Restarts {{.RestartCount}}' "$C")"
+        echo "${f}_image=$(sudo -n docker inspect -f '{{.Config.Image}}' "$C")"
+        echo "${f}_imageid=$(sudo -n docker inspect -f '{{.Image}}' "$C" | cut -c1-19)"
+        # docker liefert UTC, die Jar-Zeit unten kommt in NAS-Ortszeit — beide auf Ortszeit
+        # bringen, sonst stehen im selben Block zwei Uhren nebeneinander.
+        echo "${f}_created=$(date -d "$(sudo -n docker inspect -f '{{.Created}}' "$C")" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+        echo "${f}_gestartet=$(date -d "$(sudo -n docker inspect -f '{{.State.StartedAt}}' "$C")" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+    else
+        echo "${f}_da=nein"
+    fi
+    J="$DP/jars/$E-$f/app.jar"
+    if [ -f "$J" ]; then
+        echo "${f}_jar=$(unzip -p "$J" META-INF/MANIFEST.MF 2>/dev/null | tr -d '\r' | sed -n 's/^Implementation-Version: *//p' | head -1)"
+        echo "${f}_jarzeit=$(date -r "$J" '+%Y-%m-%d %H:%M:%S')"
+        echo "${f}_jaralter=$(( $(date +%s) - $(date -r "$J" +%s) ))"
+    fi
+done
+FERN
+    ) || return 1
+    while IFS='=' read -r K V; do
+        [ -n "$K" ] || continue
+        F["$K"]="$V"
+    done <<< "$ROH"
+    [ -n "${F[aktiv]:-}" ] || F[aktiv]="blue"   # wie get_active_slot: fehlende Datei = blue
+    return 0
+}
+
+alter_lesbar() {
+    local S="${1:-}"
+    [ -n "$S" ] || { printf '?'; return; }
+    if   [ "$S" -lt 3600 ]  ; then printf 'vor %d min' "$(( S / 60 ))"
+    elif [ "$S" -lt 172800 ]; then printf 'vor %d h'   "$(( S / 3600 ))"
+    else                           printf 'vor %d Tagen' "$(( S / 86400 ))"; fi
+}
+
+# aelter | neuer | gleich | unbekannt — rein informativ, aber der Satz, an dem der Operator
+# erkennt, ob er zurueck oder vorwaerts schaltet. sort -V, weil 2.1778.0 als Text kleiner
+# waere als 2.999.0.
+fassung_vergleich() {
+    local ZIEL="$1" AKT="$2"
+    if [ -z "$ZIEL" ] || [ -z "$AKT" ]; then echo unbekannt; return; fi
+    if [ "$ZIEL" == "$AKT" ]; then echo gleich; return; fi
+    if [ "$(printf '%s\n%s\n' "$ZIEL" "$AKT" | sort -V | head -1)" == "$ZIEL" ]; then echo aelter; else echo neuer; fi
+}
+
+port_von() { case "$1" in int) printf '%s' "$PORT_INT" ;; prod) printf '%s' "$PORT_PROD" ;; esac; }
+
+# ── Zustand zeigen (aendert nichts) ───────────────────────────────────────────
+zeigen_eine_umgebung() {
+    local E="$1"
+    F=()
+    if ! fakten_holen "$E"; then fehler "NAS nicht erreichbar oder $DEPLOY_PATH nicht lesbar."; return 1; fi
+    if [ "${F[blue_da]:-nein}" == "nein" ] && [ "${F[green_da]:-nein}" == "nein" ]; then
+        hinweis "${YELLOW}  ${E}: kein Blue-Green (weder ${IMAGE_NAME}-${E}-blue noch -green existiert)${NC}"
+        return 0
+    fi
+    local AKTIV="${F[aktiv]}" ZIEL
+    if [ "$AKTIV" == "blue" ]; then ZIEL=green; else ZIEL=blue; fi
+    local P; P="$(port_von "$E")"
+    echo -e "${BLUE}  ${E}${NC}  (nginx-Port ${P:-?})"
+    local ROLLE FARBE
+    for FARBE in "$AKTIV" "$ZIEL"; do
+        if [ "$FARBE" == "$AKTIV" ]; then ROLLE="aktiv "; else ROLLE="Ziel  "; fi
+        if [ "${F[${FARBE}_da]:-nein}" == "ja" ]; then
+            printf '    %s %-5s %-46s %s\n' "$ROLLE" "$FARBE" "${IMAGE_NAME}-${E}-${FARBE}" "${F[${FARBE}_status]:-?}"
+            printf '                 Jar %-14s %s (%s)\n' "${F[${FARBE}_jar]:-?}" "${F[${FARBE}_jarzeit]:-?}" "$(alter_lesbar "${F[${FARBE}_jaralter]:-}")"
+            printf '                 Image %s (%s)\n' "${F[${FARBE}_image]:-?}" "${F[${FARBE}_imageid]:-?}"
+            printf '                 Container erzeugt %s, zuletzt gestartet %s (NAS-Ortszeit)\n' "${F[${FARBE}_created]:-?}" "${F[${FARBE}_gestartet]:-?}"
+        else
+            printf '    %s %-5s %s\n' "$ROLLE" "$FARBE" "EXISTIERT NICHT — ein Rollback muesste ihn aus der Compose neu erzeugen"
+        fi
+    done
+    # Alle Slots auf demselben Runtime-Image: dann sagt das Image nichts ueber die Fassung.
+    if [ -n "${F[blue_image]:-}" ] && [ "${F[blue_image]:-}" == "${F[green_image]:-}" ]; then
+        echo -e "    ${YELLOW}Hinweis: beide Slots auf demselben Image (M3, Jar im Volume) — die Fassung steht im Jar, nicht im Image.${NC}"
+    fi
+    if [ "${F[nginx]}" == "$AKTIV" ]; then
+        echo -e "    nginx  conf.d/${E}-upstream.conf == templates/${E}-${F[nginx]}.conf ${GREEN}✓ passt zu active-${E}${NC}"
+    else
+        echo -e "    ${RED}nginx  conf.d/${E}-upstream.conf entspricht '${F[nginx]}', active-${E} sagt '${AKTIV}' — INKONSISTENT${NC}"
+    fi
+    local MARKER RANK
+    MARKER=$(get_migration_marker "$E"); RANK=$(get_db_migration_rank "$E")
+    printf '    Migration  DB-Rank %s, Marker migver-%s %s  -> ' "${RANK:-?}" "$E" "${MARKER:-?}"
+    if assert_rollback_safe "$E" >/dev/null 2>&1; then
+        echo -e "${GREEN}Rollback erlaubt${NC}"
+    else
+        echo -e "${RED}Rollback WIRD VERWEIGERT (seit dem Deploy wurde migriert; nur mit --erzwingen)${NC}"
+    fi
+    return 0
+}
+
+if [ "$ZEIGEN" == "true" ]; then
+    echo -e "${BLUE}=== ${IMAGE_NAME} (${DEPLOY_PATH}) ===${NC}"
+    RC=0
+    for E in ${UMGEBUNG:-int prod}; do zeigen_eine_umgebung "$E" || RC=1; done
+    exit "$RC"
+fi
+
+# ── Rollback ──────────────────────────────────────────────────────────────────
+E="$UMGEBUNG"
+if ! ensure_nas_reachable; then exit 1; fi
+F=()
+if ! fakten_holen "$E"; then fehler "Zustand von ${IMAGE_NAME}/${E} nicht lesbar."; exit 1; fi
+
+AKTIV="${F[aktiv]}"
+if [ -n "$ZIEL_WUNSCH" ]; then ZIEL="$ZIEL_WUNSCH"; elif [ "$AKTIV" == "blue" ]; then ZIEL=green; else ZIEL=blue; fi
+if [ "$ZIEL" == "$AKTIV" ]; then
+    fehler "Ziel ${ZIEL} ist schon aktiv — nichts zu tun."; exit 2
+fi
+ZIEL_CONTAINER="${IMAGE_NAME}-${E}-${ZIEL}"
+ZIEL_VERSION="${F[${ZIEL}_jar]:-}"
+AKTIV_VERSION="${F[${AKTIV}_jar]:-}"
+PORT="$(port_von "$E")"
+RICHTUNG="$(fassung_vergleich "$ZIEL_VERSION" "$AKTIV_VERSION")"
+
+if [ -z "$PORT" ]; then fehler "Kein Port fuer ${E} in build-conf.txt (DEV_PORT/PROD_PORT)."; exit 2; fi
+if [ -z "$ZIEL_VERSION" ]; then
+    fehler "Kein Jar unter ${DEPLOY_PATH}/jars/${E}-${ZIEL}/app.jar — es gibt nichts, worauf zurueckzuschalten waere."
+    exit 1
+fi
+if [ "${F[nginx]}" != "$AKTIV" ]; then
+    fehler "nginx-conf (${F[nginx]}) und active-${E} (${AKTIV}) widersprechen sich."
+    hinweis "${YELLOW}  Erst diesen Widerspruch klaeren — sonst schaltet dieses Skript von einem Zustand weg, den es falsch gelesen hat.${NC}"
+    hinweis "${YELLOW}  Zustand ansehen: rollback --zeigen ${APP}${NC}"
+    exit 1
+fi
+
+# ── Plan ──────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${BLUE}=== Rollback-Plan: ${IMAGE_NAME} / ${E} ===${NC}"
+echo -e "  von  ${YELLOW}${AKTIV}${NC}  (${IMAGE_NAME}-${E}-${AKTIV}, Jar ${AKTIV_VERSION:-?})"
+echo -e "  nach ${GREEN}${ZIEL}${NC}  (${ZIEL_CONTAINER}, Jar ${ZIEL_VERSION}, ${F[${ZIEL}_status]:-existiert nicht}, $(alter_lesbar "${F[${ZIEL}_jaralter]:-}"))"
+case "$RICHTUNG" in
+    aelter)    echo -e "  Richtung: ${YELLOW}zurueck${NC} — ${ZIEL_VERSION} ist AELTER als ${AKTIV_VERSION}" ;;
+    neuer)     echo -e "  Richtung: ${YELLOW}vorwaerts${NC} — ${ZIEL_VERSION} ist NEUER als ${AKTIV_VERSION} (kein Rollback im engeren Sinn)" ;;
+    gleich)    echo -e "  Richtung: beide Slots tragen ${ZIEL_VERSION} — der Rollback wechselt nur den Container" ;;
+    *)         echo -e "  Richtung: ${YELLOW}unbekannt${NC} (eine der beiden Jar-Fassungen nicht lesbar)" ;;
+esac
+echo "  Schritte:"
+if [ "${F[${ZIEL}_da]:-nein}" == "ja" ]; then
+    echo "   1. ${ZIEL_CONTAINER} starten (docker compose start — derselbe Container, dasselbe Jar)"
+else
+    echo "   1. ${ZIEL_CONTAINER} NEU ERZEUGEN (docker compose up -d --no-deps; Jar kommt aus jars/${E}-${ZIEL})"
+fi
+echo "   2. Gesundheit im Container pruefen: /nosec/version muss ${ZIEL_VERSION} melden und /actuator/health UP"
+echo "   3. switch_active ${E} ${ZIEL} (nginx-conf + active-${E} + reload, mit Sicherung und Rueckweg)"
+echo "   4. von aussen pruefen: http://${NAS_HOST}:${PORT}/nosec/version == ${ZIEL_VERSION}"
+if [ "$STEHENLASSEN" == "true" ]; then
+    echo "   5. ${IMAGE_NAME}-${E}-${AKTIV} bleibt laufen (--stehenlassen)"
+else
+    echo "   5. ${IMAGE_NAME}-${E}-${AKTIV} stoppen (stop_slot; verweigert von sich aus den aktiven Slot)"
+fi
+echo "  Nicht angetastet: die Datenbank und der Marker migver-${E}."
+echo ""
+
+# ── Migrations-Guard ──────────────────────────────────────────────────────────
+BESTAETIGUNG="$ZIEL"
+MARKER=$(get_migration_marker "$E"); RANK=$(get_db_migration_rank "$E")
+echo -e "${BLUE}Migrations-Guard (${E}): DB-Rank ${RANK:-?}, Marker ${MARKER:-?}${NC}"
+if assert_rollback_safe "$E"; then
+    echo -e "${GREEN}✓ Guard: seit dem letzten bestaetigten Deploy wurde nicht migriert — Rollback erlaubt.${NC}"
+else
+    echo -e "${RED}✗ Guard: seit dem letzten bestaetigten Deploy sind Migrationen gelaufen (Rank ${RANK} > Marker ${MARKER}).${NC}"
+    if [ "$ERZWINGEN" != "true" ]; then
+        echo -e "${YELLOW}Rollback VERWEIGERT. Der Slot ${ZIEL} traegt Code, der das jetzige Schema nicht kennt.${NC}"
+        echo -e "${YELLOW}Was stattdessen: Forward-Fix deployen — oder die DB auf den Stand von Rank ${MARKER} zurueck-${NC}"
+        echo -e "${YELLOW}sichern (PROD: restore_prod_db mit dem Deploy-Backup) und DANN erneut zurueckschalten.${NC}"
+        echo -e "${YELLOW}Wenn du es trotzdem willst: dieselbe Zeile mit --erzwingen.${NC}"
+        exit 3
+    fi
+    echo -e "${RED}⚠ --erzwingen: der Guard wird uebergangen. Was dabei schiefgehen kann:${NC}"
+    echo -e "${RED}  · Flyway nimmt NICHTS zurueck. Das Schema bleibt auf Rank ${RANK}, nur der Code wird alt.${NC}"
+    echo -e "${RED}  · In allen vier Apps steht validate-on-migrate: false und out-of-order: true — der alte${NC}"
+    echo -e "${RED}    Slot startet deshalb OHNE Fehlermeldung. Es gibt keine Warnung, auf die du warten kannst.${NC}"
+    echo -e "${RED}  · Der Schaden zeigt sich erst zur Laufzeit: NOT NULL auf einer Spalte, die der alte Code${NC}"
+    echo -e "${RED}    nicht fuellt; ein Enum-Wert, den er nicht kennt; eine Umbenennung, die er nicht sieht.${NC}"
+    echo -e "${RED}    Bei einer datenverlustfreien Migration (nur neue Spalten) geht es meist gut — das ist${NC}"
+    echo -e "${RED}    aber eine Aussage ueber DIESE Migration, nicht ueber den Weg. Sieh sie dir vorher an:${NC}"
+    echo -e "${RED}    nasdb ${E} \"SELECT installed_rank, version, description FROM flyway_schema_history${NC}"
+    echo -e "${RED}          WHERE installed_rank > ${MARKER} ORDER BY installed_rank\"${NC}"
+    echo -e "${RED}  · Schreibt der alte Code danach Daten, ist auch der Weg vorwaerts nicht mehr sauber.${NC}"
+    # Die Rueckfrage wird strenger, aber nicht unumgehbar: --ja bleibt gueltig. Zwei bewusst
+    # getippte Flags (--erzwingen --ja) sind Absicht genug; ein Terminalzwang wuerde nur den
+    # skriptgesteuerten Notfall verhindern, ohne dass jemand mehr nachdaechte.
+    BESTAETIGUNG="erzwingen ${ZIEL}"
+fi
+
+if [ "$E" == "prod" ]; then
+    echo ""
+    echo -e "${RED}⚠ Das ist PROD. Der Traffic wechselt sofort mit dem nginx-Reload.${NC}"
+    echo -e "${YELLOW}  Dieses Skript sichert und spielt KEINE Datenbank zurueck.${NC}"
+fi
+
+# ── Rueckfrage ────────────────────────────────────────────────────────────────
+if [ "$OHNE_RUECKFRAGE" != "true" ]; then
+    if [ ! -t 0 ]; then
+        fehler "Keine Rueckfrage moeglich (kein Terminal) und --ja nicht gesetzt — Abbruch."; exit 1
+    fi
+    echo ""
+    read -r -p "Zum Ausfuehren genau dies eintippen: '${BESTAETIGUNG}' (alles andere bricht ab): " ANTWORT
+    if [ "$ANTWORT" != "$BESTAETIGUNG" ]; then hinweis "Abgebrochen. Nichts geaendert."; exit 1; fi
+fi
+
+# ── Ausfuehren, unter dem NAS-Deploy-Lock ─────────────────────────────────────
+# Derselbe Lock, den deploy_to_dev/deploy_to_prod nehmen: INT hat keine eigene Deploy-Sperre,
+# und ein CI-Rollout, der gleichzeitig auf denselben Slots arbeitet, wuerde sonst mit diesem
+# Rollback um dieselbe nginx-conf ringen.
+deploy_lock_acquire "$E" || exit 1
+trap 'deploy_lock_release "'"$E"'"' EXIT
+
+SVC=$(ssh "${DEPLOY_SERVER}" "cd ${DEPLOY_PATH} && \
+    if grep -qE '^[[:space:]]+${IMAGE_NAME}-${E}-${ZIEL}:' ${COMPOSE_FILE} 2>/dev/null; then echo '${IMAGE_NAME}-${E}-${ZIEL}'; \
+    else echo '${E}-${ZIEL}'; fi")
+
+echo ""
+if [ "${F[${ZIEL}_da]:-nein}" == "ja" ]; then
+    echo -e "${BLUE}1/5 Starte ${ZIEL_CONTAINER} (${SVC})...${NC}"
+    ssh "${DEPLOY_SERVER}" "cd ${DEPLOY_PATH} && sudo -n docker compose start ${SVC}" || {
+        fehler "Start fehlgeschlagen. Traffic unveraendert auf ${AKTIV}."; exit 1; }
+else
+    echo -e "${BLUE}1/5 Erzeuge ${ZIEL_CONTAINER} neu (${SVC})...${NC}"
+    ssh "${DEPLOY_SERVER}" "cd ${DEPLOY_PATH} && sudo -n docker compose up -d --no-deps ${SVC}" || {
+        fehler "Erzeugen fehlgeschlagen. Traffic unveraendert auf ${AKTIV}."; exit 1; }
+fi
+# Karte 379: neuer/wieder gestarteter Container == potenziell neue IP -> nginx muss neu aufloesen.
+nginx_reload_after_recreate "Rollback-Start ${SVC}"
+
+echo -e "${BLUE}2/5 Gesundheit von ${ZIEL_CONTAINER} (erwartet ${ZIEL_VERSION})...${NC}"
+if ! check_container_health "$ZIEL_CONTAINER" "$ZIEL_VERSION" "${ROLLBACK_HEALTH_WAIT:-300}"; then
+    fehler "${ZIEL_CONTAINER} wird nicht gesund. NICHT umgeschaltet — Traffic liegt weiter auf ${AKTIV}."
+    hinweis "${YELLOW}  Der Slot laeuft absichtlich weiter, damit die Logs zu holen sind:${NC}"
+    hinweis "${YELLOW}    nassh \"docker logs --tail 200 ${ZIEL_CONTAINER}\"${NC}"
+    hinweis "${YELLOW}  Wieder stoppen: nassh \"cd ${DEPLOY_PATH} && docker compose stop ${SVC}\"${NC}"
+    exit 1
+fi
+
+echo -e "${BLUE}3/5 Schalte nginx auf ${ZIEL}...${NC}"
+if ! switch_active "$E" "$ZIEL"; then
+    fehler "Umschalten fehlgeschlagen. switch_active hat die vorherige conf wiederhergestellt; Traffic auf ${AKTIV}."
+    exit 1
+fi
+
+echo -e "${BLUE}4/5 Von aussen pruefen: http://${NAS_HOST}:${PORT}/nosec/version${NC}"
+if ! check_version "$ZIEL_VERSION" "http://${NAS_HOST}:${PORT}/nosec/version" "${ROLLBACK_CHECK_WAIT:-120}"; then
+    fehler "Aeusserer Check fehlgeschlagen. Schalte zurueck auf ${AKTIV} (laeuft noch)."
+    switch_active "$E" "$AKTIV"
+    exit 1
+fi
+
+if [ "$STEHENLASSEN" == "true" ]; then
+    echo -e "${BLUE}5/5 ${IMAGE_NAME}-${E}-${AKTIV} bleibt laufen (--stehenlassen).${NC}"
+else
+    echo -e "${BLUE}5/5 Stoppe den abgewaehlten Slot ${AKTIV}...${NC}"
+    stop_slot "$E" "$AKTIV"
+fi
+
+# ── Beleg ─────────────────────────────────────────────────────────────────────
+F=(); fakten_holen "$E"
+echo ""
+echo -e "${GREEN}=== Rollback fertig: ${IMAGE_NAME}/${E} laeuft auf ${ZIEL} (${ZIEL_VERSION}) ===${NC}"
+echo    "  active-${E}                = ${F[aktiv]}"
+echo    "  nginx conf.d entspricht    = ${F[nginx]}"
+echo    "  Port ${PORT} meldet          = $(curl -s --max-time 10 "http://${NAS_HOST}:${PORT}/nosec/version")"
+echo    "  migver-${E} (unveraendert) = $(get_migration_marker "$E")   DB-Rank = $(get_db_migration_rank "$E")"
+echo -e "  ${YELLOW}Zurueck nach ${AKTIV}: rollback ${APP} ${E}${NC}"
+exit 0
