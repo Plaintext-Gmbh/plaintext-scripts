@@ -41,6 +41,39 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
+# ── grep_q: `grep -q` unter `pipefail` ist eine Falle — hier mit `set -e` daneben ─────
+# `grep -q` steigt beim ERSTEN Treffer aus und schliesst seine Eingabe. Der Schreiber links
+# blockiert dann in `write()` und bekommt SIGPIPE, Rueckgabewert 141; `pipefail` reicht das als
+# Pipeline-Fehler durch. Ausgeloest wird es, sobald der Schreiber nach dem Treffer noch
+# schreiben will — also ab Pipe-Puffer-Groesse (64 KiB). Gemessen Karte 1161: bei 91 KB 17 von
+# 20 Laeufen, bei 194 KB 0 von 20.
+#
+# DIE BEDINGUNG IST ENGER, ALS SIE KLINGT — gemessen am 10.09.2026 an der echten API, nicht
+# abgeleitet. `grep` ist ZEILENorientiert und kann erst aussteigen, wenn es eine VOLLSTAENDIGE
+# Trefferzeile gelesen hat. Es braucht also mehr als 64 KB NACH der Trefferzeile, nicht bloss
+# eine grosse Antwort. Die Contents-Antwort von GitHub kommt formatiert, 17 Zeilen, und
+# `"content"` steht auf Zeile 11 — das ist die riesige base64-Zeile, danach folgen nur noch
+# sechs kurze. Gemessen mit einer 227-KB-Antwort (tui-build-logic.sh): `grep -q` 20 von 20
+# richtig. Diese Stelle war also NICHT ausloesbar; Karte 1161 hat sie zu scharf eingeschaetzt.
+#
+# `grep_q` steht hier trotzdem, und zwar nicht aus Symmetrie: die Reihenfolge und die
+# Feldgroessen dieser Antwort sind NICHT von uns kontrolliert. Kommt drueben je ein grosses Feld
+# NACH `content` dazu, kippt die Pruefung — und dann faellt sie auf "die API hat nicht
+# bestaetigt": der Versuch gilt als fehlgeschlagen, der Pin wird bis zum Abbruch neu
+# geschrieben. Mit `grep_q` kann das nicht passieren, unabhaengig davon, was GitHub sendet.
+#
+# `grep_q` liest die Eingabe VOLLSTAENDIG (`grep -c`) und meldet denselben Rueckgabewert wie
+# `grep -q`: 0 = mindestens ein Treffer, 1 = keiner. Optionen und Muster gehen unveraendert
+# durch, die Aussage jeder Pruefung bleibt gleich — nur der Wettlauf ist weg. Wortgleich mit dem
+# Helfer aus den Testsuiten (test-release-lock.sh u. a., Karte 1155, PR #113/f6ed1ef); bewusst
+# derselbe Name und derselbe Rumpf, statt eine zweite Variante zu erfinden.
+#
+# Aus demselben Grund steht unten `| sed -n 1p` statt `| head -1`: `head` steigt nach der ersten
+# Zeile aus, `sed -n 1p` liest bis EOF. Auch das ist hier VORSORGE, kein heutiger Defekt — der
+# Schreiber ist jeweils ein `sed`, das genau eine Zeile liefert, und wo nichts nachkommt gibt es
+# keinen SIGPIPE. Die Bauform ist der Punkt, nicht die heutige Datenmenge.
+grep_q() { local n; n=$(grep -c "$@") || true; [ "${n:-0}" -gt 0 ]; }
+
 MVN_REPO="${MVN_REPO:-Plaintext-Gmbh/plaintext-mvn}"
 PIN_BRANCH="${PIN_BRANCH:-pins}"
 HEARTBEAT_DAYS="${HEARTBEAT_DAYS:-7}"
@@ -87,12 +120,12 @@ api() {  # api <methode> <pfad> [datei-mit-json]
 # von GitHub gemessen, nicht geraten; fehlt die Datei drueben, bleiben beide leer und das
 # Skript legt sie an.
 RESP="$(api GET "/repos/${MVN_REPO}/contents/${TARGET}?ref=${PIN_BRANCH}" || true)"
-SHA="$(printf '%s' "$RESP" | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)"
+SHA="$(printf '%s' "$RESP" | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | sed -n 1p)"
 ALT="$(printf '%s' "$RESP" \
        | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
        | sed 's/\\n//g' | base64 -d 2>/dev/null || true)"
-OLD_VERS="$(printf '%s' "$ALT" | sed -n 's/^versions=//p' | head -1)"
-OLD_UPD="$(printf '%s' "$ALT" | sed -n 's/^updated=//p' | head -1)"
+OLD_VERS="$(printf '%s' "$ALT" | sed -n 's/^versions=//p' | sed -n 1p)"
+OLD_UPD="$(printf '%s' "$ALT" | sed -n 's/^updated=//p' | sed -n 1p)"
 OLD_UPD="${OLD_UPD:-1970-01-01T00:00:00Z}"
 
 OLD_TS="$(date -u -d "$OLD_UPD" +%s 2>/dev/null || echo 0)"
@@ -130,12 +163,14 @@ for versuch in 1 2 3 4 5; do
 
   ANTWORT="$(api PUT "/repos/${MVN_REPO}/contents/${TARGET}" "$RUMPF" || true)"
   rm -f "$RUMPF"
-  if printf '%s' "$ANTWORT" | grep -q '"content"'; then ok=true; break; fi
+  if printf '%s' "$ANTWORT" | grep_q '"content"'; then ok=true; break; fi
 
-  echo "WARNUNG: Versuch ${versuch} fehlgeschlagen: $(printf '%s' "$ANTWORT" | head -c 300)" >&2
+  # ${...:0:300} statt `| head -c 300`: keine Pipe, also gar kein SIGPIPE-Risiko. `head -c`
+  # steigt nach 300 Byte aus und liesse `printf` in eine geschlossene Pipe schreiben.
+  echo "WARNUNG: Versuch ${versuch} fehlgeschlagen: ${ANTWORT:0:300}" >&2
   sleep $(( versuch * 4 ))
   SHA="$(api GET "/repos/${MVN_REPO}/contents/${TARGET}?ref=${PIN_BRANCH}" \
-         | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)"
+         | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | sed -n 1p)"
 done
 
 if [ "$ok" != true ]; then

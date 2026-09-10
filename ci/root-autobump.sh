@@ -84,10 +84,18 @@ ersetze_in_pom() {   # $1 = sed-Ausdruck
   sed "$1" "$POM" > "$POM.tmp" && mv "$POM.tmp" "$POM"
 }
 
+# `| sed -n 1p` statt `| head -1` (Karte 1161): `head` steigt nach der ersten Zeile aus und
+# schliesst seine Eingabe; der Schreiber links blockiert dann in `write()` und bekommt SIGPIPE,
+# Rueckgabewert 141. Unter dem `set -euo pipefail` dieses Skripts bricht damit der ganze
+# Auto-Bump ab, sobald die Datenmenge den Pipe-Puffer (64 KiB) uebersteigt. `sed -n 1p` liest bis
+# EOF und liefert dieselbe erste Zeile. Die pom ist heute klein — die Bauform ist der Punkt,
+# nicht die heutige Groesse; dieselbe Ursache hatte in den Testsuiten 15 von 20 Laeufen still
+# falsch gruen gemeldet (Karte 1155).
+#
 # Aktuell gepinnte Version (Property in der Wurzel-pom).
 current_pin() {
   grep -o '<plaintext-root\.version>[^<]*</plaintext-root\.version>' "$POM" \
-    | head -1 | sed 's/.*<plaintext-root\.version>//;s/<.*//'
+    | sed -n 1p | sed 's/.*<plaintext-root\.version>//;s/<.*//'
 }
 
 # Version im <parent>-Block (erster <version> nach <parent>).
@@ -103,7 +111,7 @@ current_parent() {
 # eine Referenz ist die engste Kopplung, die es gibt: sie folgt dem Bump von selbst.
 current_interfaces() {
   grep -o '<plaintext-root-interfaces\.version>[^<]*<' "$POM" \
-    | head -1 | sed 's/.*>//;s/<$//' || true
+    | sed -n 1p | sed 's/.*>//;s/<$//' || true
 }
 
 # Karte 1127: ein Netzfehler hier ist kein "kein Bump", sondern eine unbeantwortete Frage —

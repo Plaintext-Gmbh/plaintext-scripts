@@ -132,8 +132,8 @@ jobs:
           RESP="$(gh api "/repos/${MVN_REPO}/contents/${TARGET}?ref=${PIN_BRANCH}" 2>/dev/null || true)"
           SHA="$(printf '%s' "$RESP" | jq -r '.sha // empty' 2>/dev/null || true)"
           OLD="$(printf '%s' "$RESP" | jq -r '.content // empty' 2>/dev/null | tr -d '\n' | base64 -d 2>/dev/null || true)"
-          OLD_VERS="$(printf '%s' "$OLD" | sed -n 's/^versions=//p' | head -1)"
-          OLD_UPD="$(printf '%s' "$OLD" | sed -n 's/^updated=//p' | head -1)"
+          OLD_VERS="$(printf '%s' "$OLD" | sed -n 's/^versions=//p' | sed -n 1p)"
+          OLD_UPD="$(printf '%s' "$OLD" | sed -n 's/^updated=//p' | sed -n 1p)"
           OLD_TS="$(date -u -d "${OLD_UPD:-1970-01-01T00:00:00Z}" +%s 2>/dev/null || echo 0)"
           AGE_D=$(( ( $(date -u +%s) - OLD_TS ) / 86400 ))
 

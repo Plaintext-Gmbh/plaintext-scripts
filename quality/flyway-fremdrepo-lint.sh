@@ -65,6 +65,48 @@
 # ═══════════════════════════════════════════════════════════════
 set -uo pipefail
 
+# ── grep_q: `grep -q` unter `pipefail` ist eine Falle ─────────────────────────────────
+# `grep -q` steigt beim ERSTEN Treffer aus und schliesst seine Eingabe. Der Schreiber links
+# blockiert dann in `write()` und bekommt SIGPIPE, Rueckgabewert 141. `pipefail` reicht das als
+# Pipeline-Fehler durch: die Pipeline meldet "nicht gefunden", obwohl das Muster dasteht.
+# Bedingung ist, dass der Schreiber nach dem Treffer noch schreiben WILL — das tut er, sobald
+# die Datenmenge den Pipe-Puffer (64 KiB) uebersteigt.
+#
+# Gemessen (Karte 1161), `cut -f1 <datei> | grep -qx "<erster Eintrag>"`, je 20 Laeufe:
+#   3200 Zeilen ( 21 KB): 20 von 20 gefunden
+#  12800 Zeilen ( 91 KB): 17 von 20            <- kippt
+#  25600 Zeilen (194 KB):  0 von 20            <- deterministisch blind
+#
+# DIE BEDINGUNG IST ENGER, ALS SIE KLINGT: `grep` ist ZEILENorientiert und kann erst aussteigen,
+# wenn es eine VOLLSTAENDIGE Trefferzeile gelesen hat. Es braucht also mehr als 64 KB NACH der
+# Trefferzeile — eine grosse Eingabe allein reicht nicht. Genau das ist hier gegeben: `cut -f1`
+# liefert eine Nummer je Zeile, und die kollidierende Nummer kann die erste sein.
+#
+# HIER ist die Ausfallrichtung die schlechte: `if ... grep -qx "$NUMMER"` unten entscheidet, ob
+# eine Flyway-Nummer schon vergeben ist. Faellt die Pruefung auf 141, gilt eine DOPPELTE Nummer
+# als frei — und die Ausgabe lautet "keine Befunde". Kein Warnzeichen, nur ein stiller Verlust
+# der Sicherung.
+#
+# AM ECHTEN SKRIPT GEMESSEN (10.09.2026), nicht an einer Nachbildung: Arbeitsbaum mit 25600
+# Migrationen, ein gestelltes `gh` meldet einen offenen PR mit der KLEINSTEN eigenen Nummer
+# (also der ersten Zeile von `cut -f1`), je 5 Laeufe:
+#   mit `grep -qx`: Dublette gefunden 0 von 5   -> Ausgabe "Kein offener Pull Request der
+#                                                  Familie belegt eine der eigenen Nummern"
+#   mit `grep_q -x`: Dublette gefunden 5 von 5
+# Gegenprobe in der anderen Richtung, gleiche Groesse, PR-Nummer NICHT im eigenen Baum:
+#   mit `grep_q -x`: kein Befund, RC=0 — kein Fehlalarm.
+#
+# `eigen.tsv` liegt heute bei rund 2 KB (groesste App: 256 Migrationen), also Faktor ~30 unter
+# der Schwelle; der Lint ist heute belastbar und wird still blind, wenn eine App in die Tausende
+# waechst. Der Punkt ist die Bauform, nicht die heutige Groesse.
+#
+# `grep_q` liest die Eingabe VOLLSTAENDIG (`grep -c`) und meldet denselben Rueckgabewert wie
+# `grep -q`: 0 = mindestens ein Treffer, 1 = keiner. Optionen und Muster gehen unveraendert
+# durch, die Aussage jeder Pruefung bleibt gleich — nur der Wettlauf ist weg. Wortgleich mit dem
+# Helfer aus den Testsuiten (test-release-lock.sh u. a., Karte 1155, PR #113/f6ed1ef); bewusst
+# derselbe Name und derselbe Rumpf, statt eine zweite Variante zu erfinden.
+grep_q() { local n; n=$(grep -c "$@") || true; [ "${n:-0}" -gt 0 ]; }
+
 # Die Familie. Wer ein Repo mit `db/migration` dazunimmt, traegt es HIER ein — und nur hier;
 # alle fuenf Aufrufer erben die Liste. Ein Repo ohne Migrationen gehoert NICHT hinein: die
 # Plausibilitaetspruefung unten wuerde es rot melden (siehe dort, das ist Absicht).
@@ -404,7 +446,9 @@ if [ "$OFFENE_PRS" = ja ]; then
             # Migration sich selbst.
             [ "$REPO" = "$EIGENES" ] && [ -n "$PR_NUMMER" ] && [ "$NR" = "$PR_NUMMER" ] && continue
             NUMMER="$(version_aus_pfad "$PFAD")"
-            if cut -f1 "$ARBEIT/eigen.tsv" | grep -qx "$NUMMER"; then
+            # grep_q statt grep -q: siehe Kopf. Mit `grep -qx` galt eine doppelte Nummer als
+            # frei, sobald eigen.tsv den Pipe-Puffer uebersteigt.
+            if cut -f1 "$ARBEIT/eigen.tsv" | grep_q -x "$NUMMER"; then
                 WARNUNGEN=$((WARNUNGEN + 1))
                 echo "::warning::Flyway-Nummer $NUMMER wird auch im OFFENEN PR ${REPO}#${NR} vergeben (${PFAD} — \"${TITEL}\"). Beide Zweige sind fuer sich gruen; wer zuletzt mergt, faerbt rot. Wer zuerst mergt, gewinnt die Nummer — der andere zieht sie per './getflywaynr' neu."
             fi
