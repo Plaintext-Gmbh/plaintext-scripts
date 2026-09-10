@@ -23,6 +23,43 @@
 # ═══════════════════════════════════════════════════════════════
 set -uo pipefail
 
+# ── grep_q: `grep -q` unter `pipefail` ist eine Falle ─────────────────────────────────
+# `grep -q` steigt beim ERSTEN Treffer aus und schliesst seine Eingabe. Der Schreiber links
+# blockiert dann in `write()` und bekommt SIGPIPE, Rueckgabewert 141; `pipefail` reicht das als
+# Pipeline-Fehler durch. Die Pipeline meldet "nicht gefunden", obwohl das Muster dasteht.
+# Ausgeloest wird es, sobald der Schreiber nach dem Treffer noch schreiben will — also ab
+# Pipe-Puffer-Groesse (64 KiB). Gemessen Karte 1161: bei 91 KB 17 von 20 Laeufen, bei 194 KB
+# 0 von 20.
+#
+# DIE BEDINGUNG IST ENGER, ALS SIE KLINGT — gemessen am 10.09.2026, nicht abgeleitet.
+# `grep` ist ZEILENorientiert: es kann erst aussteigen, wenn es eine VOLLSTAENDIGE Trefferzeile
+# gelesen hat. Ausgeloest wird SIGPIPE deshalb nur, wenn nach der Trefferzeile noch mehr als ein
+# Pipe-Puffer (64 KiB) folgt. Das trennt die drei Stellen hier scharf:
+#
+#   Zeile 107  `printf '%s\n' "$ausgabe" | grep_q -E 'auth\.yaml|kommentar\.yml'`
+#              MEHRZEILIG, und der Treffer kann in Zeile 1 stehen — dahinter liegt dann die
+#              ganze restliche Befundliste. Gemessen mit 529 KB und dem Treffer in Zeile 1:
+#              `grep -q` 0 von 20 Laeufen, `grep_q` 20 von 20. Das ist der echte Defekt, und er
+#              faellt auf die schlechte Seite: die Pruefung ist INVERTIERT gedacht (sie soll rot
+#              werden, wenn eine bewusste Ausnahme faelschlich als Verstoss gemeldet wurde) und
+#              meldete im Fehlerfall "nein, sauber". Der Selbsttest bestaetigte sich selbst.
+#
+#   Zeile 60/61  `printf '%s' "$inhalt" | grep_q -E …`
+#              EINE EINZIGE Zeile OHNE Zeilenumbruch. `grep` muss sie bis EOF lesen, bevor es
+#              ueberhaupt entscheiden kann, und steigt deshalb NIE vorzeitig aus. Gemessen mit
+#              200 KB Zeilenlaenge, verankertes und unverankertes Muster, je 20 Laeufe: `grep -q`
+#              20 von 20 richtig. Diese zwei Stellen waren also NICHT ausloesbar — Karte 1161
+#              hat sie zu scharf eingeschaetzt. `grep_q` steht hier trotzdem: es ist wortgleich
+#              in der Aussage, kostet nichts, und nimmt die Falle fuer den Naechsten weg, der
+#              `$inhalt` einmal auf mehrere Zeilen umstellt.
+#
+# `grep_q` liest die Eingabe VOLLSTAENDIG (`grep -c`) und meldet denselben Rueckgabewert wie
+# `grep -q`: 0 = mindestens ein Treffer, 1 = keiner. Optionen und Muster gehen unveraendert
+# durch, die Aussage jeder Pruefung bleibt gleich — nur der Wettlauf ist weg. Wortgleich mit dem
+# Helfer aus den Testsuiten (test-release-lock.sh u. a., Karte 1155, PR #113/f6ed1ef); bewusst
+# derselbe Name und derselbe Rumpf, statt eine zweite Variante zu erfinden.
+grep_q() { local n; n=$(grep -c "$@") || true; [ "${n:-0}" -gt 0 ]; }
+
 MUSTER='daniel-marthaler'
 
 # ── Dateien, die funktional wirken ────────────────────────────────────────────
@@ -57,8 +94,12 @@ treffer_suchen() {
         while IFS= read -r rohzeile; do
             nr="${rohzeile%%:*}"
             inhalt="${rohzeile#*:}"
-            printf '%s' "$inhalt" | grep -qE '<username>[[:space:]]*daniel-marthaler[[:space:]]*</username>' && continue
-            printf '%s' "$inhalt" | grep -qE '^[[:space:]]*(#|<!--|//)' && continue
+            # grep_q statt grep -q: siehe Kopf. Hier VORSORGLICH — `$inhalt` ist eine einzelne
+            # Zeile ohne Umbruch, `grep` steigt darauf nachweislich nie vorzeitig aus (200 KB,
+            # 20 von 20 richtig). Die Aussage bleibt gleich; die Falle ist weg, falls `$inhalt`
+            # je mehrzeilig wird.
+            printf '%s' "$inhalt" | grep_q -E '<username>[[:space:]]*daniel-marthaler[[:space:]]*</username>' && continue
+            printf '%s' "$inhalt" | grep_q -E '^[[:space:]]*(#|<!--|//)' && continue
             printf '%s:%s:%s\n' "${datei#"$wurzel"/}" "$nr" "$inhalt"
             gefunden=1
         # --binary-files=without-match: grep meldet bei Binaerdateien sonst "Binary file matches"
@@ -104,7 +145,13 @@ selbsttest() {
         printf '%s\n' "$ausgabe"
         return 1
     fi
-    if printf '%s\n' "$ausgabe" | grep -qE 'auth\.yaml|kommentar\.yml'; then
+    # grep_q statt grep -q: siehe Kopf. DIES ist die Stelle, an der es wirklich kippte.
+    # `$ausgabe` ist mehrzeilig und der Treffer kann in Zeile 1 stehen; dahinter liegt dann die
+    # ganze restliche Befundliste. Gemessen mit 529 KB: `grep -q` 0 von 20, `grep_q` 20 von 20.
+    # Die Pruefung ist INVERTIERT gedacht — sie soll rot werden, wenn eine bewusste Ausnahme
+    # faelschlich als Verstoss gemeldet wurde. Mit `grep -q` fiel sie im Fehlerfall auf
+    # "nein, sauber": der Selbsttest bestaetigte sich selbst.
+    if printf '%s\n' "$ausgabe" | grep_q -E 'auth\.yaml|kommentar\.yml'; then
         echo "::error::Selbsttest fehlgeschlagen — eine bewusste Ausnahme (Auth-Feld / Kommentar) wurde als Verstoss gemeldet:"
         printf '%s\n' "$ausgabe"
         return 1
