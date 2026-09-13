@@ -17,7 +17,7 @@
 # in build-runtime.sh funktioniert damit unveraendert.
 # Aktualisieren: neuen Index-Digest des gewuenschten Tags ermitteln und hier ersetzen; der Tag
 # bleibt als Lesehilfe stehen, Rueckweg = `@sha256:…` streichen.
-FROM eclipse-temurin:25.0.3_9-jre-alpine@sha256:28db6fdf60e38945e43d840c0333aeaec66c15943070104f7586fd3c9d1665b0
+FROM eclipse-temurin:25.0.4_7-jre-alpine@sha256:3137541deb3cac6626b5d9a4a2187bc0d6a34312f858bd2c67dd01e732e6b682
 
 # bash + wget für Healthcheck/Entrypoint
 RUN apk add --no-cache bash wget
