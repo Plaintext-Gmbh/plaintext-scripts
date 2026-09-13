@@ -361,7 +361,17 @@ jobs:
           repository: Plaintext-Gmbh/plaintext-scripts
           ref: ${{ inputs.scripts-ref }}
           path: werkzeuge
-          token: ${{ secrets.MVN_DEPLOY_TOKEN }}
+          # KEIN `token:` (Karte 1198, 13.09.2026). plaintext-scripts ist oeffentlich — der
+          # eingebaute GITHUB_TOKEN des Laufs genuegt. Ein hier uebergebenes PAT half nie, es
+          # schadete zweifach: `actions/checkout` versucht das uebergebene Token und faellt NICHT
+          # auf den anonymen Weg zurueck, also reisst ein abgelaufenes PAT den Checkout eines
+          # oeffentlichen Repos ab (`could not read Username for 'https://github.com'`, exit 128).
+          # Genau so stand plaintext-fwtool vom 10.09. bis 13.09.2026 jeden Tag rot, nachdem
+          # MVN_DEPLOY_TOKEN am 09.09. in den anderen fuenf Repos rotiert worden war (Karte 1144)
+          # und in fwtool bewusst alt blieb (Entscheid Daniel, Karte 1176).
+          # Zweitens reichte es ein weitreichendes PAT in einen Job hinein, der ein `grep`
+          # ausfuehrt. Wo das Token wirklich gebraucht wird — flyway-fremdrepo-lint.sh liest die
+          # PRIVATEN Nachbarrepos — steht es weiterhin, siehe GH_TOKEN weiter unten.
 
       - name: Auf den alten Namespace pruefen
         # Das Skript testet sich zuerst selbst (legt Verstoesse an und bricht ab, wenn es sie
@@ -806,7 +816,7 @@ jobs:
           repository: Plaintext-Gmbh/plaintext-scripts
           ref: ${{ inputs.scripts-ref }}
           path: .plaintext-scripts
-          token: ${{ secrets.MVN_DEPLOY_TOKEN }}
+          # KEIN `token:` — Begruendung beim Checkout im Job `namespace-lint` (Karte 1198).
 
       - name: Setup JDK ${{ inputs.java-version }}
         uses: actions/setup-java@v6
@@ -1265,7 +1275,7 @@ jobs:
           repository: Plaintext-Gmbh/plaintext-scripts
           ref: ${{ inputs.scripts-ref }}
           path: plaintext-scripts
-          token: ${{ secrets.MVN_DEPLOY_TOKEN }}
+          # KEIN `token:` — Begruendung beim Checkout im Job `namespace-lint` (Karte 1198).
 
       - name: Install plaintext-scripts
         run: |
