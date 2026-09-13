@@ -413,8 +413,20 @@ jobs:
         #
         # WELCHER TOKEN UND WARUM NICHT github.token: `github.token` gilt nur fuer DIESES Repo;
         # die Baum-API der vier anderen (privaten) Repos braucht ein uebergreifendes Leserecht.
-        # Genommen wird MVN_DEPLOY_TOKEN, weil dieser Workflow ihn OHNEHIN schon bekommt (er
-        # checkt damit oben plaintext-scripts aus) — es kommt also kein Geheimnis dazu.
+        # Genommen wird MVN_DEPLOY_TOKEN, weil der aufrufende Workflow ihn ohnehin an diese
+        # Pipeline uebergibt.
+        #
+        # NACHGEZOGEN (Karte 1198, 13.09.2026): Hier stand als Begruendung, der Workflow
+        # bekomme das Token "ohnehin, er checkt damit oben plaintext-scripts aus". Das stimmt
+        # seit Karte 1198 nicht mehr — der Checkout laeuft ohne Token, weil plaintext-scripts
+        # oeffentlich ist. DIESER Schritt ist damit die einzige Stelle im Job, die das Secret
+        # wirklich braucht. Wer die Stelle kuenftig anfasst, kann sich also nicht mehr darauf
+        # berufen, dass es "sowieso schon da" sei: es ist gezielt hier und nur hier.
+        #
+        # Sichtbare Folge in einem Repo mit altem Token (plaintext-fwtool, Entscheid Karte 1176):
+        # der Checkout ist gruen, dieser Schritt meldet `gh: Bad credentials (HTTP 401)` fuer
+        # alle fuenf Familienrepos und wird rot — richtig so, eine 0 ohne Zugriff ist kein
+        # Befund.
         # AUSDRUECKLICH NICHT AUTOBUMP_TOKEN: Karte 717 hat die Secret-Liste der aufrufenden
         # Repos genau deshalb von `inherit` auf eine Aufzaehlung umgestellt, damit dieser
         # Schreib-Token NICHT in den oeffentlichen plaintext-scripts-Workflow gelangt. Wer ihn
