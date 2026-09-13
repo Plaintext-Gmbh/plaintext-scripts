@@ -13,6 +13,10 @@
 # c707c0d1 kommt in 28db6fdf nicht als Plattform-Manifest vor. Zwei verschiedene Inhalte unter
 # demselben Tag. Da dieses Image die Basis JEDER Plaintext-App ist (16 laufende Container auf
 # plaintext-runtime:jre25), war der Bau bis hierher nicht reproduzierbar.
+# Stand 14.09.2026 (Karte 1210): auf diesem Image laufen VIER Container — die aktiven PROD-Slots
+# von iot, app, guild und schuetu; die blue/green-Gegenstuecke laufen nicht und entstehen beim
+# naechsten Rollout neu. (Der Satz '16 laufende Container' weiter oben war eine Schaetzung aus der
+# Anfangszeit; nachgemessen mit `docker ps --filter ancestor=plaintext-runtime:jre25`.)
 # Der gepinnte Wert ist der Multi-Arch-Index (enthaelt linux/amd64) — `--platform linux/amd64`
 # in build-runtime.sh funktioniert damit unveraendert.
 # Aktualisieren: neuen Index-Digest des gewuenschten Tags ermitteln und hier ersetzen; der Tag
