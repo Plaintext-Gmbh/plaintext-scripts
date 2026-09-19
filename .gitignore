@@ -1,1 +1,10 @@
 .DS_Store
+
+# Python-Bytecode. Er kam am 19.09.2026 mit b99b1721 versehentlich ins Repo
+# (quality/__pycache__/quality-gate.cpython-310.pyc) — erzeugt von einem lokalen Lauf,
+# nicht gebraucht: quality-gate.py wird ausschliesslich als Skript aufgerufen
+# (python3 .plaintext-scripts/quality/quality-gate.py), nie importiert, und ein direkt
+# aufgerufenes Skript liest kein __pycache__. Eingecheckter Bytecode ist ausserdem an eine
+# Python-Minor gebunden (hier 3.10) und veraltet lautlos gegenueber der .py daneben.
+__pycache__/
+*.py[cod]
