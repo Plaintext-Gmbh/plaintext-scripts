@@ -171,7 +171,7 @@ jobs:
   # WARUM HIER UND NICHT IM AUFRUFER: der Waechter liegt in der GETEILTEN Pipeline, damit das
   # Ausrollen auf app/guild/schuetu genau ein Commit je Repo ist (die `.ci-engine`-Datei) und
   # kein Eingriff in vier `ci-cd.yaml`. Das Muster ist dasselbe wie bei `skip-pruefung` im
-  # Aufrufer: ein billiger Job auf ubuntu-latest, ein Output, und ein `if:` an den teuren Jobs.
+  # Aufrufer: ein billiger Job, ein Output, und ein `if:` an den teuren Jobs.
   #
   # SPARSE CHECKOUT statt `gh api .../contents`: die Datei ist entweder im Baum oder nicht —
   # kein Rate-Limit, kein Netzfehler, keine Fail-safe-Frage. Der Unterschied ist wichtig, weil
@@ -180,7 +180,9 @@ jobs:
   # nirgends. Deshalb wird nicht geraten, sondern gelesen.
   ci-motor:
     name: CI-Motor (.ci-engine)
-    runs-on: ubuntu-latest
+    # Karte 1270 (19.09.2026): self-hosted statt ubuntu-latest. Die Begruendung steht beim Job
+    # `namespace-lint` weiter unten — sie gilt fuer beide Waechter gleichermassen.
+    runs-on: ['self-hosted', 'nas']
     permissions:
       contents: read
     outputs:
@@ -286,13 +288,35 @@ jobs:
   # (auf dem PR sichtbar, bevor gemergt wird), haelt aber keinen Deploy auf. Kosten:
   # zwei Checkouts und ein grep.
   #
-  # ubuntu-latest statt inputs.runner (Zustandsbericht 29.08.2026, Paket S): fuer zwei Checkouts
-  # und ein grep belegte der Job bisher einen der vier NAS-Runner — genau die, die waehrend
-  # eines Blue-Green-Deploys knapp sind. Er braucht weder LAN noch Maven-Cache noch Docker und
-  # ist auf einem GitHub-Runner in unter einer Minute durch. Die Minuten der privaten Repos
-  # gehen ins Inklusivkontingent des Free-Plans (2000 min/Monat); bei ~1 min je Lauf bleibt
-  # das auch mit allen Repos zusammen weit darunter. publish-root-pin laeuft aus demselben
-  # Grund schon laenger auf GitHub-Runnern.
+  # ── RUNNERWAHL: ZURUECK AUF SELF-HOSTED (Karte 1270, 19.09.2026) ───────────────────────
+  #
+  # Bis heute stand hier `ubuntu-latest`, mit dieser Begruendung (Zustandsbericht 29.08.2026,
+  # Paket S): fuer zwei Checkouts und ein grep belege der Job sonst einen der VIER NAS-Runner,
+  # genau die, die waehrend eines Blue-Green-Deploys knapp sind. Dazu die Rechnung: "Die Minuten
+  # der privaten Repos gehen ins Inklusivkontingent des Free-Plans (2000 min/Monat); bei ~1 min
+  # je Lauf bleibt das auch mit allen Repos zusammen weit darunter."
+  #
+  # DIESE RECHNUNG IST AM 19.09.2026 NICHT AUFGEGANGEN. Das Kontingent war zu 100 Prozent
+  # aufgebraucht, elf Tage vor der Zuruecksetzung. Gemessen ueber die Abrechnungs-API:
+  # 2184 Minuten im Zyklus, davon 2039 (93 Prozent) in Repos, deren CI laengst bei Woodpecker
+  # liegt. Zwei Annahmen trugen nicht:
+  #
+  #   1. "~1 min je Lauf" war EIN Job. Es sind DREI (skip-pruefung im Aufrufer, ci-motor und
+  #      dieser hier), und GitHub rundet JEDEN JOB EINZELN auf die volle Minute auf. Gemessen an
+  #      40 Laeufen von plaintext-app: 960 Sekunden echte Rechenzeit, verrechnet als 117 Minuten.
+  #      Faktor 7,3. Nicht ~1 min je Lauf, sondern 2,9.
+  #   2. "vier NAS-Runner, die knapp sind" gilt nicht mehr. Es gibt noch EINEN Org-Runner
+  #      (nas-runner-org-twingate-1), und er steht leer: 40 Jobs in 14 Tagen, zusammen 26,9
+  #      Minuten, also 0,13 Prozent der Zeit. Die Bauten fahren seit dem 30.08.2026 bei
+  #      Woodpecker; die Knappheit von damals gibt es nicht mehr.
+  #
+  # Der Preis dieser Umstellung, damit er dasteht: faellt der NAS-Runner aus, wartet dieser Job
+  # in der Warteschlange, statt auf einem GitHub-Runner zu laufen. Fuer ein Repo im
+  # GitHub-Modus ist das kein neuer Zustand — der `ci`-Job laeuft ohnehin auf `inputs.runner`,
+  # also auf demselben Runner. Neu ist es nur fuer Repos im Woodpecker-Modus, und dort haelt
+  # dieser Job nichts auf (siehe unten: er haengt an keinem anderen Job).
+  #
+  # plaintext-fwtool faehrt `skip-pruefung` seit dem 13.09.2026 so, in 4 bis 6 Sekunden je Lauf.
   #
   # BEWUSST OHNE `.ci-engine`-WAECHTER (30.08.2026). Die anderen Jobs sind gesperrt, wenn
   # Woodpecker faehrt; dieser nicht — und das ist Absicht, nicht Vergesslichkeit:
@@ -300,8 +324,8 @@ jobs:
   #     verschwaende die Namespace-Leitplanke genau in dem Zeitraum, in dem am Build-System
   #     geschraubt wird — also dann, wenn ein versehentlich zurueckgedrehter Namespace am
   #     wenigsten auffiele.
-  #   * Er kostet nichts, was knapp ist: ubuntu-latest, zwei Checkouts, ein grep. Kein
-  #     NAS-Runner, kein Deploy-Slot, keine Testdatenbank.
+  #   * Er kostet nichts, was knapp ist: zwei Checkouts und ein grep auf einem Runner, der
+  #     zu 99,87 Prozent der Zeit leer steht. Kein Deploy-Slot, keine Testdatenbank.
   #   * Er blockiert nichts (haengt an keinem anderen Job) und kann deshalb auch keinen
   #     Woodpecker-Deploy aufhalten — er faerbt nur den GitHub-Lauf.
   # Folge: ein Repo im Woodpecker-Modus hat weiterhin einen GitHub-Lauf je Push, der genau
@@ -340,7 +364,7 @@ jobs:
   # einzigen Repo der Familie mit Branch Protection.
   namespace-lint:
     name: Repo-Lint
-    runs-on: ubuntu-latest
+    runs-on: ['self-hosted', 'nas']
     permissions:
       contents: read
     steps:
