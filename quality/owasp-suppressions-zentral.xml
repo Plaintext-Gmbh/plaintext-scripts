@@ -107,4 +107,60 @@
         <cve>CVE-2026-33929</cve>
     </suppress>
 
+    <!--
+      Karte 1242 (19.09.2026) — CPE-FEHLZUORDNUNG cpe:2.3:a:vmware:server:2.0.1.
+
+      Mit dem Sprung von spring-ai 1.1.8 auf 2.0.1 verschwindet CVE-2026-59318 (NVD 9.8) aus
+      allen fuenf Repos — dafuer tauchen an zwei Artefakten ZWOELF neue Funde von 2009/2010 auf,
+      cvssv2 bis 10.0. Sie haben mit Spring AI nichts zu tun:
+
+        CVE-2009-1564, CVE-2009-1565   VMware Movie Decoder (vmnc.dll, Windows)
+        CVE-2009-2267, CVE-2009-3707   VMware Workstation/ESX
+        CVE-2009-3732                  VMware Remote Console (vmware-vmrc.exe)
+        CVE-2009-3733, CVE-2009-4811   VMware Server/ESX
+        CVE-2010-1138, -1139, -1141,
+        CVE-2010-1142, CVE-2010-4294   VMware Workstation/Server/Player
+
+      WOHER SIE KOMMEN, gemessen am Report (dependencies[].vulnerabilityIds):
+
+        mcp-spring-webmvc-2.0.1.jar                   cpe:2.3:a:vmware:server:2.0.1   HIGHEST
+                                                      cpe:2.3:a:vmware:spring_ai:2.0.1 HIGHEST
+        spring-ai-starter-mcp-server-webmvc-2.0.1.jar dieselben beiden
+
+      Der Scanner leitet aus Hersteller "VMware/Broadcom" und dem Wort "Server" im Artefakt- bzw.
+      POM-Namen die CPE cpe:2.3:a:vmware:server ab — das Produkt VMware Server, den Hypervisor.
+      Und **VMware Server 2.0.1 hat es wirklich gegeben** (2009). Erst dadurch trifft die
+      Versionsangabe: unter 1.1.8 gab es keine passende VMware-Server-Version, deshalb ist das
+      Muster vorher nie aufgefallen. Die Fehlzuordnung stand als Nebensatz schon in der
+      app-Suppression zu Karte 1148 ("cpe:2.3:a:vmware:server:1.1.8, die aus dem Wortbestandteil
+      server im Artefaktnamen entsteht") — dort ohne Wirkung, hier mit.
+
+      Gegenprobe, dass es kein echter Fund ist: die CVEs betreffen Windows-Binaerdateien
+      (vmnc.dll, vmware-vmrc.exe) und den ESX/Workstation-Hypervisor. Beide Jars zusammen sind
+      unter 40 KB und enthalten ausschliesslich MCP-Transportklassen. Und dieselben zwoelf CVEs
+      haengen an ZWEI fachfremden Artefakten gleichzeitig — das bekannte FP-Muster
+      (cpe_sprachagnostisch_false_positives).
+
+      UNTERDRUECKT WIRD DIE FALSCHE CPE, NICHT DIE CVE-LISTE. So bleibt
+      cpe:2.3:a:vmware:spring_ai aktiv: ein echter kuenftiger spring-ai-Fund wird weiterhin
+      gemeldet. Wuerde man die zwoelf CVE-Nummern einzeln unterdruecken, waere der naechste
+      VMware-Server-Altfund wieder rot und saehe aus wie ein neuer Befund (Karte 389).
+
+      VERSIONS-GEPINNT auf @2.0.1. Zieht spring-ai eine neue Version, greift der Eintrag nicht
+      mehr und der Stand wird neu bewertet — VMware Server 2.0.2 gab es ebenfalls, dann ist
+      derselbe Eintrag mit neuer Version zu setzen, bewusst von Hand.
+      PRUEFEN-AB: 2027-03-01.
+    -->
+    <suppress>
+        <notes><![CDATA[
+            CPE-Fehlzuordnung: cpe:2.3:a:vmware:server:2.0.1 (der VMware-Hypervisor) wird aus
+            dem Wortbestandteil "server" im Artefaktnamen abgeleitet und trifft zufaellig eine
+            real existierende VMware-Server-Version. Unterdrueckt wird die falsche CPE, nicht
+            einzelne CVEs — cpe:2.3:a:vmware:spring_ai bleibt aktiv. Karte 1242.
+            PRUEFEN-AB: 2027-03-01.
+        ]]></notes>
+        <packageUrl regex="true">^pkg:maven/org\.springframework\.ai/(spring-ai-starter-mcp-server-webmvc|mcp-spring-webmvc|spring-ai-autoconfigure-mcp-server-(webmvc|common))@2\.0\.1$</packageUrl>
+        <cpe>cpe:/a:vmware:server</cpe>
+    </suppress>
+
 </suppressions>
