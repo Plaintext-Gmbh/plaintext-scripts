@@ -26,6 +26,7 @@
 #   J  (Karte 1127) Repo bricht mitten in der Modulpruefung weg -> detect: Exit 4, nicht "warten"
 #      Beide sind die Gegenprobe zum Fehler, um den es geht: "konnte nicht nachsehen" darf nie
 #      wie "kein Rueckstand" aussehen.
+#   K  (Karte 1326) neueste im Upload, eine vollstaendige dazwischen -> diese wird gebumpt
 #
 # Aufruf:  ./test-root-autobump.sh
 set -uo pipefail
@@ -302,6 +303,38 @@ pruefe "Modulpruefung weg: keine 'naechster Lauf'-Beruhigung" "0" \
 # Gegenprobe zur Attrappe selbst: ohne kaputte URL laeuft derselbe Aufruf normal durch.
 PATH="$T/bin:$PATH" lauf detect
 pruefe "Attrappe untaetig: wieder Exit 0"             "0"                    "$RC"
+
+echo "== K: (Karte 1326) neueste im Upload, eine vollstaendige dazwischen ==========="
+# Gemessen an guild Lauf 420 (23.09.2026 01:55): Pin 1.699.0, 1.718.0 vollstaendig, 1.719.0 im
+# Upload — der Lauf tat NICHTS ("kein Bump faellig ... oder Release noch im Upload"). Richtig ist:
+# die neueste VOLLSTAENDIGE Version bumpen, der naechste Lauf holt den Rest.
+ALT_REPO="$REPO"; ALT_G="$G"; ALT_MR="$ROOT_MAVEN_REPO"
+REPO="$T/repo-k"; G="$REPO/ch/plaintext"; export ROOT_MAVEN_REPO="file://$REPO"
+# shellcheck disable=SC2086
+for v in 1.699.0 1.717.0 1.718.0; do pom_ablegen plaintext-root-parent $v "$(parent_pom $v $MODULE)"; for m in $MODULE; do pom_ablegen "$m" $v; done; done
+# shellcheck disable=SC2086
+pom_ablegen plaintext-root-parent 1.719.0 "$(parent_pom 1.719.0 $MODULE)"
+pom_ablegen plaintext-root-common 1.719.0
+metadata 1.719.0 1.699.0 1.717.0 1.718.0 1.719.0
+consumer_pom 1.699.0 plaintext-root-common plaintext-root-web
+lauf detect
+pruefe "K detect: Exit 0"                             "0"                    "$RC"
+pruefe "K detect: bump=true (nicht 'warten')"         "true"                 "$(ausgabe bump)"
+pruefe "K detect: latest = neueste VOLLSTAENDIGE"     "1.718.0"              "$(ausgabe latest)"
+pruefe "K detect: neueste bleibt sichtbar"            "1.719.0"              "$(ausgabe neueste)"
+pruefe "K detect: vollstaendig=true (fuer das Ziel)"  "true"                 "$(ausgabe vollstaendig)"
+pruefe "K detect: Meldung 'weicht aus'"               "ja" \
+       "$(printf '%s' "$AUS" | grep_q 'Auto-Bump weicht aus.*1.718.0' && echo ja || echo nein)"
+lauf apply "$(ausgabe latest)"
+pruefe "K apply: Pin auf 1.718.0"                     "1.718.0"              "$(pin)"
+# Gegenprobe: gibt es zwischen Pin und neuester keine vollstaendige, bleibt es beim Warten.
+consumer_pom 1.718.0 plaintext-root-common plaintext-root-web
+lauf detect
+pruefe "K' Pin = letzte vollstaendige: bump=false"    "false"                "$(ausgabe bump)"
+pruefe "K' latest bleibt die neueste"                 "1.719.0"              "$(ausgabe latest)"
+pruefe "K' Meldung 'naechster Lauf'"                  "ja" \
+       "$(printf '%s' "$AUS" | grep_q 'Release 1.719.0 noch unvollstaendig.*naechster Lauf' && echo ja || echo nein)"
+REPO="$ALT_REPO"; G="$ALT_G"; export ROOT_MAVEN_REPO="$ALT_MR"
 
 echo "== Verdrahtung ============================================================="
 # Karte 1127: das `|| true` im Detect-Schritt war der eigentliche Befund. Es darf nicht
