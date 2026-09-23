@@ -184,6 +184,32 @@ pruefe_benoetigte_artefakte() {   # $1 = Version
   esac
 }
 
+# Karte 1326 — die neueste VOLLSTAENDIGE Version zwischen dem Pin und $1 (ausschliesslich).
+# Hintergrund: ein root-Release braucht auf dem NAS 12–40 Minuten (Woodpecker, Release-Laeufe
+# 19.–23.09.2026), und root releast oft mehrmals pro Nacht. Alle vier Laeufe, die mit
+# "Release noch im Upload" nichts taten (guild 402/420, schuetu 206, app 575), fielen genau in
+# ein solches Fenster — waehrend die Version DAVOR laengst komplett dalag (guild 420: Pin 1.699.0,
+# 1.718.0 vollstaendig, 1.719.0 im Upload). "Warten auf die neueste" hiess dann: gar nichts tun.
+# stdout: die gefundene Version, sonst leer. Hoechstens AUSWEICH_MAX Kandidaten (je Kandidat
+# ein HEAD pro Modul). Ein nicht pruefbarer Kandidat (HTTP-Code in der Liste) beendet die Suche
+# ohne Ergebnis — eine unbeantwortete Frage ist kein "vollstaendig".
+AUSWEICH_MAX="${AUSWEICH_MAX:-5}"
+neueste_vollstaendige_unter() {   # $1 = neueste (unvollstaendige) Version, $2 = Pin
+  local meta v f rc n=0
+  meta="$(fetch_metadata plaintext-root-parent)" || return 0
+  while read -r v; do
+    [ -n "$v" ] || continue
+    [ "$v" != "$1" ] || continue
+    version_gt "$1" "$v" || continue
+    version_gt "$v" "$2" || continue
+    n=$((n + 1)); [ "$n" -le "$AUSWEICH_MAX" ] || return 0
+    rc=0; f="$(release_fehlend "$v")" || rc=$?
+    case "$f" in *'(HTTP '*) return 0 ;; esac
+    if [ "$rc" -eq 0 ]; then echo "$v"; return 0; fi
+  done < <(echo "$meta" | grep -o '<version>[^<]*</version>' | sed 's/.*<version>//;s/<.*//' | sort -Vr)
+  return 0
+}
+
 # 1.631.0 < 1.635.0 ; verhindert Downgrades bei zurueckgezogenen Releases.
 # `sort -V` gibt es in GNU coreutils und im BSD sort von macOS (geprueft 29.08.2026).
 version_gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }
@@ -254,7 +280,7 @@ case "${1:-detect}" in
 
     # Massnahme 4: nur ein VOLLSTAENDIGES Release wird vorgeschlagen. Die Pruefung laeuft nur,
     # wenn ueberhaupt ein Bump anstuende — ein Repo auf dem neuesten Stand braucht keine 24 HEADs.
-    FEHLEND=""; VOLL=0; UNPRUEFBAR=""
+    FEHLEND=""; VOLL=0; UNPRUEFBAR=""; NEUESTE="$LATEST"; AUSWEICH=""
     if [ "$BUMP" = true ]; then
       FEHLEND="$(release_fehlend "$LATEST")" && VOLL=0 || VOLL=$?
       if [ "$VOLL" -ne 0 ]; then
@@ -276,17 +302,30 @@ case "${1:-detect}" in
         case "$FEHLEND" in
           *'(HTTP '*) UNPRUEFBAR="Modulpruefung fuer ${LATEST} nicht abschliessbar: ${FEHLEND}" ;;
         esac
+        # Karte 1326: die neueste ist im Upload — gibt es eine vollstaendige dazwischen, wird
+        # DIE gebumpt statt gar nichts. Der naechste Lauf holt den Rest nach.
+        if [ -z "$UNPRUEFBAR" ]; then
+          AUSWEICH="$(neueste_vollstaendige_unter "$LATEST" "$CUR")"
+          if [ -n "$AUSWEICH" ]; then
+            echo "::notice title=Auto-Bump weicht aus::$(reposilite_fehlend_text "$VOLL" "$LATEST" "$FEHLEND") — gebumpt wird die neueste vollstaendige Version ${AUSWEICH}"
+            LATEST="$AUSWEICH"; VOLL=0; BUMP=true
+            pruefe_benoetigte_artefakte "$LATEST"
+          fi
+        fi
       else
         pruefe_benoetigte_artefakte "$LATEST"
       fi
     fi
 
-    echo "current=${CUR} parent=${PAR} latest=${LATEST} behind=${BEHIND} vollstaendig=$([ "$VOLL" -eq 0 ] && echo ja || echo nein) bump=${BUMP}"
+    echo "current=${CUR} parent=${PAR} latest=${LATEST} neueste=${NEUESTE} behind=${BEHIND} vollstaendig=$([ "$VOLL" -eq 0 ] && echo ja || echo nein) bump=${BUMP}"
     if [ -n "${GITHUB_OUTPUT:-}" ]; then
       {
         echo "current=${CUR}"
         echo "parent=${PAR}"
+        # latest = das BUMP-ZIEL (bei einem Ausweichen die neueste vollstaendige Version),
+        # neueste = was <release> sagt. Konsumenten lesen latest als Ziel (autobump.sh).
         echo "latest=${LATEST}"
+        echo "neueste=${NEUESTE}"
         echo "behind=${BEHIND}"
         echo "vollstaendig=$([ "$VOLL" -eq 0 ] && echo true || echo false)"
         echo "fehlend=${FEHLEND}"
