@@ -27,6 +27,9 @@
 #      Beide sind die Gegenprobe zum Fehler, um den es geht: "konnte nicht nachsehen" darf nie
 #      wie "kein Rueckstand" aussehen.
 #   K  (Karte 1326) neueste im Upload, eine vollstaendige dazwischen -> diese wird gebumpt
+#   L  (Karte 1327) gekoppelter app-Pin (guild): root nur zusammen mit der app-Version, deren
+#      plaintext-parent genau diese root-Version als <parent> hat; keine passende app -> kein
+#      Bump, aber eine Meldung (app_fehlt=, ::warning) statt eines stillen "nichts zu tun"
 #
 # Aufruf:  ./test-root-autobump.sh
 set -uo pipefail
@@ -334,6 +337,125 @@ pruefe "K' Pin = letzte vollstaendige: bump=false"    "false"                "$(
 pruefe "K' latest bleibt die neueste"                 "1.719.0"              "$(ausgabe latest)"
 pruefe "K' Meldung 'naechster Lauf'"                  "ja" \
        "$(printf '%s' "$AUS" | grep_q 'Release 1.719.0 noch unvollstaendig.*naechster Lauf' && echo ja || echo nein)"
+REPO="$ALT_REPO"; G="$ALT_G"; export ROOT_MAVEN_REPO="$ALT_MR"
+
+echo "== L: (Karte 1327) gekoppelter app-Pin — root nur zusammen mit der passenden app ==="
+# Gemessen an guild 20.–23.09.2026: der Bump hob nur root, die app blieb auf 2.1829.0 (root-Basis
+# 1.699.0) — jeder Verify rot. Richtig: app-Version mit root-Basis = Ziel mitziehen; gibt es
+# keine, KEIN Bump und eine sichtbare Meldung.
+ALT_REPO="$REPO"; ALT_G="$G"; ALT_MR="$ROOT_MAVEN_REPO"
+REPO="$T/repo-l"; G="$REPO/ch/plaintext"; export ROOT_MAVEN_REPO="file://$REPO"
+# shellcheck disable=SC2086
+for v in 1.720.0 1.721.0 1.722.0; do pom_ablegen plaintext-root-parent $v "$(parent_pom $v $MODULE)"; for m in $MODULE; do pom_ablegen "$m" $v; done; done
+metadata 1.722.0 1.720.0 1.721.0 1.722.0
+APP_MODULE="plaintext-app-interfaces plaintext-z-wiki"
+app_release() {   # $1 = app-Version, $2 = root-Basis, $3.. = Module (Default APP_MODULE)
+    local v="$1" b="$2"; shift 2
+    local m
+    pom_ablegen plaintext-parent "$v" "<project>
+  <parent><groupId>ch.plaintext</groupId><artifactId>plaintext-root-parent</artifactId>
+    <!-- <version>9.9.9</version> ein Kommentar ist keine Basis -->
+    <version>$b</version></parent>
+  <artifactId>plaintext-parent</artifactId><version>$v</version>
+</project>"
+    # shellcheck disable=SC2086  # APP_MODULE ist absichtlich eine Wortliste
+    [ "$#" -gt 0 ] || set -- $APP_MODULE
+    for m in "$@"; do pom_ablegen "$m" "$v"; done
+}
+app_metadata() {   # $1.. = alle app-Versionen
+    { echo '<metadata><artifactId>plaintext-parent</artifactId><versioning><versions>'
+      for v in "$@"; do echo "<version>$v</version>"; done
+      echo '</versions></versioning></metadata>'; } > "$G/plaintext-parent/maven-metadata.xml"
+}
+consumer_pom_app() {   # $1 = root-Pin, $2 = app-Pin
+    { echo '<project>'
+      echo "  <parent><groupId>ch.plaintext</groupId><artifactId>plaintext-root-parent</artifactId><version>$1</version></parent>"
+      echo '  <artifactId>plaintext-guild-parent</artifactId>'
+      echo "  <properties><plaintext-root.version>$1</plaintext-root.version>"
+      echo "    <plaintext-app.version>$2</plaintext-app.version></properties>"
+      echo '  <dependencies>'
+      echo "    <dependency><groupId>ch.plaintext</groupId><artifactId>plaintext-root-common</artifactId><version>\${plaintext-root.version}</version></dependency>"
+      for a in $APP_MODULE; do
+        echo "    <dependency><groupId>ch.plaintext</groupId><artifactId>$a</artifactId><version>\${plaintext-app.version}</version></dependency>"
+      done
+      echo '  </dependencies>'
+      echo '</project>'; } > "$POM_FILE"
+}
+app_pin() { grep -o '<plaintext-app\.version>[^<]*<' "$POM_FILE" | sed 's/.*>//;s/<$//'; }
+app_release 2.1847.0 1.720.0
+app_release 2.1848.0 1.721.0
+app_release 2.1849.0 1.722.0
+app_metadata 2.1847.0 2.1848.0 2.1849.0
+
+echo "-- L1 gekoppelt: root 1.720.0/app 2.1847.0, root-Ziel 1.722.0 = Basis von app 2.1849.0"
+consumer_pom_app 1.720.0 2.1847.0
+lauf detect
+pruefe "L1 detect: Exit 0"                            "0"                    "$RC"
+pruefe "L1 detect: bump=true"                         "true"                 "$(ausgabe bump)"
+pruefe "L1 detect: latest (root-Ziel)"                "1.722.0"              "$(ausgabe latest)"
+pruefe "L1 detect: app_current"                       "2.1847.0"             "$(ausgabe app_current)"
+pruefe "L1 detect: app_latest = app auf root 1.722.0" "2.1849.0"             "$(ausgabe app_latest)"
+pruefe "L1 detect: app_fehlt leer"                    ""                     "$(ausgabe app_fehlt)"
+L_ROOT="$(ausgabe latest)"; L_APP="$(ausgabe app_latest)"   # lauf leert GITHUB_OUTPUT
+lauf apply 1.722.0
+pruefe "L1 apply ohne app: verweigert"                "ja"                   "$([ "$RC" -ne 0 ] && echo ja || echo nein)"
+pruefe "L1 apply ohne app: nennt die Kopplung"        "ja" \
+       "$(printf '%s' "$AUS" | grep_q 'apply braucht die app-Version' && echo ja || echo nein)"
+pruefe "L1 apply ohne app: root-Pin unveraendert"     "1.720.0"              "$(pin)"
+lauf apply 1.722.0 2.1848.0
+pruefe "L1 apply mit falscher app: verweigert"        "ja"                   "$([ "$RC" -ne 0 ] && echo ja || echo nein)"
+pruefe "L1 apply mit falscher app: nennt die Basis"   "ja" \
+       "$(printf '%s' "$AUS" | grep_q 'app 2.1848.0 steht auf root 1.721.0, nicht auf 1.722.0' && echo ja || echo nein)"
+pruefe "L1 apply mit falscher app: app unveraendert"  "2.1847.0"             "$(app_pin)"
+lauf apply "$L_ROOT" "$L_APP"
+pruefe "L1 apply: Exit 0"                             "0"                    "$RC"
+pruefe "L1 apply: root-Pin"                           "1.722.0"              "$(pin)"
+pruefe "L1 apply: parent"                             "1.722.0"              "$(parent)"
+pruefe "L1 apply: app-Pin mitgezogen"                 "2.1849.0"             "$(app_pin)"
+
+echo "-- L2 keine passende app: root 1.721.0/app 2.1848.0, root 1.722.0 da, app dazu fehlt"
+app_metadata 2.1847.0 2.1848.0
+rm -rf "$G/plaintext-parent/2.1849.0"
+consumer_pom_app 1.721.0 2.1848.0
+lauf detect
+pruefe "L2 detect: Exit 0 (eine Antwort, kein Ausfall)" "0"                  "$RC"
+pruefe "L2 detect: bump=false (KEIN root-only-Bump)"  "false"                "$(ausgabe bump)"
+pruefe "L2 detect: app_latest leer"                   ""                     "$(ausgabe app_latest)"
+pruefe "L2 detect: app_fehlt nennt den Grund"         "ja" \
+       "$(ausgabe app_fehlt | grep_q 'keine app-Version .* zwischen 1.721.0 (ausschl.) und 1.722.0; neueste app 2.1848.0 steht auf root 1.721.0' && echo ja || echo nein)"
+pruefe "L2 detect: ::warning (sichtbar, nicht still)" "ja" \
+       "$(printf '%s' "$AUS" | grep_q '::warning title=Auto-Bump ohne passende app::root 1.721.0 -> 1.722.0 NICHT gebumpt' && echo ja || echo nein)"
+pruefe "L2 detect: geprueft=true"                     "true"                 "$(ausgabe geprueft)"
+
+echo "-- L3 Ausweichen: root 1.720.0/app 2.1847.0, fuer 1.722.0 keine app, fuer 1.721.0 schon"
+consumer_pom_app 1.720.0 2.1847.0
+lauf detect
+pruefe "L3 detect: bump=true"                         "true"                 "$(ausgabe bump)"
+pruefe "L3 detect: latest = root-Basis der app"       "1.721.0"              "$(ausgabe latest)"
+pruefe "L3 detect: app_latest"                        "2.1848.0"             "$(ausgabe app_latest)"
+pruefe "L3 detect: neueste root bleibt sichtbar"      "1.722.0"              "$(ausgabe neueste)"
+pruefe "L3 detect: Meldung 'koppelt app'"             "ja" \
+       "$(printf '%s' "$AUS" | grep_q 'Auto-Bump koppelt app::.*root 1.721.0 zusammen mit app 2.1848.0' && echo ja || echo nein)"
+
+echo "-- L4 app im Upload: 2.1849.0 da, aber plaintext-z-wiki fehlt -> app 2.1848.0 / root 1.721.0"
+app_release 2.1849.0 1.722.0 plaintext-app-interfaces
+rm -rf "$G/plaintext-z-wiki/2.1849.0"
+app_metadata 2.1847.0 2.1848.0 2.1849.0
+lauf detect
+pruefe "L4 detect: latest"                            "1.721.0"              "$(ausgabe latest)"
+pruefe "L4 detect: app_latest (vollstaendige)"        "2.1848.0"             "$(ausgabe app_latest)"
+lauf apply 1.722.0 2.1849.0
+pruefe "L4 apply mit unvollstaendiger app: verweigert" "ja"                  "$([ "$RC" -ne 0 ] && echo ja || echo nein)"
+pruefe "L4 apply: nennt das fehlende Modul"           "ja" \
+       "$(printf '%s' "$AUS" | grep_q 'plaintext-z-wiki nicht publiziert' && echo ja || echo nein)"
+
+echo "-- L5 ungekoppelte pom: keine app_-Ausgaben, apply mit app verweigert"
+consumer_pom 1.720.0 plaintext-root-common plaintext-root-web
+lauf detect
+pruefe "L5 detect: bump=true, latest=1.722.0"         "true 1.722.0"         "$(ausgabe bump) $(ausgabe latest)"
+pruefe "L5 detect: kein app_current"                  "0"                    "$(grep -c '^app_' "$GITHUB_OUTPUT" || true)"
+lauf apply 1.722.0 2.1849.0
+pruefe "L5 apply mit app ohne Pin: verweigert"        "ja"                   "$([ "$RC" -ne 0 ] && echo ja || echo nein)"
 REPO="$ALT_REPO"; G="$ALT_G"; export ROOT_MAVEN_REPO="$ALT_MR"
 
 echo "== Verdrahtung ============================================================="

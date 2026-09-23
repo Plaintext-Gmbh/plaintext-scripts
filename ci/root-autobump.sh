@@ -39,7 +39,10 @@
 #                                Exit 0 = nachgesehen (bump=true|false), 1 = harter Abbruch,
 #                                4 = NICHT nachgesehen (Repo antwortet nicht). Siehe
 #                                EXIT_NICHT_PRUEFBAR weiter unten.
-#   root-autobump.sh apply    -> aendert pom.xml auf die neueste Version
+#   root-autobump.sh apply [<root> [<app>]]
+#                             -> aendert pom.xml auf die neueste Version. Hat die pom einen
+#                                gekoppelten app-Pin (<plaintext-app.version>, heute nur guild),
+#                                ist <app> PFLICHT — siehe "Gekoppelter app-Pin" (Karte 1327).
 # Umgebung: POM_FILE (Default pom.xml), ROOT_MAVEN_REPO (Default https://maven.plaintext.ch/releases),
 #           BUMP_IGNORIERE_MODULE (Leerzeichen-getrennt: Module, die absichtlich nie deployt werden
 #           und deshalb nicht auf die Vollstaendigkeit einzahlen; heute keines)
@@ -210,6 +213,99 @@ neueste_vollstaendige_unter() {   # $1 = neueste (unvollstaendige) Version, $2 =
   return 0
 }
 
+# ── Gekoppelter app-Pin (Karte 1327) ─────────────────────────────────────────────────────────
+# guild pinnt neben root auch app-Module (<plaintext-app.version>), und zwar nach der Konvention
+# "root-Pin = root-Basis der app-Version": die gepinnte app ist GEGEN genau diese root-Version
+# gebaut. Ein Bump, der nur root hebt, bricht die Konvention — und wird rot, sobald root einen
+# Waechter mitbringt, den die alte app nicht erfuellt: guild war vom 20. bis 23.09.2026 in JEDEM
+# Auto-Bump-Lauf rot (PlaintextSessionBeanSerialisierbarTest, 19 Befunde in app-Klassen aus dem
+# alten app-Jar 2.1829.0; behoben erst durch app 2.1847.0 = root 1.718.0, Karte 1326).
+#
+# Deshalb: hat die pom diesen Pin, wird root NUR ZUSAMMEN mit einer app-Version gebumpt, deren
+# plaintext-parent-POM genau die Ziel-root-Version als <parent> traegt. Die root-Basis wird am
+# veroeffentlichten Parent-POM gemessen, nicht geraten (app 2.1848.0 -> 1.721.0,
+# 2.1849.0 -> 1.722.0; Messung 23.09.2026).
+#
+# Gibt es fuer das root-Ziel noch keine app (app hat ihren eigenen Bump noch nicht releast), wird
+# auf die neueste root-Version ZWISCHEN Pin und Ziel ausgewichen, fuer die es eine gibt — dasselbe
+# Prinzip wie bei der unvollstaendigen root-Version (#125): root releast oft mehrmals pro Nacht,
+# und "nur exakt die neueste" hiesse, dass guild nie aufholt, solange app eine Version hinterher
+# ist. Gibt es fuer KEINE root-Version zwischen Pin und Ziel eine app, gibt es keinen Bump:
+# bump=false und app_fehlt=<Grund>. Das ist eine Antwort (Exit 0), aber keine Ruhe — der
+# Aufrufer muss es sichtbar machen (guild: Lauf rot), sonst steht der Bump still und gruen.
+APP_PARENT="plaintext-parent"
+APP_SUCHE_MAX="${APP_SUCHE_MAX:-40}"
+
+# Der gekoppelte app-Pin als Literal, sonst leer (dann ist diese pom nicht gekoppelt).
+current_app() {
+  grep -o '<plaintext-app\.version>[^<]*</plaintext-app\.version>' "$POM" \
+    | sed -n 1p | sed 's/.*<plaintext-app\.version>//;s/<.*//' || true
+}
+
+# Alle app-Artefakte, die an ${plaintext-app.version} haengen — dieselbe Ableitung wie
+# required_artifacts, damit ein neues app-Modul in guild ohne Anpassung mitgeprueft wird.
+app_artefakte() {
+  awk '
+    /<artifactId>/ { a=$0; gsub(/.*<artifactId>|<\/artifactId>.*/,"",a) }
+    /\$\{plaintext-app\.version\}/ { if (a ~ /^plaintext-/) print a }
+  ' "$POM" | sort -u
+}
+
+# root-Basis der app-Version $1: <parent><version> ihres plaintext-parent-POM.
+# stdout: Version. Rueckgabe 0 gelesen, 1 POM fehlt (404 — Upload laeuft), 2 nicht lesbar.
+app_basis() {
+  local url pom code rc
+  url="$(reposilite_pom_url "$REPO_BASE" "$GROUP_PATH" "$APP_PARENT" "$1")"
+  if pom="$(curl -sfL --max-time "$REPOSILITE_TIMEOUT" "$url")"; then
+    printf '%s\n' "$pom" | reposilite_xml_ohne_kommentare \
+      | awk '/<parent>/{p=1} p&&/<version>/{gsub(/.*<version>|<\/version>.*/,""); gsub(/[[:space:]]/,""); print; exit}'
+    return 0
+  fi
+  rc=0; code="$(reposilite_vorhanden "$url")" || rc=$?
+  [ "$rc" -eq 1 ] && return 1
+  echo "HTTP ${code:-000}"; return 2
+}
+
+# Sucht die neueste app-Version (nicht aelter als der app-Pin), deren root-Basis zwischen dem
+# root-Pin (ausschliesslich) und dem root-Ziel (einschliesslich) liegt und deren von dieser pom
+# benutzte app-Artefakte alle publiziert sind. Setzt APP_ZIEL/APP_ZIEL_BASIS, sonst APP_FEHLT
+# (Grund) oder APP_UNPRUEFBAR (keine Aussage). $1 = root-Pin, $2 = root-Ziel, $3 = app-Pin.
+APP_ZIEL=""; APP_ZIEL_BASIS=""; APP_FEHLT=""; APP_UNPRUEFBAR=""
+app_koppeln() {
+  local pin="$1" ziel="$2" apin="$3" meta v basis rc f n=0 neueste="" neueste_basis="" unvoll=""
+  local -a artefakte
+  artefakte=()
+  while read -r f; do [ -n "$f" ] && artefakte[${#artefakte[@]}]="$f"; done < <(app_artefakte)
+  meta="$(fetch_metadata "$APP_PARENT")" || exit $?
+  while read -r v; do
+    [ -n "$v" ] || continue
+    version_gt "$apin" "$v" && break          # aelter als der app-Pin: nie zurueck
+    n=$((n + 1))
+    if [ "$n" -gt "$APP_SUCHE_MAX" ]; then
+      APP_FEHLT="nach ${APP_SUCHE_MAX} app-Versionen keine mit root-Basis zwischen ${pin} und ${ziel} gefunden"
+      return 0
+    fi
+    rc=0; basis="$(app_basis "$v")" || rc=$?
+    case "$rc" in
+      1) continue ;;                          # POM noch nicht da: Upload laeuft
+      2) APP_UNPRUEFBAR="Parent-POM von app ${v} nicht lesbar (${basis})"; return 0 ;;
+    esac
+    [ -n "$neueste" ] || { neueste="$v"; neueste_basis="$basis"; }
+    version_gt "$basis" "$ziel" && continue   # app schon auf einer neueren root als das Ziel
+    version_gt "$basis" "$pin" || break       # root-Basis <= Pin: darunter kommt nichts mehr
+    if [ "${#artefakte[@]}" -gt 0 ]; then
+      f="$(reposilite_fehlende_artefakte "$REPO_BASE" "$GROUP_PATH" "$v" "${artefakte[@]}" | tr '\n' ' ')" || true
+      case "$f" in *'(HTTP '*) APP_UNPRUEFBAR="app ${v}: Artefakte nicht pruefbar: ${f% }"; return 0 ;; esac
+      if [ -n "${f% }" ]; then unvoll="${unvoll}${unvoll:+; }app ${v} unvollstaendig (fehlt: ${f% })"; continue; fi
+    fi
+    APP_ZIEL="$v"; APP_ZIEL_BASIS="$basis"; return 0
+  done < <(echo "$meta" | grep -o '<version>[^<]*</version>' | sed 's/.*<version>//;s/<.*//' | sort -Vr)
+  APP_FEHLT="keine app-Version (${APP_PARENT}) auf einer root-Version zwischen ${pin} (ausschl.) und ${ziel}"
+  [ -z "$neueste" ] || APP_FEHLT="${APP_FEHLT}; neueste app ${neueste} steht auf root ${neueste_basis}"
+  [ -z "$unvoll" ] || APP_FEHLT="${APP_FEHLT}; ${unvoll}"
+  return 0
+}
+
 # 1.631.0 < 1.635.0 ; verhindert Downgrades bei zurueckgezogenen Releases.
 # `sort -V` gibt es in GNU coreutils und im BSD sort von macOS (geprueft 29.08.2026).
 version_gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }
@@ -280,7 +376,7 @@ case "${1:-detect}" in
 
     # Massnahme 4: nur ein VOLLSTAENDIGES Release wird vorgeschlagen. Die Pruefung laeuft nur,
     # wenn ueberhaupt ein Bump anstuende — ein Repo auf dem neuesten Stand braucht keine 24 HEADs.
-    FEHLEND=""; VOLL=0; UNPRUEFBAR=""; NEUESTE="$LATEST"; AUSWEICH=""
+    FEHLEND=""; VOLL=0; UNPRUEFBAR=""; NEUESTE="$LATEST"; AUSWEICH=""; APP_CUR=""
     if [ "$BUMP" = true ]; then
       FEHLEND="$(release_fehlend "$LATEST")" && VOLL=0 || VOLL=$?
       if [ "$VOLL" -ne 0 ]; then
@@ -317,7 +413,36 @@ case "${1:-detect}" in
       fi
     fi
 
-    echo "current=${CUR} parent=${PAR} latest=${LATEST} neueste=${NEUESTE} behind=${BEHIND} vollstaendig=$([ "$VOLL" -eq 0 ] && echo ja || echo nein) bump=${BUMP}"
+    # Karte 1327: gekoppelter app-Pin. Nur wenn ein Bump ansteht und das root-Ziel feststeht.
+    APP_CUR="$(current_app)"; ROOT_ZIEL="$LATEST"
+    if [ -n "$APP_CUR" ] && [ "$BUMP" = true ] && [ "$VOLL" -eq 0 ]; then
+      app_koppeln "$CUR" "$LATEST" "$APP_CUR"
+      if [ -n "$APP_UNPRUEFBAR" ]; then
+        BUMP=false
+        UNPRUEFBAR="app-Kopplung nicht pruefbar: ${APP_UNPRUEFBAR}"
+      elif [ -n "$APP_ZIEL" ]; then
+        if [ "$APP_ZIEL_BASIS" != "$LATEST" ]; then
+          # Die Ausweich-root ist aelter als das Ziel; sie muss genauso vollstaendig sein.
+          FA=""; FA="$(release_fehlend "$APP_ZIEL_BASIS")" && VA=0 || VA=$?
+          if [ "$VA" -ne 0 ]; then
+            BUMP=false
+            APP_FEHLT="app ${APP_ZIEL} steht auf root ${APP_ZIEL_BASIS}, die aber unvollstaendig ist (${FA})"
+            APP_ZIEL=""
+          else
+            echo "::notice title=Auto-Bump koppelt app::fuer root ${LATEST} gibt es noch keine app-Version — gebumpt wird root ${APP_ZIEL_BASIS} zusammen mit app ${APP_ZIEL}"
+            LATEST="$APP_ZIEL_BASIS"
+            pruefe_benoetigte_artefakte "$LATEST"
+          fi
+        fi
+      else
+        BUMP=false
+      fi
+      if [ -n "$APP_FEHLT" ]; then
+        echo "::warning title=Auto-Bump ohne passende app::root ${CUR} -> ${ROOT_ZIEL} NICHT gebumpt: ${APP_FEHLT}. Ein root-Bump ohne app bricht die Kopplung (Karte 1327)."
+      fi
+    fi
+
+    echo "current=${CUR} parent=${PAR} latest=${LATEST} neueste=${NEUESTE} behind=${BEHIND} vollstaendig=$([ "$VOLL" -eq 0 ] && echo ja || echo nein) bump=${BUMP}${APP_CUR:+ app_current=${APP_CUR} app_latest=${APP_ZIEL}}"
     if [ -n "${GITHUB_OUTPUT:-}" ]; then
       {
         echo "current=${CUR}"
@@ -334,6 +459,14 @@ case "${1:-detect}" in
         # vorliegt. Bei EXIT_NICHT_PRUEFBAR aus fetch_metadata wird dieser Block nie erreicht —
         # dann ist der Wert leer, und leer heisst ebenfalls "keine Antwort".
         echo "geprueft=$([ -z "$UNPRUEFBAR" ] && echo true || echo false)"
+        # Karte 1327: nur bei gekoppeltem app-Pin. app_latest = app-Ziel (leer: kein Bump),
+        # app_fehlt = warum es keines gibt (leer: es gibt eines oder es stand keiner an).
+        if [ -n "$APP_CUR" ]; then
+          echo "app_current=${APP_CUR}"
+          echo "app_latest=${APP_ZIEL}"
+          echo "app_basis=${APP_ZIEL_BASIS}"
+          echo "app_fehlt=${APP_FEHLT}"
+        fi
       } >> "$GITHUB_OUTPUT"
     fi
 
@@ -369,8 +502,26 @@ case "${1:-detect}" in
     FEHLEND="$(release_fehlend "$LATEST")" && VOLL=0 || VOLL=$?
     [ "$VOLL" -eq 0 ] || die "$(reposilite_fehlend_text "$VOLL" "$LATEST" "$FEHLEND") — kein Bump"
     pruefe_benoetigte_artefakte "$LATEST"
+    # Karte 1327: eine gekoppelte pom wird nie nur an root gebumpt — auch nicht von Hand.
+    APP_CUR="$(current_app)"; APP_NEU="${3:-}"
+    if [ -n "$APP_CUR" ]; then
+      [ -n "$APP_NEU" ] || die "gekoppelter app-Pin (<plaintext-app.version>${APP_CUR}): apply braucht die app-Version als drittes Argument (detect liefert app_latest) — ein root-Bump allein bricht die Kopplung (Karte 1327)"
+      version_gt "$APP_CUR" "$APP_NEU" && die "app-Downgrade ${APP_CUR} -> ${APP_NEU} verweigert"
+      ABASIS_RC=0; ABASIS="$(app_basis "$APP_NEU")" || ABASIS_RC=$?
+      [ "$ABASIS_RC" -eq 0 ] || die "app ${APP_NEU}: Parent-POM nicht lesbar (${ABASIS:-404})"
+      [ "$ABASIS" = "$LATEST" ] || die "app ${APP_NEU} steht auf root ${ABASIS}, nicht auf ${LATEST} — Kopplung verletzt, kein Bump"
+      # shellcheck disable=SC2046  # app_artefakte liefert eine Wortliste (artifactIds ohne Leerzeichen)
+      AFEHLT="$(reposilite_fehlende_artefakte "$REPO_BASE" "$GROUP_PATH" "$APP_NEU" $(app_artefakte) | tr '\n' ' ')" || true
+      [ -z "${AFEHLT% }" ] || die "app ${APP_NEU}: Artefakt(e) ${AFEHLT% } nicht publiziert — kein Bump"
+    elif [ -n "$APP_NEU" ]; then
+      die "app-Version ${APP_NEU} angegeben, aber ${POM} hat keinen <plaintext-app.version>-Pin"
+    fi
     apply_pom "$CUR" "$LATEST"
     echo "pom.xml: plaintext-root ${CUR} -> ${LATEST} (parent ${PAR} -> ${LATEST})"
+    if [ -n "$APP_CUR" ] && [ "$APP_NEU" != "$APP_CUR" ]; then
+      ersetze_in_pom "s|<plaintext-app\.version>[^<]*</plaintext-app\.version>|<plaintext-app.version>${APP_NEU}</plaintext-app.version>|"
+      echo "pom.xml: plaintext-app ${APP_CUR} -> ${APP_NEU} (root-Basis ${LATEST}, gekoppelt)"
+    fi
     ;;
   *)
     die "unbekannter Modus '${1}' (detect|apply)"
