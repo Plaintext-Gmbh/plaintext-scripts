@@ -586,12 +586,21 @@ exec "${PLAINTEXT_SCRIPTS_DIR:-$HOME/codeplain/plaintext-scripts}/ci/root-autobu
 ```
 
 Aufruf: `root-autobump.sh detect` (stdout + `GITHUB_OUTPUT`: current/parent/latest/behind/
-vollstaendig/fehlend/bump/geprueft) bzw. `root-autobump.sh apply [version]`. Umgebung: `POM_FILE`
+vollstaendig/fehlend/bump/geprueft) bzw. `root-autobump.sh apply [version [app-version]]`. Umgebung: `POM_FILE`
 (Default `pom.xml`), `ROOT_MAVEN_REPO` (Default `https://maven.plaintext.ch/releases`),
 `BUMP_IGNORIERE_MODULE` (s. u.). Ein Interfaces-Pin
 `<plaintext-root-interfaces.version>${plaintext-root.version}</...>` gilt als **gekoppelt**
 (folgt dem Bump von selbst); nur ein abweichendes Literal wird als „entkoppelt" gemeldet und
 nicht angefasst.
+
+**Gekoppelter app-Pin (Karte 1327, heute nur guild).** Hat die pom `<plaintext-app.version>`,
+bumpt `detect` root nur zusammen mit der neuesten app-Version, deren `plaintext-parent`-POM genau
+die Ziel-root-Version als `<parent>` traegt und deren benutzte app-Artefakte alle publiziert sind
+(Ausgabe `app_current`/`app_latest`/`app_basis`). Fehlt sie fuer das Ziel, weicht `detect` auf die
+neueste root-Version zwischen Pin und Ziel aus, fuer die es eine gibt. Gibt es keine: `bump=false`
+und `app_fehlt=<Grund>` (Exit 0, `::warning`) — der Aufrufer muss das sichtbar machen.
+`apply <root> <app>` verlangt dann die app-Version und prueft deren root-Basis; `apply <root>`
+allein wird verweigert.
 
 **Rueckgabecodes von `detect` (Karte 1127).** Sie sind der Unterschied zwischen „nachgesehen,
 nichts zu tun" und „konnte nicht nachsehen":
