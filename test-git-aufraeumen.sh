@@ -10,7 +10,7 @@ pruefe() { if [ "$2" = "$3" ]; then echo "  ok   $1"; else echo "  FAIL $1 — e
 
 REMOTE="$T/remote/github.com/TestOrg/demo.git"; mkdir -p "$(dirname "$REMOTE")"; git init -q --bare -b master "$REMOTE"
 W="$T/home"; mkdir -p "$W"
-git clone -q "$REMOTE" "$W/demo" 2>/dev/null; cd "$W/demo"
+git clone -q "$REMOTE" "$W/demo" 2>/dev/null; cd "$W/demo" || exit 1
 echo a > a.txt; git add a.txt; git commit -qm init; git push -q origin master
 # 1 integriert: normal gemergt
 git checkout -qb integriert; echo b > b.txt; git add b.txt; git commit -qm b; git checkout -q master; git merge -q --no-ff integriert -m m; git push -q origin master
@@ -26,7 +26,7 @@ git branch wt-dreckig integriert; git worktree add -q "$W/wt-dreckig" wt-dreckig
 # 6 alte Arbeitskopie (eigener Klon) nur mit master -> darf ganz weg
 git clone -q "$REMOTE" "$W/wtalt" 2>/dev/null
 # 7 alte Arbeitskopie mit offener Arbeit -> muss bleiben
-git clone -q "$REMOTE" "$W/wtoffen" 2>/dev/null; (cd "$W/wtoffen"; git checkout -qb eigen; echo e > e.txt; git add e.txt; git commit -qm e)
+git clone -q "$REMOTE" "$W/wtoffen" 2>/dev/null; (cd "$W/wtoffen" || exit 1; git checkout -qb eigen; echo e > e.txt; git add e.txt; git commit -qm e)
 git remote set-head origin master >/dev/null 2>&1
 
 echo "== Trockenlauf darf nichts aendern"
