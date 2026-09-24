@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+# git-aufraeumen — lokale Git-Klone und Worktrees aufraeumen, ohne Arbeit zu verlieren.
+#
+# Entstanden am 24.09.2026 (worker, Auftrag Daniel): 445 Git-Verzeichnisse, 238 Worktrees und
+# ~1000 lokale Branches unter ~ — 24 GB, fast alles erledigte Arbeit. Das Werkzeug trennt
+# erledigt von offen und raeumt nur das Erledigte ab.
+#
+# Aufruf:
+#   git-aufraeumen                       # Trockenlauf: Bericht, aendert nichts ausser `git fetch --prune`
+#   git-aufraeumen --ausfuehren          # Worktrees entfernen, Klone auf den Default-Branch + pull,
+#                                        # erledigte Branches loeschen, alte Arbeitskopien loeschen
+#   Optionen:
+#     --wurzel DIR           Suchwurzel (Default: ~)
+#     --tiefe N              Suchtiefe fuer .git (Default: 4)
+#     --org ORG              nur Repos dieser GitHub-Organisation (Default: Plaintext-Gmbh; Gross/klein egal)
+#     --ausnahme OWNER/REPO  Repo nie anfassen (mehrfach moeglich)
+#     --loeschmuster REGEX   Verzeichnisse (relativ zur Wurzel), die ganz geloescht werden duerfen,
+#                            sobald sie nur noch sauberen Default-Branch enthalten
+#                            (Default: agent4..agent99, wt*, workspace/karte-*)
+#     --auch-offene          auch OFFENE-ARBEIT / OFFENER-PR loeschen — NUR nach Einzelpruefung!
+#     --ohne-github          keine PR-Abfrage (dann gilt nur der Git-Befund)
+#     --json DATEI           Analyse zusaetzlich als JSON schreiben
+#
+# Klassen je lokalem Branch (die Reihenfolge ist die Pruefreihenfolge):
+#   DEFAULT            der Default-Branch des Remotes — bleibt immer
+#   INTEGRIERT         Vorfahre des Default-Branches oder ohne eigenen Commit
+#   INTEGRIERT-PR      PR mit diesem Head (oder prNNN = PR-Nummer) ist gemergt.
+#                      Noetig, weil alle PRs per SQUASH gemergt werden: `git branch --merged`
+#                      erkennt davon nur einen Bruchteil (Messung 22.08.2026: 11 von 224).
+#   INTEGRIERT-INHALT  der Diff des Branches laesst sich RUECKWAERTS sauber auf den Default-Branch
+#                      anwenden — seine Aenderung steckt also schon drin (Squash ohne PR-Treffer)
+#   VERWORFEN-PR       PR geschlossen, nicht gemergt
+#   OFFENER-PR         PR offen — bleibt (ohne --auch-offene)
+#   OFFENE-ARBEIT      eigene Commits, kein PR, Inhalt nicht im Default — bleibt (ohne --auch-offene)
+#
+# Harte Regeln — unabhaengig von jeder Option:
+#   * Ein Verzeichnis mit uncommitteten/unversionierten Aenderungen wird NIE angefasst.
+#   * Ein Klon mit ungepushten Commits auf dem Default-Branch wird nie geloescht.
+#   * Repos anderer Organisationen (Werkzeug-Installationen) werden nie angefasst.
+#   * Root-eigene Build-Reste (target/ aus Docker-Bauten) kann das Werkzeug nicht loeschen; es nennt sie.
+import argparse, concurrent.futures as cf, json, os, re, shutil, subprocess, sys, tempfile
+from collections import Counter
+
+def g(d, *a, eingabe=None, env=None):
+    return subprocess.run(["git", "-C", d, *a], capture_output=True, text=True, timeout=300, input=eingabe, env=env)
+
+def gh_prs(repo):
+    """{head: (state, nr)} und {nr: state} — MERGED gewinnt vor OPEN vor CLOSED."""
+    r = subprocess.run(["gh", "pr", "list", "-R", repo, "--state", "all", "--limit", "5000",
+                        "--json", "headRefName,state,number"], capture_output=True, text=True, timeout=300)
+    if r.returncode:
+        return None
+    rang = {"MERGED": 3, "OPEN": 2, "CLOSED": 1}
+    je_head, je_nr = {}, {}
+    for p in json.loads(r.stdout or "[]"):
+        je_nr[str(p["number"])] = p["state"]
+        alt = je_head.get(p["headRefName"])
+        if not alt or rang[p["state"]] > rang[alt[0]]:
+            je_head[p["headRefName"]] = (p["state"], p["number"])
+    return je_head, je_nr
+
+def default_von(d):
+    ref = g(d, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip()
+    if not ref:
+        for kand in ("origin/master", "origin/main"):
+            if g(d, "rev-parse", "--verify", "-q", kand).returncode == 0:
+                return kand
+        return "origin/master"
+    return ref
+
+def inhalt_enthalten(d, default, branch):
+    mb = g(d, "merge-base", default, branch).stdout.strip()
+    if not mb:
+        return False, "keine gemeinsame Basis"
+    diff = g(d, "diff", "--binary", mb, branch).stdout
+    if not diff.strip():
+        return True, "leerer Diff"
+    with tempfile.NamedTemporaryFile(delete=False) as t:
+        idx = t.name
+    env = dict(os.environ, GIT_INDEX_FILE=idx)
+    try:
+        g(d, "read-tree", default, env=env)
+        ok = g(d, "apply", "--cached", "--check", "--reverse", "-", eingabe=diff, env=env).returncode == 0
+    finally:
+        os.unlink(idx)
+    return ok, "Diff rueckwaerts sauber auf dem Default" if ok else "Diff nicht im Default enthalten"
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--wurzel", default=os.path.expanduser("~"))
+    ap.add_argument("--tiefe", type=int, default=4)
+    ap.add_argument("--org", default="Plaintext-Gmbh")
+    ap.add_argument("--ausnahme", action="append", default=[])
+    ap.add_argument("--loeschmuster", default=r"^(agent([4-9]|[1-9][0-9])(-[^/]*)?|wt[^/]*|workspace/karte-[^/]*)$")
+    ap.add_argument("--auch-offene", action="store_true")
+    ap.add_argument("--ohne-github", action="store_true")
+    ap.add_argument("--ausfuehren", action="store_true")
+    ap.add_argument("--json")
+    a = ap.parse_args()
+    wurzel = os.path.realpath(a.wurzel)
+    ausnahmen = {x.lower() for x in a.ausnahme}
+    org = a.org.lower()
+    loesch = re.compile(a.loeschmuster)
+
+    # 1. finden
+    dirs = []
+    for root, sub, files in os.walk(wurzel):
+        tiefe = root[len(wurzel):].count(os.sep)
+        if any(x in root for x in ("/.m2", "/.cache", "/node_modules", "/.nvm", "/.sdkman", "/.local")):
+            sub[:] = []; continue
+        if ".git" in sub or ".git" in files:
+            dirs.append(root)
+        sub[:] = [s for s in sub if s != ".git"] if tiefe < a.tiefe else []
+    info = {}
+    for d in dirs:
+        url = g(d, "remote", "get-url", "origin").stdout.strip()
+        m = re.search(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$", url)
+        repo = f"{m.group(1)}/{m.group(2)}" if m else None
+        info[d] = dict(repo=repo, worktree=os.path.isfile(os.path.join(d, ".git")),
+                       common=g(d, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip(),
+                       dirty=bool(g(d, "status", "--porcelain").stdout.strip()))
+    eigen = {d: v for d, v in info.items() if v["repo"] and v["repo"].split("/")[0].lower() == org
+             and v["repo"].lower() not in ausnahmen}
+    # je Objektbestand ein Hauptklon
+    haupt = {}
+    for d, v in sorted(eigen.items(), key=lambda kv: kv[1]["worktree"]):
+        haupt.setdefault(v["common"], d)
+    with cf.ThreadPoolExecutor(8) as ex:
+        list(ex.map(lambda d: g(d, "fetch", "--prune", "-q", "origin"), haupt.values()))
+
+    # 2. PR-Zustaende
+    prs = {}
+    if not a.ohne_github:
+        for repo in sorted({v["repo"] for v in eigen.values()}):
+            kanon = f"{a.org}/{repo.split('/')[1]}"   # Remote-URLs schreiben die Org mal klein, mal gross
+            prs[repo] = gh_prs(kanon) or ({}, {})
+
+    # 3. klassifizieren
+    branches = []
+    for common, hd in haupt.items():
+        repo = eigen[hd]["repo"]; default = default_von(hd); dname = default.split("/", 1)[1]
+        je_head, je_nr = prs.get(repo, ({}, {}))
+        for b in g(hd, "for-each-ref", "--format=%(refname:short)", "refs/heads/").stdout.split():
+            ahead = g(hd, "rev-list", "--count", f"{default}..{b}").stdout.strip()
+            anc = g(hd, "merge-base", "--is-ancestor", b, default).returncode == 0
+            pr = je_head.get(b)
+            mnr = re.fullmatch(r"pr(\d+)(-rebase)?", b)
+            if not pr and mnr and mnr.group(1) in je_nr:
+                pr = (je_nr[mnr.group(1)], int(mnr.group(1)))
+            if b == dname: k, w = "DEFAULT", ""
+            elif anc or ahead == "0": k, w = "INTEGRIERT", "Vorfahre/ohne eigenen Commit"
+            elif pr and pr[0] == "MERGED": k, w = "INTEGRIERT-PR", f"PR #{pr[1]} gemergt"
+            elif pr and pr[0] == "CLOSED": k, w = "VERWORFEN-PR", f"PR #{pr[1]} geschlossen"
+            elif pr and pr[0] == "OPEN": k, w = "OFFENER-PR", f"PR #{pr[1]} offen"
+            else:
+                ok, w = inhalt_enthalten(hd, default, b)
+                k = "INTEGRIERT-INHALT" if ok else "OFFENE-ARBEIT"
+            branches.append(dict(repo=repo, hauptklon=hd, common=common, branch=b, ahead=ahead, klasse=k, warum=w))
+    weg_klassen = {"INTEGRIERT", "INTEGRIERT-PR", "INTEGRIERT-INHALT", "VERWORFEN-PR"}
+    if a.auch_offene:
+        weg_klassen |= {"OFFENE-ARBEIT", "OFFENER-PR"}
+
+    print(f"git-aufraeumen — {'AUSFUEHREN' if a.ausfuehren else 'TROCKENLAUF'} unter {wurzel}")
+    print(f"  Git-Verzeichnisse {len(info)} (Worktrees {sum(v['worktree'] for v in info.values())}), "
+          f"davon {a.org} und nicht ausgenommen {len(eigen)}; fremde/ausgenommene werden nicht angefasst")
+    print(f"  Branches je Klasse: {dict(Counter(b['klasse'] for b in branches))}")
+    for b in branches:
+        if b["klasse"] in ("OFFENE-ARBEIT", "OFFENER-PR"):
+            print(f"    bleibt {b['klasse']:14} {b['repo']:40} {b['branch']:45} +{b['ahead']} ({b['warum']})")
+    for d, v in sorted(info.items()):
+        if v["dirty"]:
+            print(f"    bleibt: Aenderungen in {d}")
+    if a.json:
+        json.dump(dict(verzeichnisse=info, branches=branches), open(a.json, "w"), indent=1)
+    if not a.ausfuehren:
+        print("  (Trockenlauf — mit --ausfuehren wird geraeumt)")
+        return 0
+
+    # 4. ausfuehren
+    st = Counter(); bleibt = []
+    weg = {}
+    for b in branches:
+        if b["klasse"] in weg_klassen: weg.setdefault(b["common"], set()).add(b["branch"])
+    for common, hd in haupt.items():
+        dname = default_von(hd).split("/", 1)[1]
+        for blk in g(hd, "worktree", "list", "--porcelain").stdout.strip().split("\n\n"):
+            m = re.search(r"^worktree (.+)$", blk, re.M)
+            if not m or os.path.realpath(m.group(1)) == os.path.realpath(hd): continue
+            p = m.group(1)
+            if os.path.isdir(p) and g(p, "status", "--porcelain").stdout.strip():
+                bleibt.append(f"Worktree mit Aenderungen: {p}"); continue
+            g(hd, "worktree", "remove", "--force", p); st["worktree_weg"] += 1
+        g(hd, "worktree", "prune")
+        if g(hd, "status", "--porcelain").stdout.strip():
+            bleibt.append(f"Hauptklon mit Aenderungen (nicht umgeschaltet): {hd}")
+        else:
+            if g(hd, "branch", "--show-current").stdout.strip() != dname:
+                if g(hd, "checkout", "-q", dname).returncode:
+                    g(hd, "checkout", "-q", "-B", dname, f"origin/{dname}")
+                st["checkout"] += 1
+            r = g(hd, "pull", "--ff-only", "-q")
+            st["pull_ok" if r.returncode == 0 else "pull_fehl"] += 1
+            if r.returncode: bleibt.append(f"pull --ff-only fehlgeschlagen: {hd}")
+        noch = set(re.findall(r"^branch refs/heads/(.+)$", g(hd, "worktree", "list", "--porcelain").stdout, re.M))
+        for b in sorted(weg.get(common, ())):
+            if b == dname or b in noch: continue
+            if g(hd, "branch", "-D", "-q", b).returncode == 0: st["branch_weg"] += 1
+    # alte Arbeitskopien
+    for name in sorted(os.listdir(wurzel)) + [f"workspace/{n}" for n in (os.listdir(os.path.join(wurzel, "workspace")) if os.path.isdir(os.path.join(wurzel, "workspace")) else [])]:
+        pfad = os.path.join(wurzel, name)
+        if not os.path.isdir(pfad) or not loesch.match(name): continue
+        grund = None
+        for root, sub, files in os.walk(pfad):
+            if ".git" in sub or ".git" in files:
+                v = info.get(root)
+                rp = (v or {}).get("repo") or ""
+                if rp.split("/")[0].lower() != org or rp.lower() in ausnahmen: grund = f"fremdes/ausgenommenes Repo {rp or '?'} in {root}"; break
+                if g(root, "status", "--porcelain").stdout.strip(): grund = f"Aenderungen in {root}"; break
+                dflt = default_von(root); dn = dflt.split("/", 1)[1]
+                fremd = [x for x in g(root, "for-each-ref", "--format=%(refname:short)", "refs/heads/").stdout.split() if x != dn]
+                if fremd: grund = f"verbliebene Branches {fremd[:3]} in {root}"; break
+                if g(root, "rev-list", "--count", f"{dflt}..{dn}").stdout.strip() not in ("0", ""):
+                    grund = f"ungepushte Commits auf {dn} in {root}"; break
+                sub[:] = [s for s in sub if s != ".git"]
+        if grund:
+            bleibt.append(f"Verzeichnis bleibt ({grund}): {pfad}"); continue
+        shutil.rmtree(pfad, ignore_errors=True)
+        if os.path.exists(pfad):
+            bleibt.append(f"Verzeichnis nicht vollstaendig loeschbar (vermutlich root-eigene Build-Reste): {pfad}")
+        else:
+            st["verzeichnis_weg"] += 1
+    print(f"  Ergebnis: {dict(st)}")
+    for b in bleibt: print(f"    bleibt: {b}")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
