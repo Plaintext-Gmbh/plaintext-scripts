@@ -1,0 +1,51 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  VORLAGE — Woodpecker-Job fuer den woechentlichen Patch-Release (Karte 1340)
+#
+#  Diese Datei liegt BEWUSST nicht unter .woodpecker/: Ein `from_secret` auf ein Secret,
+#  das am Repo noch nicht existiert, verhindert den Start JEDER Pipeline dieses Repos —
+#  ohne Lauf und ohne Fehlermeldung (gemessen 02.09.2026, Karte 1043). Reihenfolge siehe
+#  wochenpatch/README.md: Repo aktivieren, Secrets anlegen, Cron anlegen, DANN diese Datei
+#  nach .woodpecker/wochenpatch.yml kopieren.
+#
+#  Laufzeit: im Modus "ausrollen" mehrere Stunden (vier Releases nacheinander, je 10-18 min
+#  Deploy plus PR-Pipelines). Das Repo-Timeout in Woodpecker entsprechend setzen (z. B. 360 min).
+# ═══════════════════════════════════════════════════════════════════════════════
+when:
+  - event: cron
+    cron: wochenpatch          # in der Woodpecker-Oberflaeche anlegen, z. B. "0 5 * * 0" (Sonntag 07:00)
+  - event: manual             # zum Ausprobieren; Variable WOCHENPATCH_MODUS=pr setzt nur PRs auf
+
+steps:
+  maven-repos:
+    image: maven:3.9-eclipse-temurin-25
+    environment:
+      WOCHENPATCH_TEIL: maven
+      WOCHENPATCH_MODUS: pr          # "ausrollen" erst nach Freigabe durch Daniel
+      WP_BERICHT: /woodpecker/wochenpatch-bericht.txt
+      GH_TOKEN:
+        from_secret: wochenpatch_gh_token
+      PUSHOVER_APP_TOKEN:
+        from_secret: pushover_app_token
+      PUSHOVER_USER_KEY:
+        from_secret: pushover_user_key
+      MAVEN_OPTS: "-Xmx2g -XX:MaxMetaspaceSize=512m"
+    commands:
+      - apt-get update -qq && apt-get install -y -qq git python3 curl gh >/dev/null
+      - ./wochenpatch/lauf.sh
+
+  projectmind:
+    image: rust:1-bookworm
+    environment:
+      WOCHENPATCH_TEIL: projectmind
+      WOCHENPATCH_MODUS: pr
+      WP_BERICHT: /woodpecker/wochenpatch-bericht.txt
+      GH_TOKEN:
+        from_secret: wochenpatch_gh_token
+      PUSHOVER_APP_TOKEN:
+        from_secret: pushover_app_token
+      PUSHOVER_USER_KEY:
+        from_secret: pushover_user_key
+    commands:
+      - apt-get update -qq && apt-get install -y -qq git curl gh nodejs npm >/dev/null
+      - npm install -g n >/dev/null && n 22 >/dev/null
+      - ./wochenpatch/lauf.sh
