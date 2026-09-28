@@ -163,4 +163,38 @@
         <cpe>cpe:/a:vmware:server</cpe>
     </suppress>
 
+    <!--
+      CVE-2026-42154 (Prometheus-Server, Remote Read) an micrometer-registry-prometheus.
+      CPE-FEHLZUORDNUNG (Karte 1338, 28.09.2026): Der Scanner leitet aus dem Artefaktnamen
+      die CPE cpe:2.3:a:prometheus:prometheus ab, also den Prometheus-SERVER (Go).
+
+      BELEG (NVD-API, abgefragt 28.09.2026): Die CVE betrifft den Endpunkt /api/v1/read, der
+      die dekodierte snappy-Laenge nicht prueft. Die NVD-Konfiguration nennt ausschliesslich
+      prometheus:prometheus < 3.5.3 und 3.6.0 bis < 3.11.3, behoben in 3.5.3/3.11.3.
+      micrometer-registry-prometheus ist die Java-Bibliothek hinter /actuator/prometheus. Sie
+      hat keinen Remote-Read-Endpunkt und nimmt keine snappy-Anfragen an. Ein micrometer-Patch
+      kann den Fund deshalb nie beheben (1.17.1 ist zudem die neueste Version auf Maven Central).
+
+      VORGESCHICHTE: Bis 28.09.2026 stand in jedem Repo eine lokale Suppression @1.17.0 mit der
+      Begruendung "per naechstem Boot-Patch behoben". Boot 4.1.1 zog 1.17.1, der Fund blieb,
+      und quality-gate.properties stand in root, app, guild, schuetu und iot auf BREACHED.
+
+      UNTERDRUECKT WIRD DIE FALSCHE CPE, NICHT DIE CVE. Jede andere CPE-Zuordnung des Jars
+      bleibt aktiv. VOLLSTAENDIG: im Report aller fuenf Repos stand nur dieses eine Artefakt.
+      VERSIONS-GEPINNT auf @1.17.1 (Regel 1). Zieht Boot eine neue micrometer-Version, meldet
+      der Scanner den Fund wieder. Dann ist derselbe Eintrag von Hand auf die neue Version zu
+      setzen, nach erneutem Blick in die NVD.
+      PRUEFEN-AB: 2027-03-01.
+    -->
+    <suppress>
+        <notes><![CDATA[
+            CPE-Fehlzuordnung: cpe:2.3:a:prometheus:prometheus (der Prometheus-Server, CVE-2026-42154
+            im Remote-Read-Endpunkt) wird aus dem Artefaktnamen der Java-Bibliothek
+            micrometer-registry-prometheus abgeleitet. Unterdrueckt wird die falsche CPE, nicht
+            die CVE. Karte 1338. PRUEFEN-AB: 2027-03-01.
+        ]]></notes>
+        <packageUrl regex="true">^pkg:maven/io\.micrometer/micrometer-registry-prometheus@1\.17\.1$</packageUrl>
+        <cpe>cpe:/a:prometheus:prometheus</cpe>
+    </suppress>
+
 </suppressions>
