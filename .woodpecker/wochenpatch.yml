@@ -1,0 +1,72 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Woodpecker-Job: WOECHENTLICHER PATCH-RELEASE (Karte 1340)
+#
+#  Faehrt wochenpatch/lauf.sh: Patch-Updates in root, app, guild, schuetu, iot und
+#  ProjectMind, PR je Repo, im Modus "ausrollen" Merge, Release und Rollout nacheinander
+#  (Beleg /nosec/version), iot mit [skip ci] ohne Rollout. Einzelheiten: wochenpatch/README.md.
+#
+#  WANN
+#    cron "wochenpatch"  (am Repo angelegt, NICHT in dieser Datei — Woodpecker filtert hier nur
+#                         auf den Namen): "7 4 * * 0" = Sonntag 04:07 UTC (06:07 Sommerzeit,
+#                         05:07 Winterzeit). Die Nightlies (01:00-03:00 UTC) sind dann durch,
+#                         die Voll-Analysen liegen Mo-Do.
+#    manual              nur mit Variable `wochenpatch` = trocken | pr | ausrollen
+#                         (wochenpatch/freigabe.sh). Ohne Variable endet jeder Step sofort gruen.
+#
+#  SECRETS (am Repo plaintext-scripts, Ereignisse NUR cron und manual — das Repo ist oeffentlich,
+#  pull_request bekommt bewusst keines):
+#    mvn_deploy_token    GitHub-PAT daniel-marthaler (repo, write:packages): Klon, Push, PR,
+#                        Merge, Workflow-Dispatch; Maven-Fallback GitHub Packages
+#    woodpecker_token    Woodpecker-API: offene Deploy-Laeufe vor jedem Merge
+#    pushover_app_token, pushover_user_key   Schlussmeldung
+#  Ein from_secret ohne hinterlegtes Secret verwirft die GANZE Pipeline lautlos (Memory
+#  woodpecker-from-secret-blockiert-start) — Secrets zuerst anlegen, dann diese Datei.
+#
+#  LAUFZEIT: "ausrollen" braucht Stunden (vier Releases nacheinander). Das Repo-Timeout in
+#  Woodpecker ist deshalb hoeher als die 120 min der Anwendungs-Repos.
+# ═══════════════════════════════════════════════════════════════════════════════
+when:
+  - event: cron
+    cron: wochenpatch
+  - event: manual
+
+steps:
+  maven-repos:
+    image: maven:3.9-eclipse-temurin-25
+    environment:
+      WOCHENPATCH_TEIL: maven
+      WP_BERICHT: /woodpecker/wochenpatch-bericht.txt
+      GH_TOKEN:
+        from_secret: mvn_deploy_token
+      WOODPECKER_TOKEN:
+        from_secret: woodpecker_token
+      PUSHOVER_APP_TOKEN:
+        from_secret: pushover_app_token
+      PUSHOVER_USER_KEY:
+        from_secret: pushover_user_key
+      # Wie in den Anwendungs-Repos: ohne Cap nimmt jede JVM 25 % des Host-RAM.
+      MAVEN_OPTS: "-Xmx2g -XX:MaxMetaspaceSize=512m"
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAM=4g -XX:ActiveProcessorCount=2"
+    commands:
+      - . wochenpatch/freigabe.sh
+      - export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends git python3 curl gh ca-certificates >/dev/null
+      - bash wochenpatch/lauf.sh
+
+  projectmind:
+    image: rust:1-bookworm
+    environment:
+      WOCHENPATCH_TEIL: projectmind
+      WP_BERICHT: /woodpecker/wochenpatch-bericht.txt
+      GH_TOKEN:
+        from_secret: mvn_deploy_token
+      WOODPECKER_TOKEN:
+        from_secret: woodpecker_token
+      PUSHOVER_APP_TOKEN:
+        from_secret: pushover_app_token
+      PUSHOVER_USER_KEY:
+        from_secret: pushover_user_key
+    commands:
+      - . wochenpatch/freigabe.sh
+      - export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends git curl gh python3 nodejs npm >/dev/null
+      - npm install -g n >/dev/null && n 22 >/dev/null && hash -r && node --version
+      - bash wochenpatch/lauf.sh

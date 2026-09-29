@@ -8,13 +8,25 @@ nicht dazu.
 
 | Datei | Zweck |
 |---|---|
-| `lauf.sh` | Ablauf ueber alle Repos, Modus `pr` (Vorgabe) oder `ausrollen` |
+| `lauf.sh` | Ablauf ueber alle Repos, Modus `trocken` (Vorgabe), `pr` oder `ausrollen` |
+| `freigabe.sh` | Woodpecker: cron = `ausrollen`, manual nur mit Variable `wochenpatch` |
 | `maven-patch.sh` | Patch-Updates per versions-maven-plugin (nur dritte Stelle), optional root-/app-Version |
 | `owasp-tote-suppressionen.sh` | entfernt gepinnte OWASP-Suppressionen, deren Version nicht mehr auf dem Klassenpfad liegt |
 | `projectmind-patch.sh` | `cargo update` + `pnpm update` mit Tests |
-| `lib.sh` | Warten auf PR-Pruefungen, Paket-Repo, `/nosec/version` |
-| `woodpecker-wochenpatch.yml.vorlage` | der Job, noch nicht scharf (siehe unten) |
-| `../test-wochenpatch.sh` | Testharnisch ohne Netz (mvn-Attrappe) |
+| `lib.sh` | Warten auf PR-Pruefungen, Paket-Repo, `/nosec/version`, laufende Deploys (Woodpecker-API) |
+| `../.woodpecker/wochenpatch.yml` | der Job (Cron `wochenpatch`, Sonntag 04:07 UTC) |
+| `../test-wochenpatch.sh` | Testharnisch ohne Netz (mvn-, gh-, curl-Attrappen, lokale Repos) |
+
+## Modi
+
+| Modus | Wirkung |
+|---|---|
+| `trocken` | Vorflug: klonen, patchen, OWASP, `test-compile`, fremde PRs und Deploy-Lage ansehen, Bericht je Repo. Kein Push, kein PR, kein Merge, kein Pushover. |
+| `pr` | je Repo ein PR `wochenpatch/<datum>`, nichts wird gemergt |
+| `ausrollen` | wie am 28.09.2026 von Hand, siehe unten. Entscheid Daniel 29.09.2026; der Cron faehrt diesen Modus. |
+
+Von Hand in Woodpecker: *Run pipeline* mit der Variable `wochenpatch = trocken|pr|ausrollen`.
+Ohne Variable endet jeder Step sofort gruen (freigabe.sh).
 
 ## Reihenfolge im Modus `ausrollen`
 
@@ -22,17 +34,21 @@ root → (Paket-Repo abwarten) → app mit neuer root-Version → (Paket-Repo) �
 root- und app-Version → schuetu → iot (gemergt mit `[skip ci]`, **kein** Rollout) → ProjectMind
 (PR, Release-PR, Cargo.lock nachziehen, Tag). fwtool ist seit 23.09.2026 archiviert und fehlt.
 
-## Scharfschalten (in dieser Reihenfolge)
+## Einrichtung in Woodpecker (erledigt 29.09.2026, Karte 1340)
 
-1. `plaintext-scripts` in Woodpecker aktivieren, Timeout auf mehrere Stunden.
-2. Secrets am Repo anlegen: `wochenpatch_gh_token` (PR, Merge, Workflow-Dispatch in allen
-   Anwendungs-Repos), `pushover_app_token`, `pushover_user_key`.
-3. Cron `wochenpatch` anlegen (Sonntag).
-4. Erst jetzt `woodpecker-wochenpatch.yml.vorlage` nach `.woodpecker/wochenpatch.yml` kopieren.
-5. Ersten Lauf manuell im Modus `pr`. `ausrollen` nur mit Daniels Freigabe.
+1. `plaintext-scripts` in Woodpecker aktiviert, Timeout hoeher als die 120 min der Apps.
+2. Secrets am Repo, Ereignisse nur `cron` und `manual` (das Repo ist oeffentlich):
+   `mvn_deploy_token` (GitHub-PAT, Vault `github.mvn-deploy-pat (daniel-marthaler)`),
+   `woodpecker_token` (Vault `woodpecker.api-token`), `pushover_app_token` und
+   `pushover_user_key` (Vault `Pushover API (motionEye + plaintext-boot CI)`).
+3. Cron `wochenpatch`, `7 4 * * 0`, Zweig `master`, eingeschaltet.
+4. Erst danach `.woodpecker/wochenpatch.yml` mit den `from_secret`-Zeilen.
 
 ## Bekannte Grenzen
 
-- Der Deploy-Slot (Karte 413, Nextcloud Deck) wird nicht belegt; der Job arbeitet die Repos
-  strikt nacheinander ab und merged nur, wenn kein fremder PR offen ist.
+- Der Deploy-Slot (Karte 413, Nextcloud Deck) wird nicht belegt — der Job hat keinen Deck-Zugang.
+  Ersatz: vor jedem Merge wartet er, bis in keinem Deploy-Repo ein Woodpecker-Lauf auf `master`
+  offen ist, arbeitet die Repos strikt nacheinander ab und merged nur ohne fremden offenen PR.
+  Ein Agent, der den Slot haelt, aber noch nicht gemergt hat, bleibt damit unsichtbar.
+- Rotiert das GitHub-PAT, muss auch das Secret `mvn_deploy_token` an plaintext-scripts neu.
 - Majors bleiben liegen und stehen weiter im Renovate-Dashboard.
