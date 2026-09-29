@@ -45,6 +45,16 @@ root → (Paket-Repo abwarten) → app mit neuer root-Version → (Paket-Repo) �
 root- und app-Version → schuetu → iot (gemergt mit `[skip ci]`, **kein** Rollout) → ProjectMind
 (PR, Release-PR, Cargo.lock nachziehen, Tag). fwtool ist seit 23.09.2026 archiviert und fehlt.
 
+
+**Release fertig** heisst: der Woodpecker-push-Lauf des Commits, aus dem `Release version X`
+gebaut wurde, ist `success` (bei failure/killed Abbruch), UND ein Blatt-Jar liegt im Paket-Repo
+(root: `plaintext-root-watch`, app: `plaintext-z-kontakte`). Der Parent-POM allein reicht nicht:
+im Lauf 10/#7 (29.09.2026) lag `plaintext-root-parent` 1.732.0 schon oben, die Module noch nicht.
+
+**Wiederaufsetzbar:** Hat root (bzw. app) nichts zu patchen, weil ein frueherer Lauf es schon
+gemergt und released hat, wird es nicht erneut angefasst; die Kinder folgen der zuletzt
+veroeffentlichten Version, sobald deren Release fertig ist. Einfach denselben Lauf nochmals starten.
+
 ## Einrichtung in Woodpecker (erledigt 29.09.2026, Karte 1340)
 
 1. `plaintext-scripts` in Woodpecker aktiviert, Timeout hoeher als die 120 min der Apps.

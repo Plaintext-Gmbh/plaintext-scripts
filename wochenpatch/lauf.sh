@@ -49,13 +49,16 @@ bericht "Wochenpatch $WP_DATUM, Modus $MODUS, Teil $TEIL"
 git_zugang
 maven_einrichten
 
-# repo | Versionsadresse (leer = kein Rollout-Beleg) | ausrollen ja/nein
+# repo | Versionsadresse (leer = kein Rollout-Beleg) | ausrollen ja/nein | Blatt-Artefakt
+# Das Blatt-Artefakt (ein Jar, das die Kinder brauchen) belegt, dass ein Release VOLLSTAENDIG im
+# Paket-Repo liegt; der Parent-POM liegt frueher oben (Lauf 10/#7, 29.09.2026). Nur Repos, deren
+# Release andere Repos verwenden, haben eines — und nur sie reichen ihre Version weiter.
 REPOS="
-plaintext-root||ja
-plaintext-app|https://app.plaintext.ch/nosec/version|ja
-plaintext-guild|https://guild.plaintext.ch/nosec/version|ja
-plaintext-schuetu|https://schuelerturnier.plaintext.ch/nosec/version|ja
-plaintext-iot||nein
+plaintext-root||ja|plaintext-root-watch
+plaintext-app|https://app.plaintext.ch/nosec/version|ja|plaintext-z-kontakte
+plaintext-guild|https://guild.plaintext.ch/nosec/version|ja|
+plaintext-schuetu|https://schuelerturnier.plaintext.ch/nosec/version|ja|
+plaintext-iot||nein|
 "
 # fwtool: seit 23.09.2026 auf GitHub archiviert (read-only) — bewusst nicht in der Liste.
 
@@ -80,17 +83,45 @@ pruefe_lokal() {   # $1 = Verzeichnis, $2 = repo
       mvn -q -B -DskipTests -Dmaven.build.cache.enabled=false test-compile >&2 )
 }
 
+# Ein Release ist erst fertig, wenn der push-Lauf des Commits, aus dem er gebaut wurde, gruen
+# ist UND das Blatt-Artefakt im Paket-Repo liegt (Karte 1340, Ablauf 3: "Pipeline bis success
+# abwarten"). $1 repo  $2 Klonverzeichnis  $3 Version  $4 Blatt-Artefakt (leer = keines)
+release_fertig() {
+    local repo="$1" dir="$2" ver="$3" blatt="${4:-}" sha rc=0
+    sha="$(release_quelle "$dir" "$ver")" || die "$repo: kein Commit \"Release version $ver\" auf master"
+    warte_auf_pipeline "$repo" "$sha" 120 || rc=$?
+    case "$rc" in
+        0) ;;
+        3) die "$repo: Lauf zu Release $ver nicht pruefbar (Woodpecker-API)" ;;
+        *) die "$repo: Release $ver nicht fertig (Lauf zu ${sha:0:8} nicht gruen)" ;;
+    esac
+    if [ -n "$blatt" ]; then
+        warte_auf_artefakt ch/plaintext "$blatt" "$ver" jar || die "$repo: $blatt $ver nicht im Paket-Repo"
+    fi
+}
+
 # Ein Maven-Repo patchen, PR eroeffnen, im Modus "ausrollen" mergen und Release/Rollout abwarten.
-# Gibt die neue Release-Version auf stdout aus (leer, wenn nichts gemergt wurde).
-maven_repo() {   # $1 repo  $2 versions-url  $3 ausrollen  $4 root-version  $5 app-version
-    local repo="$1" url="$2" roll="$3" root="${4:-}" app="${5:-}" dir aenderungen owasp pr nr alt neu betreff
+# Gibt auf stdout die Version aus, der die Kinder folgen sollen: die neue Release-Version, oder —
+# wenn das Repo ein Blatt-Artefakt hat und nichts zu patchen ist — die zuletzt veroeffentlichte.
+# Letzteres macht den Lauf WIEDERAUFSETZBAR: ist root schon gepatcht und released (etwa weil ein
+# frueherer Lauf danach abbrach), wird root nicht erneut angefasst, und die Kinder bekommen die
+# vorhandene Version, sobald deren Release fertig ist.
+maven_repo() {   # $1 repo  $2 versions-url  $3 ausrollen  $4 root-version  $5 app-version  $6 Blatt
+    local repo="$1" url="$2" roll="$3" root="${4:-}" app="${5:-}" blatt="${6:-}" dir aenderungen owasp pr nr alt neu betreff
     dir="$(klone "$repo")"
     local optionen=()
     [ -n "$root" ] && optionen+=(--parent "$root")
     [ -n "$app" ] && optionen+=(--app "$app")
     aenderungen="$("$HIER/maven-patch.sh" "$dir" "${optionen[@]}")" || die "$repo: maven-patch.sh rot"
-    owasp="$("$HIER/owasp-tote-suppressionen.sh" "$dir")"
-    if git -C "$dir" diff --quiet; then bericht "$repo: nichts zu patchen"; return 0; fi
+    owasp="$("$HIER/owasp-tote-suppressionen.sh" "$dir")" || die "$repo: OWASP-Pruefung (test-compile + dependency:list) rot"
+    if git -C "$dir" diff --quiet; then
+        if [ -z "$blatt" ]; then bericht "$repo: nichts zu patchen"; return 0; fi
+        neu="$(release_version "$dir")"
+        [ -n "$neu" ] || die "$repo: nichts zu patchen und kein Release auf master gefunden"
+        release_fertig "$repo" "$dir" "$neu" "$blatt"
+        bericht "$repo: nichts zu patchen, Release $neu ist fertig — die Kinder folgen $neu"
+        echo "$neu"; return 0
+    fi
     pruefe_lokal "$dir" "$repo" || die "$repo: test-compile rot, kein PR"
     betreff="chore(deps): Wochenpatch $WP_DATUM"
     if [ "$roll" = nein ]; then betreff="$betreff [skip ci]"; fi
@@ -127,9 +158,10 @@ MSG
     gh pr merge "$nr" -R "$WP_ORG/$repo" --squash --delete-branch --subject "$betreff (#$nr)" >&2
     if [ "$roll" = nein ]; then bericht "$repo: gemergt ohne Rollout ([skip ci])"; return 0; fi
     for _ in $(seq 1 60); do
-        neu="$(release_version "$dir")"; [ -n "$neu" ] && [ "$neu" != "$alt" ] && break; sleep 30
+        neu="$(release_version "$dir")"; [ -n "$neu" ] && [ "$neu" != "$alt" ] && break; sleep "${WP_TAKT:-30}"
     done
     [ -n "$neu" ] && [ "$neu" != "$alt" ] || die "$repo: kein Release-Commit nach dem Merge"
+    release_fertig "$repo" "$dir" "$neu" "$blatt"
     if [ -n "$url" ]; then warte_auf_rollout "$url" "$neu" || die "$repo: $neu nicht live"; fi
     bericht "$repo: $alt -> $neu${url:+ (live belegt)}"
     echo "$neu"
@@ -201,21 +233,15 @@ fi
 
 ROOT_NEU=""; APP_NEU=""
 if [ "$TEIL" != projectmind ]; then
-    while IFS='|' read -r repo url roll; do
+    # Ein Kind zeigt erst auf eine Version, wenn release_fertig sie belegt hat (Lauf gruen + Blatt-Jar).
+    while IFS='|' read -r repo url roll blatt; do
         [ -n "$repo" ] || continue
         case "$repo" in
-            plaintext-root)  ROOT_NEU="$(maven_repo "$repo" "$url" "$roll")" ;;
-            plaintext-app)   APP_NEU="$(maven_repo "$repo" "$url" "$roll" "$ROOT_NEU")" ;;
-            plaintext-guild) maven_repo "$repo" "$url" "$roll" "$ROOT_NEU" "$APP_NEU" >/dev/null ;;
-            *)               maven_repo "$repo" "$url" "$roll" "$ROOT_NEU" >/dev/null ;;
+            plaintext-root)  ROOT_NEU="$(maven_repo "$repo" "$url" "$roll" "" "" "$blatt")" ;;
+            plaintext-app)   APP_NEU="$(maven_repo "$repo" "$url" "$roll" "$ROOT_NEU" "" "$blatt")" ;;
+            plaintext-guild) maven_repo "$repo" "$url" "$roll" "$ROOT_NEU" "$APP_NEU" "$blatt" >/dev/null ;;
+            *)               maven_repo "$repo" "$url" "$roll" "$ROOT_NEU" "" "$blatt" >/dev/null ;;
         esac
-        # Das Artefakt muss vollstaendig oben sein, bevor ein Kind darauf zeigt (deployAtEnd).
-        if [ "$repo" = plaintext-root ] && [ -n "$ROOT_NEU" ]; then
-            warte_auf_artefakt ch/plaintext plaintext-root-parent "$ROOT_NEU" || die "root $ROOT_NEU nicht im Paket-Repo"
-        fi
-        if [ "$repo" = plaintext-app ] && [ -n "$APP_NEU" ]; then
-            warte_auf_artefakt ch/plaintext plaintext-parent "$APP_NEU" || die "app $APP_NEU nicht im Paket-Repo"
-        fi
     done <<<"$REPOS"
 fi
 if [ "$TEIL" != maven ]; then projectmind; fi

@@ -97,28 +97,72 @@ pruefungen_befund() {   # $1 repo, $2 PR
 warte_auf_pruefungen() {
     local repo="$1" pr="$2" minuten="${3:-90}" ende stand
     ende=$(( $(date +%s) + minuten * 60 ))
-    sleep 60   # Woodpecker meldet die ersten Status erst nach dem Klonen
+    sleep "$(( ${WP_TAKT:-30} * 2 ))"   # Woodpecker meldet die ersten Status erst nach dem Klonen
     while [ "$(date +%s)" -lt "$ende" ]; do
         stand="$(gh pr checks "$pr" -R "$WP_ORG/$repo" 2>/dev/null | awk -F'\t' '{print $2}' || true)"
         if [ -n "$stand" ] && ! grep -q -E '^(pending|queued|in_progress)$' <<<"$stand"; then
             grep -q -E '^(fail|cancel)' <<<"$stand" && return 1
             return 0
         fi
-        sleep 30
+        sleep "${WP_TAKT:-30}"
     done
     return 2
 }
 
-# Wartet, bis eine Version im Paket-Repo vollstaendig abrufbar ist (deployAtEnd: erst dann
-# liegen ALLE Module oben). $1 = groupId-Pfad (ch/plaintext), $2 = artifactId, $3 = Version.
+# Wartet, bis ein Artefakt im Paket-Repo abrufbar ist. $1 = groupId-Pfad (ch/plaintext),
+# $2 = artifactId, $3 = Version, $4 = Endung (Vorgabe pom). ACHTUNG (Lauf 10/#7, 29.09.2026): der
+# Parent-POM liegt frueher oben als die Module — fuer "Release vollstaendig" ein BLATT-Jar pruefen
+# (release_fertig), nicht den Parent.
 warte_auf_artefakt() {
-    local pfad="$1" art="$2" ver="$3" url
-    url="${WP_MAVEN_URL:-https://maven.plaintext.ch/releases}/$pfad/$art/$ver/$art-$ver.pom"
-    for _ in $(seq 1 120); do
+    local pfad="$1" art="$2" ver="$3" endung="${4:-pom}" url
+    url="${WP_MAVEN_URL:-https://maven.plaintext.ch/releases}/$pfad/$art/$ver/$art-$ver.$endung"
+    for _ in $(seq 1 "${WP_ARTEFAKT_VERSUCHE:-120}"); do
         curl -fsS -A curl/8.0 -o /dev/null "$url" 2>/dev/null && return 0
-        sleep 30
+        sleep "${WP_TAKT:-30}"
     done
     return 1
+}
+
+# Woodpecker-Id eines Repos (stdout). Rueckgabe 3, wenn nicht pruefbar.
+woodpecker_id() {
+    [ -n "${WOODPECKER_TOKEN:-}" ] || return 3
+    curl -fsS -m 20 -A curl/8.0 -H "Authorization: Bearer $WOODPECKER_TOKEN" \
+        "$WP_WOODPECKER_URL/api/repos/lookup/$WP_ORG/$1" 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' 2>/dev/null || return 3
+}
+
+# Wartet auf den push-Lauf eines Commits auf master bis zum Ende. $1 repo, $2 Commit-SHA,
+# $3 Minuten (Vorgabe 90). 0 = success, 1 = failure/killed/error/declined, 2 = Zeitlimit,
+# 3 = nicht pruefbar. Der Release gilt erst als fertig, wenn DIESER Lauf gruen ist
+# (deployAtEnd laedt die Module erst am Schluss hoch; Lauf 10/#7 scheiterte genau daran).
+warte_auf_pipeline() {
+    local repo="$1" sha="$2" minuten="${3:-90}" id ende stand
+    id="$(woodpecker_id "$repo")" || { log "Woodpecker-API: $repo nicht auffindbar"; return 3; }
+    ende=$(( $(date +%s) + minuten * 60 ))
+    while :; do
+        stand="$(curl -fsS -m 20 -A curl/8.0 -H "Authorization: Bearer $WOODPECKER_TOKEN" \
+                 "$WP_WOODPECKER_URL/api/repos/$id/pipelines?page=1&perPage=30" 2>/dev/null \
+                 | python3 -c '
+import json,sys
+l=[p for p in json.load(sys.stdin) if p.get("commit")==sys.argv[1] and p.get("event")=="push"]
+print(l[0]["status"] if l else "fehlt")' "$sha" 2>/dev/null)" || stand="unlesbar"
+        case "$stand" in
+            success) return 0 ;;
+            failure|killed|error|declined) bericht "  $repo: Lauf zu ${sha:0:8} endet mit $stand"; return 1 ;;
+        esac
+        [ "$(date +%s)" -lt "$ende" ] || { bericht "  $repo: Lauf zu ${sha:0:8} nach $minuten min: $stand"; return 2; }
+        log "$repo: Lauf zu ${sha:0:8} ist $stand, warte"; sleep "${WP_TAKT:-30}"
+    done
+}
+
+# SHA des Commits, aus dem der Release X gebaut wurde: der Eltern-Commit von
+# "Release version X" (deploy.yml committet die Version auf den gebauten Stand).
+# $1 Klonverzeichnis (frisch gefetcht), $2 Version.
+release_quelle() {
+    local rc
+    rc="$(git -C "$1" log origin/master -30 --format='%H %s' | awk -v v="$2" '$2=="Release" && $3=="version" && $4==v {print $1; exit}')"
+    [ -n "$rc" ] || return 1
+    git -C "$1" rev-parse "$rc^"
 }
 
 # Wartet, bis /nosec/version die erwartete Version meldet. $1 = URL, $2 = Version.
@@ -127,7 +171,7 @@ warte_auf_rollout() {
     for _ in $(seq 1 80); do
         ist="$(curl -fsS -m 15 -A curl/8.0 "$url" 2>/dev/null | head -c 60 || true)"
         [ "$ist" = "$ver" ] && return 0
-        sleep 30
+        sleep "${WP_TAKT:-30}"
     done
     bericht "  Rollout nicht belegt: $url meldet '$ist', erwartet $ver"
     return 1
