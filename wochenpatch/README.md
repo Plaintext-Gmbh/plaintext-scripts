@@ -10,12 +10,23 @@ nicht dazu.
 |---|---|
 | `lauf.sh` | Ablauf ueber alle Repos, Modus `trocken` (Vorgabe), `pr` oder `ausrollen` |
 | `freigabe.sh` | Woodpecker: cron = `ausrollen`, manual nur mit Variable `wochenpatch` |
-| `maven-patch.sh` | Patch-Updates per versions-maven-plugin (nur dritte Stelle), optional root-/app-Version |
+| `maven-patch.sh` | Patch- und Minor-Updates per versions-maven-plugin (erste Stelle bleibt, Datums-/Kalenderversionen nie), optional root-/app-Version |
 | `owasp-tote-suppressionen.sh` | entfernt gepinnte OWASP-Suppressionen, deren Version nicht mehr auf dem Klassenpfad liegt |
 | `projectmind-patch.sh` | `cargo update` + `pnpm update` mit Tests |
 | `lib.sh` | Warten auf PR-Pruefungen, Paket-Repo, `/nosec/version`, laufende Deploys (Woodpecker-API) |
 | `../.woodpecker/wochenpatch.yml` | der Job (Cron `wochenpatch`, Sonntag 04:07 UTC) |
 | `../test-wochenpatch.sh` | Testharnisch ohne Netz (mvn-, gh-, curl-Attrappen, lokale Repos) |
+
+## Auswahl der Updates
+
+Entscheid Daniel, 29.09.2026: **Patch und Minor automatisch, Major nie.**
+
+- Maven: `allowMajorUpdates=false`, `allowMinorUpdates=true`, danach der majorwaechter in
+  `maven-patch.sh`: er nimmt jede Aenderung zurueck, deren erste Stelle springt oder deren Schema
+  nicht Zahl.Zahl[.Zahl] ist (reine Datumszahl wie `20240101`, Kalenderversion wie `2024.1.0`).
+  Vorabversionen (alpha, beta, RC, M, SNAPSHOT) sind ausgeschlossen.
+- ProjectMind: `cargo update` und `pnpm update` bleiben in den Bereichen aus `Cargo.toml` bzw.
+  `package.json` (`^`: Minor ab 1.0, bei 0.x nur Patch).
 
 ## Modi
 

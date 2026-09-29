@@ -7,7 +7,8 @@
 #      nicht auf dem Klassenpfad liegt — und laesst Eintraege mit vorhandener Version sowie
 #      offene regex-Bereiche stehen (Positiv- und Negativkontrolle, Fall vom 28.09.2026).
 #   3. maven-patch.sh meldet eine von der Attrappe geaenderte Version als "alt -> neu" und setzt
-#      mit --parent den plaintext-root-parent UND <plaintext-root.version>.
+#      mit --parent den plaintext-root-parent UND <plaintext-root.version>. Patch und Minor werden
+#      genommen, Major, Datums- und Kalenderversionen zurueckgenommen (Entscheid 29.09.2026).
 #   4. freigabe.sh: ein manueller Lauf ohne Variable tut nichts, cron heisst "ausrollen".
 #   5. deploy_laeuft_nicht erkennt einen laufenden master-Lauf (Positivkontrolle) und meldet
 #      "nicht pruefbar" ohne Token.
@@ -35,7 +36,10 @@ for a in "$@"; do
   case "$a" in
     -DoutputFile=*) f="${a#-DoutputFile=}"
        printf '   io.micrometer:micrometer-registry-prometheus:jar:1.17.1\n   org.eclipse.angus:angus-activation:jar:2.0.3\n' >> "$f" ;;
-    *update-properties) sed -i 's|<joda-time.version>2.14.3<|<joda-time.version>2.14.4<|' pom.xml ;;
+    -DallowM*) echo "$a" >> "${MVN_ARGS_LOG:-/dev/null}" ;;
+    *update-properties) sed -i -e 's|<joda-time.version>2.14.3<|<joda-time.version>2.14.4<|' \
+        -e 's|<minor.version>1.2.0<|<minor.version>1.3.0<|' -e 's|<major.version>3.1.0<|<major.version>4.0.0<|' \
+        -e 's|<datum.version>20240101<|<datum.version>20250101<|' -e 's|<kalender.version>2024.1.0<|<kalender.version>2024.2.0<|' pom.xml ;;
   esac
 done
 exit 0
@@ -82,14 +86,29 @@ cat > "$M/pom.xml" <<'XML'
     <properties>
         <plaintext-root.version>1.725.0</plaintext-root.version>
         <joda-time.version>2.14.3</joda-time.version>
+        <minor.version>1.2.0</minor.version>
+        <major.version>3.1.0</major.version>
+        <datum.version>20240101</datum.version>
+        <kalender.version>2024.1.0</kalender.version>
     </properties>
 </project>
 XML
 ( cd "$M" && git init -q && git add pom.xml && git -c user.name=t -c user.email=t@t commit -q -m init )
+export MVN_ARGS_LOG="$ARBEIT/mvn-args.log"
 aus="$("$HIER/wochenpatch/maven-patch.sh" "$M" --parent 1.726.0 2>/dev/null)"
+unset MVN_ARGS_LOG
 grep -q 'joda-time.version 2.14.3 -> 2.14.4' <<<"$aus" && ok "maven-patch meldet joda-time" || fail "maven-patch Ausgabe: '$aus'"
 grep -q '<version>1.726.0</version>' "$M/pom.xml" && ok "maven-patch setzt den Parent" || fail "Parent nicht gesetzt"
 grep -q '<plaintext-root.version>1.726.0<' "$M/pom.xml" && ok "maven-patch setzt plaintext-root.version" || fail "plaintext-root.version nicht gesetzt"
+grep -qx -- '-DallowMinorUpdates=true' "$ARBEIT/mvn-args.log" && grep -qx -- '-DallowMajorUpdates=false' "$ARBEIT/mvn-args.log" \
+    && ! grep -q -- '-DallowMinorUpdates=false' "$ARBEIT/mvn-args.log" \
+    && ok "maven-patch: Plugin mit Minor ja, Major nein" || fail "maven-patch Plugin-Schalter: $(sort -u "$ARBEIT/mvn-args.log" | tr '\n' ' ')"
+grep -q '<minor.version>1.3.0<' "$M/pom.xml" && grep -q 'minor.version 1.2.0 -> 1.3.0' <<<"$aus" \
+    && ok "maven-patch: Minor-Sprung genommen" || fail "maven-patch: Minor fehlt ('$aus')"
+grep -q '<major.version>3.1.0<' "$M/pom.xml" && ! grep -q 'major.version' <<<"$aus" \
+    && ok "maven-patch: Major-Sprung zurueckgenommen" || fail "maven-patch: Major durchgelassen"
+grep -q '<datum.version>20240101<' "$M/pom.xml" && ok "maven-patch: Datumsversion zurueckgenommen" || fail "maven-patch: Datumsversion durchgelassen"
+grep -q '<kalender.version>2024.1.0<' "$M/pom.xml" && ok "maven-patch: Kalenderversion zurueckgenommen" || fail "maven-patch: Kalenderversion durchgelassen"
 
 # 4. freigabe.sh
 f() { env -i PATH="$PATH" "$@" sh -c '. "$0"; echo "MODUS=$WOCHENPATCH_MODUS"' "$HIER/wochenpatch/freigabe.sh" 2>&1 | tail -1; }

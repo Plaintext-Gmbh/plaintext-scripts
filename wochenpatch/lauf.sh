@@ -21,7 +21,8 @@
 #   "ausrollen" hat Daniel am 29.09.2026 freigegeben (Karte 1340); der Sonntags-Cron faehrt ihn.
 #
 # LEITPLANKEN
-#   - Nur Patch-Spruenge (allowMinor=false), Majors bleiben dem Renovate-Dashboard.
+#   - Patch- und Minor-Spruenge (gleiche erste Stelle), Majors bleiben dem Renovate-Dashboard;
+#     Datums-/Kalenderversionen nie automatisch (Entscheid Daniel 29.09.2026, maven-patch.sh).
 #   - Abbruch bei der ersten roten Pruefung: der PR bleibt offen, nichts danach wird gemergt.
 #   - Kein Merge, solange im Repo ein fremder PR offen ist, der nicht von Renovate stammt.
 #   - Vor jedem Merge: kein offener Woodpecker-Lauf auf master in den Deploy-Repos (der
