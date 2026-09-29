@@ -49,11 +49,24 @@ GEMEINSAM=(-q -B -DgenerateBackupPoms=false -DallowMajorUpdates=false -DallowMin
 # gepatcht, das betroffene bleibt unveraendert und steht als UEBERSPRUNGEN in der Ausgabe (und
 # damit im PR und im Bericht). Die Ursache ("Caused by") geht nach stderr ins Job-Log.
 UEBERSPRUNGEN="$(mktemp)"; trap 'rm -f "$UEBERSPRUNGEN"' EXIT
+# Der Fehler wanderte zwischen den Laeufen (#4 z-wiki, #5 keiner, #7 z-einkaufslisten) — das
+# spricht fuer ein Nebenlaeufigkeitsproblem im Plugin (CompletionException), nicht fuer eine
+# bestimmte Abhaengigkeit. Deshalb bekommt jedes betroffene Modul einzeln (-pl) bis zu zwei
+# weitere Versuche; erst was dann noch scheitert, ist UEBERSPRUNGEN.
 plugin() {   # $1 Ziel, Rest: Optionen
-    local ziel="$1" log; shift
+    local ziel="$1" log module m versuch; shift
     log="$(mktemp)"
     mvn "${GEMEINSAM[@]}" --fail-never -e "$V:$ziel" "$@" > "$log" 2>&1 || true
-    grep -v '^\[ERROR\]\s*at \|^\s*at ' "$log" | grep -E '^\[ERROR\] Failed|Caused by' | head -6 >&2 || true
+    for versuch in 2 3; do
+        module="$(sed -n "s/.*Failed to execute goal [^ ]*:$ziel ([^)]*) on project \([^:]*\):.*/\1/p" "$log" | sort -u)"
+        [ -n "$module" ] || break
+        grep -v '^\[ERROR\]\s*at \|^\s*at ' "$log" | grep -E '^\[ERROR\] Failed|Caused by' | head -6 >&2 || true
+        : > "$log"
+        for m in $module; do
+            echo "$ziel: $m scheiterte, Versuch $versuch nur fuer dieses Modul" >&2
+            mvn "${GEMEINSAM[@]}" --fail-never -e "$V:$ziel" "$@" -pl ":$m" >> "$log" 2>&1 || true
+        done
+    done
     sed -n "s/.*Failed to execute goal [^ ]*:$ziel ([^)]*) on project \([^:]*\): \(.*\)/UEBERSPRUNGEN $ziel \1: \2/p" "$log" \
         | cut -c1-200 >> "$UEBERSPRUNGEN"
     rm -f "$log"
