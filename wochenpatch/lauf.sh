@@ -124,9 +124,13 @@ maven_repo() {   # $1 repo  $2 versions-url  $3 ausrollen  $4 root-version  $5 a
     fi
     pruefe_lokal "$dir" "$repo" || die "$repo: test-compile rot, kein PR"
     betreff="chore(deps): Wochenpatch $WP_DATUM"
-    if [ "$roll" = nein ]; then betreff="$betreff [skip ci]"; fi
+    # [skip ci] NUR im Squash-Betreff (merge_betreff), NIE in Commit-Nachricht oder PR-Titel: Woodpecker
+    # nimmt bei PR-Ereignissen den PR-Titel als Nachricht, GitHub die Commit-Nachricht. Mit dem Marker
+    # dort lief auf iot#261 keine CI, und warte_auf_pruefungen haette 120 min gewartet (Lauf 10/#12).
+    merge_betreff="$betreff"
+    if [ "$roll" = nein ]; then merge_betreff="$betreff [skip ci]"; fi
     if [ "$MODUS" = trocken ]; then
-        bericht "$repo: wuerde PR \"$betreff\" eroeffnen, test-compile gruen"
+        bericht "$repo: wuerde PR \"$betreff\" eroeffnen, Merge-Betreff \"$merge_betreff\", test-compile gruen"
         bericht "$(sed 's/^/  /' <<<"$aenderungen")"
         [ -z "$owasp" ] || bericht "  OWASP entfernt: $(tr '\n' ' ' <<<"$owasp")"
         bericht "  fremde offene PRs: $(fremde_prs "$repo"), letztes Release: $(release_version "$dir")${url:+, live: $(curl -fsS -m 15 -A curl/8.0 "$url" 2>/dev/null | head -c 40 || echo '?')}"
@@ -155,7 +159,7 @@ MSG
     [ "$(fremde_prs "$repo")" = 0 ] || die "$repo: fremder PR offen, kein Merge"
     warte_auf_deploy_ruhe 60 || die "$repo: Deploy-Lage unklar oder belegt, kein Merge"
     alt="$(release_version "$dir")"
-    gh pr merge "$nr" -R "$WP_ORG/$repo" --squash --delete-branch --subject "$betreff (#$nr)" >&2
+    gh pr merge "$nr" -R "$WP_ORG/$repo" --squash --delete-branch --subject "$merge_betreff (#$nr)" >&2
     if [ "$roll" = nein ]; then bericht "$repo: gemergt ohne Rollout ([skip ci])"; return 0; fi
     for _ in $(seq 1 60); do
         neu="$(release_version "$dir")"; [ -n "$neu" ] && [ "$neu" != "$alt" ] && break; sleep "${WP_TAKT:-30}"
