@@ -36,7 +36,8 @@ for a in "$@"; do
   case "$a" in
     -DoutputFile=*) f="${a#-DoutputFile=}"
        printf '   io.micrometer:micrometer-registry-prometheus:jar:1.17.1\n   org.eclipse.angus:angus-activation:jar:2.0.3\n' >> "$f" ;;
-    -DallowM*) echo "$a" >> "${MVN_ARGS_LOG:-/dev/null}" ;;
+    -DallowM*|--fail-never) echo "$a" >> "${MVN_ARGS_LOG:-/dev/null}" ;;
+    *use-latest-releases) [ "${MOCK_PLUGIN_FEHLER:-0}" = 1 ] && echo "[ERROR] Failed to execute goal org.codehaus.mojo:versions-maven-plugin:2.21.0:use-latest-releases (default-cli) on project plaintext-z-wiki: Execution default-cli failed: java.lang.ArrayIndexOutOfBoundsException: Index 1 out of bounds for length 0" ;;
     *update-properties) sed -i -e 's|<joda-time.version>2.14.3<|<joda-time.version>2.14.4<|' \
         -e 's|<minor.version>1.2.0<|<minor.version>1.3.0<|' -e 's|<major.version>3.1.0<|<major.version>4.0.0<|' \
         -e 's|<datum.version>20240101<|<datum.version>20250101<|' -e 's|<kalender.version>2024.1.0<|<kalender.version>2024.2.0<|' pom.xml ;;
@@ -107,6 +108,12 @@ grep -q '<minor.version>1.3.0<' "$M/pom.xml" && grep -q 'minor.version 1.2.0 -> 
     && ok "maven-patch: Minor-Sprung genommen" || fail "maven-patch: Minor fehlt ('$aus')"
 grep -q '<major.version>3.1.0<' "$M/pom.xml" && ! grep -q 'major.version' <<<"$aus" \
     && ok "maven-patch: Major-Sprung zurueckgenommen" || fail "maven-patch: Major durchgelassen"
+grep -qx -- '--fail-never' "$ARBEIT/mvn-args.log" && ok "maven-patch: Plugin mit --fail-never" || fail "maven-patch: ohne --fail-never"
+M2="$ARBEIT/mrepo2"; cp -r "$M" "$M2"; ( cd "$M2" && git checkout -q . )
+aus2="$(MOCK_PLUGIN_FEHLER=1 "$HIER/wochenpatch/maven-patch.sh" "$M2" 2>/dev/null)"; rc2=$?
+[ "$rc2" = 0 ] && grep -q '^UEBERSPRUNGEN use-latest-releases plaintext-z-wiki: .*ArrayIndexOutOfBounds' <<<"$aus2" \
+    && grep -q 'joda-time.version 2.14.3 -> 2.14.4' <<<"$aus2" \
+    && ok "maven-patch: Plugin-Fehler in einem Modul gemeldet, Rest gepatcht" || fail "maven-patch Plugin-Fehler: rc=$rc2 '$aus2'"
 grep -q '<datum.version>20240101<' "$M/pom.xml" && ok "maven-patch: Datumsversion zurueckgenommen" || fail "maven-patch: Datumsversion durchgelassen"
 grep -q '<kalender.version>2024.1.0<' "$M/pom.xml" && ok "maven-patch: Kalenderversion zurueckgenommen" || fail "maven-patch: Kalenderversion durchgelassen"
 

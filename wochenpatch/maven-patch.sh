@@ -42,10 +42,26 @@ AUSNAHMEN='plaintext-root.version,plaintext-app.version,plaintext-root-interface
 GEMEINSAM=(-q -B -DgenerateBackupPoms=false -DallowMajorUpdates=false -DallowMinorUpdates=true
            "-Dmaven.version.ignore=.*-(alpha|beta|rc|RC|M|milestone)[0-9.-]*,.*-SNAPSHOT")
 
+# Ein Plugin-Fehler in EINEM Modul soll nicht den ganzen Wochenpatch kippen: gemessen am
+# 29.09.2026 (Woodpecker 10/#4) brach use-latest-releases mit allowMinorUpdates=true in
+# plaintext-app/plaintext-z-wiki mit "ArrayIndexOutOfBoundsException: Index 1 out of bounds for
+# length 0" ab — lokal nicht nachstellbar. Deshalb --fail-never: die uebrigen Module werden
+# gepatcht, das betroffene bleibt unveraendert und steht als UEBERSPRUNGEN in der Ausgabe (und
+# damit im PR und im Bericht). Die Ursache ("Caused by") geht nach stderr ins Job-Log.
+UEBERSPRUNGEN="$(mktemp)"; trap 'rm -f "$UEBERSPRUNGEN"' EXIT
+plugin() {   # $1 Ziel, Rest: Optionen
+    local ziel="$1" log; shift
+    log="$(mktemp)"
+    mvn "${GEMEINSAM[@]}" --fail-never -e "$V:$ziel" "$@" > "$log" 2>&1 || true
+    grep -v '^\[ERROR\]\s*at \|^\s*at ' "$log" | grep -E '^\[ERROR\] Failed|Caused by' | head -6 >&2 || true
+    sed -n "s/.*Failed to execute goal [^ ]*:$ziel ([^)]*) on project \([^:]*\): \(.*\)/UEBERSPRUNGEN $ziel \1: \2/p" "$log" \
+        | cut -c1-200 >> "$UEBERSPRUNGEN"
+    rm -f "$log"
+}
 for runde in 1 2 3; do
     vorher="$(git diff --stat | tail -1)"
-    mvn "${GEMEINSAM[@]}" "$V:update-properties" "-DexcludeProperties=$AUSNAHMEN" >&2
-    mvn "${GEMEINSAM[@]}" "$V:use-latest-releases" '-Dexcludes=ch.plaintext:*' >&2
+    plugin update-properties "-DexcludeProperties=$AUSNAHMEN"
+    plugin use-latest-releases '-Dexcludes=ch.plaintext:*'
     [ "$(git diff --stat | tail -1)" = "$vorher" ] && break
     echo "Runde $runde hat etwas geaendert, noch eine" >&2
 done
@@ -104,12 +120,19 @@ if [ -n "$APP" ]; then
 fi
 
 # Zusammenfassung: alte -> neue Version je geaenderter Zeile
-git diff -U0 -- '*pom.xml' .mvn/extensions.xml 2>/dev/null | python3 -c '
+# Bei <version>-Zeilen (use-latest-releases) steht statt "version" die artifactId davor, die der
+# Kontext der Aenderung zeigt.
+git diff -U3 -- '*pom.xml' .mvn/extensions.xml 2>/dev/null | python3 -c '
 import re,sys
-alt={}
+alt={}; art=None
 for z in sys.stdin:
+    a=re.match(r"^[ +-]\s*<artifactId>([^<]+)</artifactId>",z)
+    if a: art=a.group(1)
+    if z.startswith("@@"): art=None
     m=re.match(r"^([-+])\s*<([A-Za-z0-9._-]+)>([^<]+)</\2>",z)
-    if not m: continue
-    if m.group(1)=="-": alt[m.group(2)]=m.group(3)
-    elif m.group(2) in alt: print(f"{m.group(2)} {alt.pop(m.group(2))} -> {m.group(3)}")
+    if not m or m.group(2)=="artifactId": continue
+    name=m.group(2) if m.group(2)!="version" or not art else art
+    if m.group(1)=="-": alt[name]=m.group(3)
+    elif name in alt: print(f"{name} {alt.pop(name)} -> {m.group(3)}")
 ' | sort -u
+sort -u "$UEBERSPRUNGEN"

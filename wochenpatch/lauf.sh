@@ -88,7 +88,7 @@ maven_repo() {   # $1 repo  $2 versions-url  $3 ausrollen  $4 root-version  $5 a
     local optionen=()
     [ -n "$root" ] && optionen+=(--parent "$root")
     [ -n "$app" ] && optionen+=(--app "$app")
-    aenderungen="$("$HIER/maven-patch.sh" "$dir" "${optionen[@]}")"
+    aenderungen="$("$HIER/maven-patch.sh" "$dir" "${optionen[@]}")" || die "$repo: maven-patch.sh rot"
     owasp="$("$HIER/owasp-tote-suppressionen.sh" "$dir")"
     if git -C "$dir" diff --quiet; then bericht "$repo: nichts zu patchen"; return 0; fi
     pruefe_lokal "$dir" "$repo" || die "$repo: test-compile rot, kein PR"
