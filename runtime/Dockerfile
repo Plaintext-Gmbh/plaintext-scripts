@@ -26,11 +26,10 @@ FROM eclipse-temurin:25.0.4_7-jre-alpine@sha256:3137541deb3cac6626b5d9a4a2187bc0
 # bash + wget für Healthcheck/Entrypoint
 RUN apk add --no-cache bash wget
 
-# Karte 1386 (Entscheid Daniel 01.10.2026, «libvips ins Image»): Vorschaubilder des Fotomoduls.
-# vipsthumbnail liest HEIC (iPhone, ein Drittel der Fotos auf dem Ugreen-Share), JPEG, PNG, WebP
-# und AVIF, dreht nach EXIF und dekodiert verkleinernd. Nur ein Programm im PATH — die Apps rufen
-# es nur auf, wenn es vorhanden ist (VipsBildWandler), ohne es laufen sie unveraendert.
-RUN apk add --no-cache vips-tools vips-heif
+# Karte 1403 (Daniel 02.10.2026: lieber eigene Dienst-Container als ein erweitertes Base-Image):
+# libvips (vips-tools, vips-heif, Karte 1386) ist wieder draussen. Die Vorschaubilder des Fotomoduls
+# rechnet der Fotos-Sidecar (plaintext-sidecar-fotos, Faehigkeit bild.vorschau); faellt er aus,
+# rechnet ImageIO JPEG/PNG, HEIC dann nicht. Dieses Image bleibt app-agnostisch.
 
 # App-User mit fixer UID/GID passend zu den NAS-Volume-Rechten
 RUN addgroup -g 1000 appgroup && adduser -u 1000 -G appgroup -s /bin/sh -D appuser
