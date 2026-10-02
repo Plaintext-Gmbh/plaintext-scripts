@@ -1,0 +1,78 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Sidecar-Image bauen und in die NAS-Registry pushen (Karte 1401, Epic 1399)
+#
+#  VORLAGE. In ein Sidecar-Repo als .woodpecker/image.yml kopieren, nichts anpassen: der
+#  Image-Name ist der Repo-Name. Diese Datei liegt bewusst NICHT unter .woodpecker/ und wird
+#  in plaintext-scripts selbst nie ausgefuehrt. Laufendes Beispiel: plaintext-sidecar-beispiel.
+#  Anleitung: woodpecker/README.md.
+#
+#    pull_request          nur bauen (kein Secret, kein Push)
+#    push auf master/main  bauen, pushen als  127.0.0.1:6666/<repo>:<commit-sha>  und  :latest
+#    manual auf master     wie push
+#
+#  WIE DAS GEHT: der Step spricht ueber /var/run/docker.sock mit dem Docker-Daemon des NAS.
+#  Gebaut und gepusht wird also vom Host-Daemon, und fuer den ist 127.0.0.1:6666 die
+#  Registry auf dem NAS selbst. Loopback gilt jedem Daemon als "insecure registry", es
+#  braucht weder TLS noch eine Aenderung der Daemon-Konfiguration.
+#
+#  VORAUSSETZUNGEN (einmalig je Repo, sonst startet die Pipeline nicht):
+#    1. Repo in Woodpecker aktiviert.
+#    2. Trusted "volumes" am Repo (Settings -> Project -> Trusted), sonst darf der Step den
+#       Socket nicht einhaengen. Das ist Root auf dem NAS fuer jeden, der in das Repo pushen
+#       darf. Deshalb nur fuer private Repos der Org und nur fuer diesen Zweck.
+#    3. Die Org-Secrets nas_registry_user / nas_registry_password gibt es (seit 02.10.2026,
+#       Org Plaintext-Gmbh, nur fuer push und manual). Fehlt ein Secret, startet Woodpecker die
+#       Pipeline gar nicht, ohne Fehlermeldung.
+#
+#  Shell-Variablen stehen mit doppeltem Dollar ($$): Woodpecker ersetzt jede Variable in
+#  Dollar-Klammer-Schreibweise schon beim Einlesen der Datei, AUCH IN KOMMENTAREN. Die CI-
+#  Variablen (CI_COMMIT_SHA, CI_REPO_NAME) soll er ersetzen, die eigenen nicht. Ein Ausdruck,
+#  der kein gueltiger Variablenname ist, laesst die ganze Pipeline mit "unable to parse
+#  variable name" scheitern, ohne einen einzigen Schritt (gemessen 02.10.2026).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+when:
+  - event: pull_request
+  - event: push
+    branch: [master, main]
+  - event: manual
+    branch: [master, main]
+
+steps:
+  bauen:
+    image: docker:29.6.2-cli@sha256:be132a9f282288de4afaf63379dff75711fda0147c6b72a9df44e51841402144
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+      - docker build --pull --label "org.opencontainers.image.revision=${CI_COMMIT_SHA}" -t "plaintext-ci/${CI_REPO_NAME}:pr-${CI_COMMIT_SHA}" .
+      # Nur geprueft, nicht behalten: der Daemon des NAS ist kein Ablageplatz.
+      - docker image rm "plaintext-ci/${CI_REPO_NAME}:pr-${CI_COMMIT_SHA}"
+    when:
+      - event: pull_request
+
+  bauen-und-pushen:
+    image: docker:29.6.2-cli@sha256:be132a9f282288de4afaf63379dff75711fda0147c6b72a9df44e51841402144
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      REGISTRY: 127.0.0.1:6666
+      REGISTRY_USER:
+        from_secret: nas_registry_user
+      REGISTRY_PASSWORD:
+        from_secret: nas_registry_password
+    commands:
+      - IMAGE="$${REGISTRY}/${CI_REPO_NAME}"
+      # Das Login landet in /root/.docker/config.json DIESES Step-Containers und verschwindet
+      # mit ihm. Der Daemon bekommt die Anmeldung je Push vom Client mitgeschickt.
+      - printf '%s' "$${REGISTRY_PASSWORD}" | docker login "$${REGISTRY}" -u "$${REGISTRY_USER}" --password-stdin
+      - docker build --pull --label "org.opencontainers.image.revision=${CI_COMMIT_SHA}" --label "org.opencontainers.image.source=${CI_REPO_URL}" -t "$${IMAGE}:${CI_COMMIT_SHA}" -t "$${IMAGE}:latest" .
+      - docker push "$${IMAGE}:${CI_COMMIT_SHA}"
+      - docker push "$${IMAGE}:latest"
+      # Den SHA-Tag lokal wieder loesen, sonst sammelt der NAS-Daemon je Commit ein Image.
+      # :latest bleibt, das ist genau das, was ein Compose-Projekt als Naechstes zieht.
+      - docker image rm "$${IMAGE}:${CI_COMMIT_SHA}"
+      - docker logout "$${REGISTRY}"
+      - echo "Gepusht - $${IMAGE}:${CI_COMMIT_SHA} und $${IMAGE}:latest"
+    when:
+      - event: [push, manual]
+        branch: [master, main]
