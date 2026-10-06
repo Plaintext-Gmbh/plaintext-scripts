@@ -14,6 +14,10 @@
 #      "nicht pruefbar" ohne Token.
 #   6. lauf.sh im Modus "trocken" gegen lokale Repos (gh/curl-Attrappen): Bericht je Repo, KEIN
 #      Push, KEIN PR, KEIN Merge — Gegenprobe: derselbe Aufbau im Modus "pr" pusht und eroeffnet.
+#   7./8. Release erst mit gruenem Lauf; Wiederaufsetzen nach einem Abbruch.
+#   9. Haertung (Karte 1419): Vorpruefung aller Repos VOR dem root-Merge (fremder PR -> Abbruch ohne
+#      jede Aenderung, Gegenprobe: ohne fremden PR wird root gemergt), Auto-Bump-PRs geschlossen,
+#      gh-Fehler = Abbruch, Pushover mit Abbruchgrund vorn, gekuerzt, Versand im Log belegt.
 #
 # Aufruf:  ./test-wochenpatch.sh
 set -u
@@ -134,9 +138,13 @@ f() { env -i PATH="$PATH" "$@" sh -c '. "$0"; echo "MODUS=$WOCHENPATCH_MODUS"' "
 cat > "$ARBEIT/bin/gh" <<'MOCK'
 #!/usr/bin/env bash
 echo "gh $*" >> "$GH_LOG"
+repo=""; vor=""; for a in "$@"; do [ "$vor" = -R ] && repo="${a#*/}"; vor="$a"; done
 case "$1 $2" in
-  "pr list") echo 0 ;;
+  # offene PRs je Repo aus $MOCK_PRS/<repo>, Zeilen "<nr> <zweig>" (wie lauf.sh sie per --jq liest)
+  "pr list") [ "${MOCK_GH_FEHLER:-0}" = 1 ] && exit 1
+             if [ -n "${MOCK_PRS:-}" ] && [ -f "$MOCK_PRS/$repo" ]; then cat "$MOCK_PRS/$repo"; fi ;;
   "pr create") echo "https://github.com/x/y/pull/7" ;;
+  "pr checks") printf 'ci/woodpecker/pr/build\tpass\t1m\thttps://ci.example/1\n' ;;
 esac
 exit 0
 MOCK
@@ -226,11 +234,87 @@ grep -q 'plaintext-root: nichts zu patchen, Release 1.732.0 ist fertig' "$ARBEIT
 [ "$(grep -c 'plaintext-root.version 1.731.0 -> 1.732.0' "$ARBEIT/bericht-weiter.txt")" = 4 ] \
     && ok "wiederaufsetzen: alle vier Kinder folgen 1.732.0" || fail "wiederaufsetzen: Kinder folgen nicht ($(grep -c 1.732.0 "$ARBEIT/bericht-weiter.txt"))"
 lauf2 rot MOCK_PIPE_COMMIT="$QUELL_SHA" MOCK_PIPE_STATUS=failure && fail "wiederaufsetzen: roter root-Lauf nicht erkannt" \
-    || { grep -q 'ABBRUCH: plaintext-root: Release 1.732.0 nicht fertig' "$ARBEIT/bericht-rot.txt" && ! grep -q 'plaintext-app' "$ARBEIT/bericht-rot.txt" \
+    || { grep -q 'ABBRUCH: plaintext-root: Release 1.732.0 nicht fertig' "$ARBEIT/bericht-rot.txt" && ! grep -q '^plaintext-app' "$ARBEIT/bericht-rot.txt" \
          && ok "wiederaufsetzen: roter root-Lauf -> Abbruch vor den Kindern" || fail "wiederaufsetzen rot: $(tail -2 "$ARBEIT/bericht-rot.txt")"; }
 lauf2 blatt MOCK_PIPE_COMMIT="$QUELL_SHA" MOCK_ARTEFAKT=0 && fail "wiederaufsetzen: fehlendes Blatt-Jar nicht erkannt" \
     || { grep -q 'ABBRUCH: plaintext-root: plaintext-root-watch 1.732.0 nicht im Paket-Repo' "$ARBEIT/bericht-blatt.txt" \
          && ok "wiederaufsetzen: fehlendes Blatt-Jar -> Abbruch" || fail "wiederaufsetzen blatt: $(tail -2 "$ARBEIT/bericht-blatt.txt")"; }
+
+# 9. Haertung Karte 1419: Vorpruefung vor root, Auto-Bump-PRs, Pushover-Beleg
+# Pushover-Attrappe: schreibt Titel und Text in eine Datei, Rueckgabe aus MOCK_PUSHOVER_RC.
+cat > "$ARBEIT/bin/pushover-attrappe" <<'MOCK'
+#!/usr/bin/env bash
+t=""; while getopts ":t:u:U:" o; do [ "$o" = t ] && t="$OPTARG"; done; shift $((OPTIND - 1))
+printf 'TITEL %s\n%s\n' "$t" "$*" > "$PUSHOVER_LOG"
+exit "${MOCK_PUSHOVER_RC:-0}"
+MOCK
+chmod +x "$ARBEIT/bin/pushover-attrappe"
+export PUSHOVER_LOG="$ARBEIT/pushover.log"
+neue_quelle() {   # $1 Verzeichnis: frische Bare-Repos aus den Arbeitskopien von Abschnitt 6
+    mkdir -p "$1"; for r in plaintext-root plaintext-app plaintext-guild plaintext-schuetu plaintext-iot; do
+        git clone -q --bare "$ARBEIT/w-$r" "$1/$r.git"; done
+}
+PRS="$ARBEIT/prs"; mkdir -p "$PRS"
+lauf3() {   # $1 Kennung, $2 Modus, Rest: Umgebung
+    local k="$1" m="$2"; shift 2
+    : > "$GH_LOG"; : > "$PUSHOVER_LOG"; neue_quelle "$ARBEIT/q-$k"
+    env WOCHENPATCH_MODUS="$m" WOCHENPATCH_TEIL=maven WP_GIT_BASIS="$ARBEIT/q-$k" WOODPECKER_TOKEN=x \
+        WP_BERICHT="$ARBEIT/bericht-$k.txt" WP_DATUM=2026-10-04 WOCHENPATCH_ARBEIT="$ARBEIT/klon-$k" \
+        WP_PUSHOVER_SKRIPT="$ARBEIT/bin/pushover-attrappe" PUSHOVER_APP_TOKEN=a PUSHOVER_USER_KEY=u \
+        MOCK_PRS="$PRS" GH_TOKEN='' CI='' "$@" "$HIER/wochenpatch/lauf.sh" >/dev/null 2>"$ARBEIT/lauf-$k.err"
+}
+echo "77 feature/karte-1412" > "$PRS/plaintext-app"
+echo "408 chore/root-autobump" > "$PRS/plaintext-guild"
+echo "12 renovate/joda-time" > "$PRS/plaintext-schuetu"
+
+# 9a. trocken: fremder PR und Auto-Bump nur berichtet, nichts geschlossen
+lauf3 v-trocken trocken && ok "vorpruefung trocken: Lauf endet mit 0" || fail "vorpruefung trocken: rot ($(tail -2 "$ARBEIT/lauf-v-trocken.err"))"
+B="$ARBEIT/bericht-v-trocken.txt"
+grep -q 'Vorpruefung: plaintext-app: fremde PRs offen: #77 feature/karte-1412' "$B" && ok "vorpruefung trocken: fremder PR mit Nummer berichtet" || fail "vorpruefung trocken: fremder PR fehlt im Bericht"
+grep -q 'plaintext-guild: Auto-Bump-PR #408 wuerde geschlossen' "$B" && ok "vorpruefung trocken: Auto-Bump berichtet" || fail "vorpruefung trocken: Auto-Bump fehlt"
+grep -q 'schuetu.*fremde PRs offen' "$B" && fail "vorpruefung: Renovate-PR als fremd gezaehlt" || ok "vorpruefung: Renovate-PR nicht fremd"
+grep -q 'gh pr close' "$GH_LOG" && fail "vorpruefung trocken: PR geschlossen" || ok "vorpruefung trocken: nichts geschlossen"
+
+# 9b. ausrollen mit fremdem PR: Abbruch VOR root — kein Push, kein PR, kein Merge, nichts geschlossen
+lauf3 v-block ausrollen && fail "vorpruefung ausrollen: fremder PR nicht erkannt" || ok "vorpruefung ausrollen: Lauf endet rot"
+B="$ARBEIT/bericht-v-block.txt"
+grep -q 'ABBRUCH: Vorpruefung: fremde PRs offen in plaintext-app (#77 feature/karte-1412) — nichts gemergt' "$B" \
+    && ok "vorpruefung ausrollen: Abbruchgrund nennt Repo und PR" || fail "vorpruefung ausrollen: $(grep ABBRUCH "$B")"
+grep -q -E 'gh pr (create|merge|close)' "$GH_LOG" && fail "vorpruefung ausrollen: gh schreibt ($(grep -E 'create|merge|close' "$GH_LOG" | head -1))" || ok "vorpruefung ausrollen: kein PR, kein Merge, nichts geschlossen"
+[ -z "$(git -C "$ARBEIT/q-v-block/plaintext-root.git" branch --list 'wochenpatch/*')" ] && ok "vorpruefung ausrollen: root nicht gepusht" || fail "vorpruefung ausrollen: root gepusht"
+grep -q '^Liegengeblieben: plaintext-root plaintext-app plaintext-guild plaintext-schuetu plaintext-iot$' "$B" && ok "vorpruefung ausrollen: alle Repos liegengeblieben" || fail "vorpruefung ausrollen: Liegengeblieben: $(grep Liegen "$B")"
+sed -n 1p "$PUSHOVER_LOG" | grep -q 'TITEL Wochenpatch 2026-10-04: ABGEBROCHEN' && sed -n 2p "$PUSHOVER_LOG" | grep -q '^ABBRUCH: Vorpruefung' \
+    && ok "pushover: Abbruchgrund in der ersten Zeile" || fail "pushover: $(head -2 "$PUSHOVER_LOG")"
+grep -q 'Pushover gesendet (ABGEBROCHEN' "$ARBEIT/lauf-v-block.err" && ok "pushover: Versand im Log belegt" || fail "pushover: kein Beleg im Log"
+
+# 9c. gh nicht lesbar: ebenfalls Abbruch vor root, statt "0 fremde PRs"
+lauf3 v-gh ausrollen MOCK_GH_FEHLER=1 && fail "vorpruefung: gh-Fehler durchgelassen" \
+    || { grep -q 'ABBRUCH: Vorpruefung: plaintext-root: offene PRs nicht lesbar' "$ARBEIT/bericht-v-gh.txt" && ! grep -q 'gh pr create' "$GH_LOG" \
+         && ok "vorpruefung: gh-Fehler -> Abbruch ohne Aenderung" || fail "vorpruefung gh: $(grep ABBRUCH "$ARBEIT/bericht-v-gh.txt")"; }
+
+# 9d. Gegenprobe: nur Auto-Bump und Renovate offen -> Vorpruefung gruen, Auto-Bump geschlossen, root wird
+#     gemergt. Danach endet der Lauf, weil die Attrappe keinen Release-Commit erzeugt — ab root liegt alles.
+: > "$PRS/plaintext-app"
+lauf3 v-frei ausrollen && fail "gegenprobe: Lauf ohne Release-Commit gruen" || true
+B="$ARBEIT/bericht-v-frei.txt"
+grep -q 'Vorpruefung: keine fremden PRs offen' "$B" && ok "gegenprobe: Vorpruefung gruen" || fail "gegenprobe: Vorpruefung $(grep -m1 Vorpruefung "$B")"
+grep -q 'gh pr close 408 -R Plaintext-Gmbh/plaintext-guild' "$GH_LOG" && grep -q 'plaintext-guild: Auto-Bump-PR #408 geschlossen' "$B" \
+    && ok "gegenprobe: Auto-Bump-PR geschlossen" || fail "gegenprobe: Auto-Bump nicht geschlossen ($(grep close "$GH_LOG"))"
+grep -q 'gh pr merge 7 -R Plaintext-Gmbh/plaintext-root' "$GH_LOG" && ok "gegenprobe: root gemergt" || fail "gegenprobe: root nicht gemergt ($(tail -2 "$B"))"
+grep -q 'ABBRUCH: plaintext-root: kein Release-Commit nach dem Merge' "$B" && grep -q '^Liegengeblieben: plaintext-root plaintext-app' "$B" \
+    && ok "gegenprobe: Abbruch in root nennt die liegengebliebenen Repos" || fail "gegenprobe: $(grep -E 'ABBRUCH|Liegen' "$B")"
+
+# 9e. Pushover-Beleg: ohne Token bzw. bei Versandfehler kein stilles Ueberspringen
+lauf3 p-token ausrollen PUSHOVER_APP_TOKEN=; :
+grep -q 'FEHLER Pushover: PUSHOVER_APP_TOKEN oder PUSHOVER_USER_KEY fehlt' "$ARBEIT/lauf-p-token.err" && ok "pushover: fehlendes Token als FEHLER im Log" || fail "pushover: fehlendes Token still"
+lauf3 p-rc ausrollen MOCK_PUSHOVER_RC=3; :
+grep -q 'FEHLER Pushover: rc=3' "$ARBEIT/lauf-p-rc.err" && ok "pushover: Versandfehler mit rc im Log" || fail "pushover: Versandfehler still"
+# lange Berichte: Abbruchgrund bleibt vorn, Text unter 1024 Zeichen
+for i in $(seq 1 60); do echo "$((900 + i)) feature/lang-$i"; done > "$PRS/plaintext-iot"
+lauf3 p-lang ausrollen
+[ "$(tail -n +2 "$PUSHOVER_LOG" | wc -m)" -le 1024 ] && sed -n 2p "$PUSHOVER_LOG" | grep -q '^ABBRUCH:' && grep -q 'gekuerzt' "$PUSHOVER_LOG" \
+    && ok "pushover: langer Bericht gekuerzt, Abbruch vorn" || fail "pushover lang: $(tail -n +2 "$PUSHOVER_LOG" | wc -m) Zeichen"
+: > "$PRS/plaintext-iot"
 
 echo; [ "$FEHLER" = 0 ] && echo "ALLE TESTS GRUEN" || echo "$FEHLER TEST(S) ROT"
 exit "$FEHLER"

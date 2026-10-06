@@ -72,9 +72,69 @@ klone() {   # $1 = repo
     echo "$ziel"
 }
 
-fremde_prs() {   # offene PRs, die weder von Renovate noch von diesem Lauf stammen
-    gh pr list -R "$WP_ORG/$1" --state open --json headRefName \
-        --jq '[.[] | select((.headRefName|startswith("renovate/")|not) and (.headRefName|startswith("wochenpatch/")|not))] | length'
+offene_prs() {   # $1 repo -> je offenem PR eine Zeile "<nr> <zweig>"; Rueckgabe != 0, wenn gh scheitert
+    gh pr list -R "$WP_ORG/$1" --state open --limit 100 --json number,headRefName \
+        --jq '.[] | "\(.number) \(.headRefName)"'
+}
+
+# Fremd ist ein offener PR, der weder von Renovate noch von einem Wochenpatch noch vom Auto-Bump
+# stammt. Auto-Bump-PRs (chore/root-autobump) setzen dieselbe Root-Version wie dieser Lauf und
+# werden geschlossen statt den Lauf anzuhalten (Entscheid Daniel 04.10.2026, Karte 1419).
+fremde_pr_liste() {   # $1 repo -> je fremdem PR "#<nr> <zweig>"
+    local alle nr zweig
+    alle="$(offene_prs "$1")" || return 1
+    while read -r nr zweig; do
+        [ -n "$nr" ] || continue
+        case "$zweig" in renovate/*|wochenpatch/*|chore/root-autobump*) ;; *) echo "#$nr $zweig" ;; esac
+    done <<<"$alle"
+}
+
+# Bricht ab, wenn im Repo ein fremder PR offen ist — und nennt ihn. Ein gh-Fehler zaehlt als
+# "nicht pruefbar" und haelt den Merge ebenso an (vorher: gh-Fehler = leere Zahl = Abbruch ohne Grund).
+pruefe_fremde() {   # $1 repo  $2 Zusatz fuer die Meldung
+    local liste
+    liste="$(fremde_pr_liste "$1")" || die "$1: offene PRs nicht lesbar (gh), kein Merge"
+    [ -z "$liste" ] || die "$1: fremde PRs offen ($(tr '\n' ' ' <<<"$liste" | sed 's/ $//'))${2:+, $2}"
+}
+
+autobumps_schliessen() {   # $1 repo — im Modus ausrollen schliessen, sonst nur berichten
+    local alle nr zweig
+    alle="$(offene_prs "$1")" || die "$1: offene PRs nicht lesbar (gh)"
+    while read -r nr zweig; do
+        case "$zweig" in chore/root-autobump*) ;; *) continue ;; esac
+        if [ "$MODUS" = ausrollen ]; then
+            gh pr close "$nr" -R "$WP_ORG/$1" --comment "Überholt durch den Wochenpatch $WP_DATUM: er setzt dieselbe plaintext-root-Version (Karte 1419)." >&2 \
+                || die "$1: Auto-Bump-PR #$nr liess sich nicht schliessen"
+            bericht "$1: Auto-Bump-PR #$nr geschlossen (überholt)"
+        else
+            bericht "$1: Auto-Bump-PR #$nr wuerde geschlossen (überholt)"
+        fi
+    done <<<"$alle"
+}
+
+# Vorpruefung (Entscheid Daniel 04.10.2026, Karte 1419): VOR dem root-Merge muessen alle Repos
+# mergebar sein. Am 04.10. (Lauf 10/#23) war root schon released, als app an fremden PRs scheiterte.
+# Im Modus ausrollen bricht ein fremder PR oder eine unklare Deploy-Lage hier ab, bevor irgendetwas
+# veraendert ist; in trocken und pr steht der Befund nur im Bericht.
+vorpruefung() {
+    local repo url roll blatt liste blockiert=""
+    while IFS='|' read -r repo url roll blatt; do
+        [ -n "$repo" ] || continue
+        liste="$(fremde_pr_liste "$repo")" || die "Vorpruefung: $repo: offene PRs nicht lesbar (gh), nichts veraendert"
+        if [ -n "$liste" ]; then
+            blockiert="$blockiert $repo ($(tr '\n' ' ' <<<"$liste" | sed 's/ $//'))"
+            bericht "Vorpruefung: $repo: fremde PRs offen: $(tr '\n' ' ' <<<"$liste")"
+        fi
+    done <<<"$REPOS"
+    if [ "$MODUS" = ausrollen ]; then
+        [ -z "$blockiert" ] || die "Vorpruefung: fremde PRs offen in$blockiert — nichts gemergt, nichts released"
+        warte_auf_deploy_ruhe 60 || die "Vorpruefung: Deploy-Lage unklar oder belegt — nichts gemergt"
+    fi
+    [ -n "$blockiert" ] || bericht "Vorpruefung: keine fremden PRs offen"
+    while IFS='|' read -r repo url roll blatt; do
+        [ -n "$repo" ] || continue
+        autobumps_schliessen "$repo"
+    done <<<"$REPOS"
 }
 
 pruefe_lokal() {   # $1 = Verzeichnis, $2 = repo
@@ -133,7 +193,7 @@ maven_repo() {   # $1 repo  $2 versions-url  $3 ausrollen  $4 root-version  $5 a
         bericht "$repo: wuerde PR \"$betreff\" eroeffnen, Merge-Betreff \"$merge_betreff\", test-compile gruen"
         bericht "$(sed 's/^/  /' <<<"$aenderungen")"
         [ -z "$owasp" ] || bericht "  OWASP entfernt: $(tr '\n' ' ' <<<"$owasp")"
-        bericht "  fremde offene PRs: $(fremde_prs "$repo"), letztes Release: $(release_version "$dir")${url:+, live: $(curl -fsS -m 15 -A curl/8.0 "$url" 2>/dev/null | head -c 40 || echo '?')}"
+        bericht "  fremde offene PRs: $(fremde_pr_liste "$repo" | wc -l), letztes Release: $(release_version "$dir")${url:+, live: $(curl -fsS -m 15 -A curl/8.0 "$url" 2>/dev/null | head -c 40 || echo '?')}"
         if [ "$roll" = nein ]; then bericht "  ausrollen: Squash-Merge mit [skip ci], KEIN Rollout"
         else bericht "  ausrollen: Squash-Merge, Release abwarten${url:+, Rollout ueber $url belegen}"; fi
         return 0
@@ -156,7 +216,8 @@ MSG
     [ "$MODUS" = ausrollen ] || return 0
 
     warte_auf_pruefungen "$repo" "$nr" 120 || { pruefungen_befund "$repo" "$nr"; die "$repo: Pruefungen von PR #$nr nicht gruen, Lauf endet hier"; }
-    [ "$(fremde_prs "$repo")" = 0 ] || die "$repo: fremder PR offen, kein Merge"
+    autobumps_schliessen "$repo"   # der root-Release kann inzwischen einen neuen Auto-Bump eroeffnet haben
+    pruefe_fremde "$repo" "kein Merge (PR #$nr bleibt offen)"
     warte_auf_deploy_ruhe 60 || die "$repo: Deploy-Lage unklar oder belegt, kein Merge"
     alt="$(release_version "$dir")"
     gh pr merge "$nr" -R "$WP_ORG/$repo" --squash --delete-branch --subject "$merge_betreff (#$nr)" >&2
@@ -188,7 +249,7 @@ projectmind() {
     bericht "projectmind: PR #$nr"
     [ "$MODUS" = ausrollen ] || return 0
     warte_auf_pruefungen projectmind "$nr" 60 || { pruefungen_befund projectmind "$nr"; die "projectmind: PR #$nr nicht gruen"; }
-    [ "$(fremde_prs projectmind)" = 0 ] || die "projectmind: fremder PR offen, kein Merge"
+    pruefe_fremde projectmind "kein Merge (PR #$nr bleibt offen)"
     gh pr merge "$nr" -R "$WP_ORG/projectmind" --squash --delete-branch >&2
     # Release: der Bot-PR startet seine Pflichtpruefungen nicht selbst und laesst Cargo.lock aus.
     gh workflow run release.yml -R "$WP_ORG/projectmind" -f bump=patch
@@ -211,20 +272,37 @@ projectmind() {
     bericht "projectmind: ${bot#release/} getaggt, Release-Build laeuft"
 }
 
+# Pushover nimmt hoechstens 1024 Zeichen; der Bericht eines vollen Laufs ist laenger. Deshalb steht
+# der Abbruchgrund und was liegengeblieben ist VORN, der Rest wird gekuerzt (voller Bericht im Log).
+# Der Versand selbst wird belegt (Karte 1419): Ergebnis und Rueckgabewert ins Log, ein fehlendes
+# Skript oder Token ist ein Fehler, kein stilles Ueberspringen — der Job endet dann rot.
 melden() {
-    local status="$1"
+    local status="$1" text rc=0 aus
     if [ "$MODUS" = trocken ] || [ "${WP_PUSHOVER:-ja}" = nein ]; then return 0; fi
-    if [ -x "$HIER/../pushover" ] && [ -n "${PUSHOVER_APP_TOKEN:-}" ]; then
-        "$HIER/../pushover" -t "Wochenpatch $WP_DATUM: $status" "$(cat "$WP_BERICHT")" || true
+    local skript="${WP_PUSHOVER_SKRIPT:-$HIER/../pushover}"
+    [ -x "$skript" ] || { log "FEHLER Pushover: Skript $skript fehlt, nichts gemeldet"; return 1; }
+    if [ -z "${PUSHOVER_APP_TOKEN:-}" ] || [ -z "${PUSHOVER_USER_KEY:-}" ]; then
+        log "FEHLER Pushover: PUSHOVER_APP_TOKEN oder PUSHOVER_USER_KEY fehlt, nichts gemeldet"; return 1
     fi
+    text="$( { grep -E '^(ABBRUCH|Liegengeblieben):' "$WP_BERICHT" || true; grep -v -E '^(ABBRUCH|Liegengeblieben):' "$WP_BERICHT" || true; } )"
+    if [ "${#text}" -gt 1000 ]; then text="${text:0:960}
+… gekuerzt, voller Bericht im Woodpecker-Log"; fi
+    aus="$("$skript" -t "Wochenpatch $WP_DATUM: $status" ${CI_PIPELINE_URL:+-u "$CI_PIPELINE_URL" -U "Woodpecker-Lauf"} "$text" 2>&1)" || rc=$?
+    if [ "$rc" = 0 ]; then log "Pushover gesendet ($status, ${#text} Zeichen)${aus:+: $aus}"
+    else log "FEHLER Pushover: rc=$rc ${aus}"; fi
+    return "$rc"
 }
 # EXIT statt ERR: `die` endet mit exit 1, und ein exit loest ERR nicht aus — die Abbruchmeldung
 # waere sonst genau in den Faellen ausgeblieben, fuer die sie da ist.
 ende() {
-    local rc=$?
-    if [ "$rc" != 0 ]; then melden ABGEBROCHEN
-    elif [ "$TEIL" != maven ]; then melden fertig; fi
+    local rc=$? mrc=0
+    if [ "$rc" != 0 ]; then
+        [ -z "${OFFEN:-}" ] || bericht "Liegengeblieben:${OFFEN}"
+        melden ABGEBROCHEN || mrc=$?
+    elif [ "$TEIL" != maven ]; then melden fertig || mrc=$?; fi
     cat "$WP_BERICHT" >&2
+    # Ein gelungener Lauf ohne Meldung soll im Woodpecker rot erscheinen, sonst merkt es niemand.
+    if [ "$rc" = 0 ] && [ "$mrc" != 0 ]; then exit 4; fi
 }
 trap ende EXIT
 
@@ -235,8 +313,11 @@ if [ "$MODUS" = trocken ] && [ "$TEIL" != projectmind ]; then
                   *) bericht "Deploy-Lage: NICHT pruefbar (ausrollen wuerde vor dem ersten Merge abbrechen)" ;; esac
 fi
 
-ROOT_NEU=""; APP_NEU=""
+ROOT_NEU=""; APP_NEU=""; OFFEN=""
 if [ "$TEIL" != projectmind ]; then
+    # Was bei einem Abbruch liegenbleibt: das Repo, an dem es scheitert, und alle danach.
+    OFFEN="$(awk -F'|' 'NF > 1 { printf " %s", $1 }' <<<"$REPOS")"
+    vorpruefung
     # Ein Kind zeigt erst auf eine Version, wenn release_fertig sie belegt hat (Lauf gruen + Blatt-Jar).
     while IFS='|' read -r repo url roll blatt; do
         [ -n "$repo" ] || continue
@@ -246,6 +327,7 @@ if [ "$TEIL" != projectmind ]; then
             plaintext-guild) maven_repo "$repo" "$url" "$roll" "$ROOT_NEU" "$APP_NEU" "$blatt" >/dev/null ;;
             *)               maven_repo "$repo" "$url" "$roll" "$ROOT_NEU" "" "$blatt" >/dev/null ;;
         esac
+        OFFEN="${OFFEN# "$repo"}"
     done <<<"$REPOS"
 fi
 if [ "$TEIL" != maven ]; then projectmind; fi
