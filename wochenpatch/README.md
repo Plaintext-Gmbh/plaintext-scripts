@@ -65,6 +65,21 @@ veroeffentlichten Version, sobald deren Release fertig ist. Einfach denselben La
 3. Cron `wochenpatch`, `7 4 * * 0`, Zweig `master`, eingeschaltet.
 4. Erst danach `.woodpecker/wochenpatch.yml` mit den `from_secret`-Zeilen.
 
+## Vorprüfung, Auto-Bumps, Meldung (Karte 1419)
+
+- **Vorprüfung vor root:** Bevor root angefasst wird, liest der Job in allen Repos die offenen PRs.
+  Ist irgendwo ein fremder PR offen (weder `renovate/`, noch `wochenpatch/`, noch
+  `chore/root-autobump`) oder ist die Deploy-Lage nicht prüfbar, endet `ausrollen` sofort, ohne
+  etwas zu verändern, und nennt Repo und PR-Nummern. Am 04.10.2026 war root schon released, als app
+  an fremden PRs scheiterte. `trocken` und `pr` schreiben den Befund nur in den Bericht.
+- **Auto-Bump-PRs** (`chore/root-autobump`) setzen dieselbe Root-Version wie der Wochenpatch und
+  werden in `ausrollen` mit Kommentar geschlossen: einmal nach der Vorprüfung und noch einmal direkt
+  vor jedem Merge, weil der root-Release inzwischen neue eröffnet haben kann.
+- **Pushover:** Abbruchgrund und `Liegengeblieben: …` stehen vorn, der Text wird unter 1024 Zeichen
+  gekürzt (Grenze der Pushover-API), mit Link auf den Woodpecker-Lauf. Der Versand steht im Log
+  (`Pushover gesendet …` oder `FEHLER Pushover: rc=…`). Fehlt Skript oder Token, ist das ein
+  Fehler: ein sonst gelungener Lauf endet dann mit Exit 4.
+
 ## Bekannte Grenzen
 
 - Der Deploy-Slot (Karte 413, Nextcloud Deck) wird nicht belegt — der Job hat keinen Deck-Zugang.
