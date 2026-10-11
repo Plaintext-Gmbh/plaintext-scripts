@@ -32,7 +32,7 @@ when:
 
 steps:
   maven-repos:
-    image: maven:3.9-eclipse-temurin-25
+    image: maven:3.10-eclipse-temurin-25
     environment:
       WOCHENPATCH_TEIL: maven
       WP_BERICHT: /woodpecker/wochenpatch-bericht.txt
