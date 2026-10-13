@@ -601,6 +601,9 @@ neueste root-Version zwischen Pin und Ziel aus, fuer die es eine gibt. Gibt es k
 und `app_fehlt=<Grund>` (Exit 0, `::warning`) — der Aufrufer muss das sichtbar machen.
 `apply <root> <app>` verlangt dann die app-Version und prueft deren root-Basis; `apply <root>`
 allein wird verweigert.
+Ist root aktuell, hebt `detect` den app-Pin allein (Karte 1527): neueste vollstaendige app-Version
+mit root-Basis == root-Pin, neuer als der app-Pin; `latest` = aktueller Pin, `bump=true`. Gibt es
+keine, ist das Ruhe (`app_fehlt` leer). `apply <aktueller root> <app>` fuehrt den reinen app-Bump aus.
 
 **Rueckgabecodes von `detect` (Karte 1127).** Sie sind der Unterschied zwischen „nachgesehen,
 nichts zu tun" und „konnte nicht nachsehen":

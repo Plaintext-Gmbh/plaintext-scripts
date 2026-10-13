@@ -30,6 +30,8 @@
 #   L  (Karte 1327) gekoppelter app-Pin (guild): root nur zusammen mit der app-Version, deren
 #      plaintext-parent genau diese root-Version als <parent> hat; keine passende app -> kein
 #      Bump, aber eine Meldung (app_fehlt=, ::warning) statt eines stillen "nichts zu tun"
+#      L6/L7 (Karte 1527): root aktuell -> reiner app-Bump auf die neueste vollstaendige app mit
+#      root-Basis == Pin; eine app nur auf neuerer root (oder unvollstaendig) -> kein Bump
 #
 # Aufruf:  ./test-root-autobump.sh
 set -uo pipefail
@@ -448,6 +450,47 @@ lauf apply 1.722.0 2.1849.0
 pruefe "L4 apply mit unvollstaendiger app: verweigert" "ja"                  "$([ "$RC" -ne 0 ] && echo ja || echo nein)"
 pruefe "L4 apply: nennt das fehlende Modul"           "ja" \
        "$(printf '%s' "$AUS" | grep_q 'plaintext-z-wiki nicht publiziert' && echo ja || echo nein)"
+
+echo "-- L6 (Karte 1527) root aktuell, neuere app auf derselben root-Basis -> reiner app-Bump"
+# 2.1850.0 vollstaendig auf 1.722.0, 2.1851.0 auf 1.722.0 unvollstaendig, 2.1852.0 schon auf 1.723.0.
+app_release 2.1850.0 1.722.0
+app_release 2.1851.0 1.722.0 plaintext-app-interfaces
+app_release 2.1852.0 1.723.0
+app_metadata 2.1847.0 2.1848.0 2.1849.0 2.1850.0 2.1851.0 2.1852.0
+consumer_pom_app 1.722.0 2.1849.0
+lauf detect
+pruefe "L6 detect: Exit 0"                            "0"                    "$RC"
+pruefe "L6 detect: bump=true"                         "true"                 "$(ausgabe bump)"
+pruefe "L6 detect: latest = root-Pin (root bleibt)"   "1.722.0"              "$(ausgabe latest)"
+pruefe "L6 detect: app_latest = neueste vollstaendige auf 1.722.0" "2.1850.0" "$(ausgabe app_latest)"
+pruefe "L6 detect: app_basis"                         "1.722.0"              "$(ausgabe app_basis)"
+pruefe "L6 detect: app_fehlt leer"                    ""                     "$(ausgabe app_fehlt)"
+pruefe "L6 detect: Meldung 'nur app'"                 "ja" \
+       "$(printf '%s' "$AUS" | grep_q 'Auto-Bump nur app::root 1.722.0 ist aktuell .* 2.1849.0 -> 2.1850.0' && echo ja || echo nein)"
+L_ROOT="$(ausgabe latest)"; L_APP="$(ausgabe app_latest)"
+lauf apply "$L_ROOT" "$L_APP"
+pruefe "L6 apply: Exit 0 (reiner app-Bump ist ein Bump)" "0"                 "$RC"
+pruefe "L6 apply: root-Pin bleibt"                    "1.722.0"              "$(pin)"
+pruefe "L6 apply: parent bleibt"                      "1.722.0"              "$(parent)"
+pruefe "L6 apply: app-Pin gehoben"                    "2.1850.0"             "$(app_pin)"
+lauf apply 1.722.0 2.1850.0
+pruefe "L6 apply ohne neue app: 'kein Bump noetig'"   "ja" \
+       "$([ "$RC" -ne 0 ] && printf '%s' "$AUS" | grep_q 'kein Bump noetig' && echo ja || echo nein)"
+
+echo "-- L7 (Karte 1527) neuere app nur auf neuerer root-Basis (bzw. unvollstaendig) -> kein app-Bump"
+lauf detect
+pruefe "L7 detect: Exit 0"                            "0"                    "$RC"
+pruefe "L7 detect: bump=false"                        "false"                "$(ausgabe bump)"
+pruefe "L7 detect: app_latest leer"                   ""                     "$(ausgabe app_latest)"
+pruefe "L7 detect: app_fehlt leer (Ruhe, kein Stillstand)" ""                "$(ausgabe app_fehlt)"
+pruefe "L7 detect: kein ::warning"                    "0"                    "$(printf '%s' "$AUS" | grep -c '::warning' || true)"
+lauf apply 1.722.0 2.1852.0
+pruefe "L7 apply mit app auf neuerer root: verweigert" "ja" \
+       "$([ "$RC" -ne 0 ] && printf '%s' "$AUS" | grep_q 'app 2.1852.0 steht auf root 1.723.0, nicht auf 1.722.0' && echo ja || echo nein)"
+pruefe "L7 apply: app-Pin unveraendert"               "2.1850.0"             "$(app_pin)"
+lauf apply 1.722.0 2.1849.0
+pruefe "L7 apply app-Downgrade: verweigert"           "ja" \
+       "$([ "$RC" -ne 0 ] && printf '%s' "$AUS" | grep_q 'app-Downgrade 2.1850.0 -> 2.1849.0 verweigert' && echo ja || echo nein)"
 
 echo "-- L5 ungekoppelte pom: keine app_-Ausgaben, apply mit app verweigert"
 consumer_pom 1.720.0 plaintext-root-common plaintext-root-web
