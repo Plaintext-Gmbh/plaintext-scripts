@@ -43,6 +43,7 @@
 #                             -> aendert pom.xml auf die neueste Version. Hat die pom einen
 #                                gekoppelten app-Pin (<plaintext-app.version>, heute nur guild),
 #                                ist <app> PFLICHT — siehe "Gekoppelter app-Pin" (Karte 1327).
+#                                <root> = aktueller Pin + neuere <app> ist ein reiner app-Bump (Karte 1527).
 # Umgebung: POM_FILE (Default pom.xml), ROOT_MAVEN_REPO (Default https://maven.plaintext.ch/releases),
 #           BUMP_IGNORIERE_MODULE (Leerzeichen-getrennt: Module, die absichtlich nie deployt werden
 #           und deshalb nicht auf die Vollstaendigkeit einzahlen; heute keines)
@@ -292,7 +293,9 @@ app_koppeln() {
     esac
     [ -n "$neueste" ] || { neueste="$v"; neueste_basis="$basis"; }
     version_gt "$basis" "$ziel" && continue   # app schon auf einer neueren root als das Ziel
-    version_gt "$basis" "$pin" || break       # root-Basis <= Pin: darunter kommt nichts mehr
+    # root-Basis <= Pin: darunter kommt nichts mehr. Ausnahme reiner app-Bump (Ziel == Pin,
+    # Karte 1527): dort ist genau die Basis == Pin gesucht.
+    version_gt "$basis" "$pin" || [ "$basis" = "$ziel" ] || break
     if [ "${#artefakte[@]}" -gt 0 ]; then
       f="$(reposilite_fehlende_artefakte "$REPO_BASE" "$GROUP_PATH" "$v" "${artefakte[@]}" | tr '\n' ' ')" || true
       case "$f" in *'(HTTP '*) APP_UNPRUEFBAR="app ${v}: Artefakte nicht pruefbar: ${f% }"; return 0 ;; esac
@@ -371,8 +374,8 @@ case "${1:-detect}" in
   detect)
     LATEST="$(latest_version)" || exit $?
     BEHIND="$(count_behind "$CUR")" || exit $?
-    BUMP=false
-    if version_gt "$LATEST" "$CUR" || [ "$PAR" != "$LATEST" ]; then BUMP=true; fi
+    BUMP=false; ROOT_AKTUELL=true
+    if version_gt "$LATEST" "$CUR" || [ "$PAR" != "$LATEST" ]; then BUMP=true; ROOT_AKTUELL=false; fi
 
     # Massnahme 4: nur ein VOLLSTAENDIGES Release wird vorgeschlagen. Die Pruefung laeuft nur,
     # wenn ueberhaupt ein Bump anstuende — ein Repo auf dem neuesten Stand braucht keine 24 HEADs.
@@ -442,6 +445,22 @@ case "${1:-detect}" in
       fi
     fi
 
+    # Karte 1527: root ist aktuell -> reiner app-Bump auf die neueste vollstaendige app-Version mit
+    # root-Basis == root-Pin. Ohne das wanderte der app-Pin nur mit einem root-Release (guild 635:
+    # app_latest leer). Keine solche app ist Ruhe, kein Stillstand: APP_FEHLT bleibt leer.
+    if [ -n "$APP_CUR" ] && [ "$ROOT_AKTUELL" = true ]; then
+      app_koppeln "$CUR" "$CUR" "$APP_CUR"
+      APP_FEHLT=""
+      if [ -n "$APP_UNPRUEFBAR" ]; then
+        UNPRUEFBAR="app-Pin nicht pruefbar: ${APP_UNPRUEFBAR}"; APP_ZIEL=""; APP_ZIEL_BASIS=""
+      elif [ -n "$APP_ZIEL" ] && version_gt "$APP_ZIEL" "$APP_CUR"; then
+        BUMP=true
+        echo "::notice title=Auto-Bump nur app::root ${CUR} ist aktuell — gebumpt wird plaintext-app ${APP_CUR} -> ${APP_ZIEL} (root-Basis ${APP_ZIEL_BASIS})"
+      else
+        APP_ZIEL=""; APP_ZIEL_BASIS=""
+      fi
+    fi
+
     echo "current=${CUR} parent=${PAR} latest=${LATEST} neueste=${NEUESTE} behind=${BEHIND} vollstaendig=$([ "$VOLL" -eq 0 ] && echo ja || echo nein) bump=${BUMP}${APP_CUR:+ app_current=${APP_CUR} app_latest=${APP_ZIEL}}"
     if [ -n "${GITHUB_OUTPUT:-}" ]; then
       {
@@ -494,8 +513,11 @@ case "${1:-detect}" in
     # Nicht "${2:-$(latest_version)}": in dieser Ersetzung ginge der Rueckgabecode des Abrufs
     # verloren (siehe Kommentar in latest_version).
     if [ -n "${2:-}" ]; then LATEST="$2"; else LATEST="$(latest_version)" || exit $?; fi
+    # Karte 1527: bei gekoppeltem app-Pin ist auch ein reiner app-Bump (root bleibt) ein Bump.
+    APP_CUR="$(current_app)"; APP_NEU="${3:-}"
     version_gt "$LATEST" "$CUR" || [ "$PAR" != "$LATEST" ] \
-      || die "kein Bump noetig (current=${CUR}, parent=${PAR}, latest=${LATEST})"
+      || { [ -n "$APP_CUR" ] && [ -n "$APP_NEU" ] && [ "$APP_NEU" != "$APP_CUR" ]; } \
+      || die "kein Bump noetig (current=${CUR}, parent=${PAR}, latest=${LATEST}${APP_CUR:+, app=${APP_CUR}})"
     version_gt "$CUR" "$LATEST" && die "Downgrade ${CUR} -> ${LATEST} verweigert"
     # Auch hier (Massnahme 4): apply mit einer Version, die noch nicht ganz da ist, ist ein
     # ausdruecklicher Auftrag, der nicht erfuellbar ist — anders als in detect deshalb ein Fehler.
@@ -503,7 +525,6 @@ case "${1:-detect}" in
     [ "$VOLL" -eq 0 ] || die "$(reposilite_fehlend_text "$VOLL" "$LATEST" "$FEHLEND") — kein Bump"
     pruefe_benoetigte_artefakte "$LATEST"
     # Karte 1327: eine gekoppelte pom wird nie nur an root gebumpt — auch nicht von Hand.
-    APP_CUR="$(current_app)"; APP_NEU="${3:-}"
     if [ -n "$APP_CUR" ]; then
       [ -n "$APP_NEU" ] || die "gekoppelter app-Pin (<plaintext-app.version>${APP_CUR}): apply braucht die app-Version als drittes Argument (detect liefert app_latest) — ein root-Bump allein bricht die Kopplung (Karte 1327)"
       version_gt "$APP_CUR" "$APP_NEU" && die "app-Downgrade ${APP_CUR} -> ${APP_NEU} verweigert"
@@ -516,8 +537,12 @@ case "${1:-detect}" in
     elif [ -n "$APP_NEU" ]; then
       die "app-Version ${APP_NEU} angegeben, aber ${POM} hat keinen <plaintext-app.version>-Pin"
     fi
-    apply_pom "$CUR" "$LATEST"
-    echo "pom.xml: plaintext-root ${CUR} -> ${LATEST} (parent ${PAR} -> ${LATEST})"
+    if [ "$LATEST" != "$CUR" ] || [ "$PAR" != "$LATEST" ]; then
+      apply_pom "$CUR" "$LATEST"
+      echo "pom.xml: plaintext-root ${CUR} -> ${LATEST} (parent ${PAR} -> ${LATEST})"
+    else
+      echo "pom.xml: plaintext-root bleibt ${CUR} (reiner app-Bump, Karte 1527)"
+    fi
     if [ -n "$APP_CUR" ] && [ "$APP_NEU" != "$APP_CUR" ]; then
       ersetze_in_pom "s|<plaintext-app\.version>[^<]*</plaintext-app\.version>|<plaintext-app.version>${APP_NEU}</plaintext-app.version>|"
       echo "pom.xml: plaintext-app ${APP_CUR} -> ${APP_NEU} (root-Basis ${LATEST}, gekoppelt)"
