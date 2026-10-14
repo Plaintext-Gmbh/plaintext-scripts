@@ -6,7 +6,8 @@
 #  in plaintext-scripts selbst nie ausgefuehrt. Laufendes Beispiel: plaintext-sidecar-beispiel.
 #  Anleitung: woodpecker/README.md.
 #
-#    pull_request          nur bauen (kein Secret, kein Push)
+#    pull_request          nichts (Karte 1466, K8: ein PR-Bau ueber den Socket waere root auf dem NAS
+#                          fuer jeden PR; Tests gehoeren in eine eigene test.yml ohne Socket)
 #    push auf master/main  bauen, pushen als  127.0.0.1:6666/<repo>:<commit-sha>  und  :latest
 #    manual auf master     wie push
 #
@@ -32,24 +33,12 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 
 when:
-  - event: pull_request
   - event: push
     branch: [master, main]
   - event: manual
     branch: [master, main]
 
 steps:
-  bauen:
-    image: docker:29.6.2-cli@sha256:be132a9f282288de4afaf63379dff75711fda0147c6b72a9df44e51841402144
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    commands:
-      - docker build --pull --label "org.opencontainers.image.revision=${CI_COMMIT_SHA}" -t "plaintext-ci/${CI_REPO_NAME}:pr-${CI_COMMIT_SHA}" .
-      # Nur geprueft, nicht behalten: der Daemon des NAS ist kein Ablageplatz.
-      - docker image rm "plaintext-ci/${CI_REPO_NAME}:pr-${CI_COMMIT_SHA}"
-    when:
-      - event: pull_request
-
   bauen-und-pushen:
     image: docker:29.6.2-cli@sha256:be132a9f282288de4afaf63379dff75711fda0147c6b72a9df44e51841402144
     volumes:
