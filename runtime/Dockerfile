@@ -36,6 +36,9 @@ RUN addgroup -g 1000 appgroup && adduser -u 1000 -G appgroup -s /bin/sh -D appus
 
 WORKDIR /app
 RUN mkdir -p /app/data && chown -R appuser:appgroup /app
+# Karte 1516: Start mit ModulLader (Laufzeit-Module), nur wo Compose `command: ["plaintext-start"]` setzt.
+# Das CMD unten bleibt unveraendert; ohne diesen Befehl startet jede App wie bisher.
+COPY plaintext-start.sh /usr/local/bin/plaintext-start
 USER appuser
 
 EXPOSE 8080
