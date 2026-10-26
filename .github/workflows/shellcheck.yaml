@@ -43,3 +43,8 @@ jobs:
         env:
           SHELLCHECK_PFLICHT: '1'
         run: ./quality/shellcheck.sh .
+
+      # Karte 1599: Prueflogik von laufzeit-module/modul-auf-demo, offline (python3 + PyYAML auf ubuntu-latest).
+      - name: modul-auf-demo --selbsttest
+        if: steps.motor.outputs.zustaendig == 'true'
+        run: python3 laufzeit-module/modul-auf-demo --selbsttest
