@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+"""modul-auf-demo — ein Laufzeit-Modul auf demo.plaintext.ch laden (Karte 1599, Konzept "Modul-Repos" Punkt 7).
+
+    modul-auf-demo <name> <version>          Trockenlauf: prüfen und zeigen, was geschähe
+    modul-auf-demo <name> <version> --ja     scharf
+    modul-auf-demo --selbsttest              Prüflogik offline testen
+
+demo hat kein Netz nach aussen; der Lader kann dort nichts holen. Darum legt dieses Werkzeug das Jar selbst
+in module/cache/ und schreibt module/module.yaml. Ablauf:
+
+ 1. Eintrag aus der Registry (plaintext-modules, origin/master, module.yaml Format 2) für genau diese Version:
+    sha256, root-min, api/pflicht, bibliotheken. Ohne Eintrag kein Laden (erst Registry-PR mergen).
+ 2. Jar aus Reposilite holen, sha256 gegen die Registry und sha1 gegen Reposilite prüfen; Bibliotheken
+    (Central) ebenso gegen die Registry.
+ 3. root-min gegen die demo-Hülle: v2-Hülle 2.M.m hat die v1-Basis 1.M.0. Ein 1.x-root-min muss <= 1.M.0
+    sein (der Lader prüft das selbst nicht, NoSuchMethodError erst zur Laufzeit), ein 2.x-root-min <= 2.M.m;
+    dazu >= Kompatibel-Ab der Hülle.
+ 4. api- und pflicht-Abhängigkeiten müssen schon in demo stehen (sonst Abbruch mit Hinweis).
+ 5. --ja: module.yaml sichern, Jars atomar in cache/, neue module.yaml mit dem Lader-Parser der Hülle
+    prüfen und schreiben. Jeder Jar in cache/, den module.yaml nicht nennt, wird weggeräumt: der Mount ist
+    nur lesbar, der Lader bricht sonst ab (Falle 1598).
+ 6. Nur plaintext-demo-app neu starten (docker restart), auf healthy + "Module bereit" mit allen Modulen
+    warten. Schlägt das fehl: alles zurück, neu starten, Exit 1.
+
+Umgebung: DEPLOY_SERVER (mad@192.100.0.1), DEMO_DIR (/volume1/docker/plaintext-demo), MODULES_KLON
+(~/plaintext-modules), NASSH (~/scripts/nassh: docker auf dem NAS mit sudo), REPOSILITE, JAVA (java 25).
+Keine Geheimnisse: Reposilite und Central werden ohne Anmeldung gelesen.
+"""
+import hashlib
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+from pathlib import Path
+
+import yaml
+
+SERVER = os.environ.get("DEPLOY_SERVER", "mad@192.100.0.1")
+DEMO = os.environ.get("DEMO_DIR", "/volume1/docker/plaintext-demo")
+CONTAINER = "plaintext-demo-app"
+KLON = Path(os.environ.get("MODULES_KLON", Path.home() / "plaintext-modules"))
+NASSH = os.environ.get("NASSH", str(Path.home() / "scripts/nassh"))
+REPOSILITE = os.environ.get("REPOSILITE", "https://maven.plaintext.ch/releases").rstrip("/")
+CENTRAL = "https://repo1.maven.org/maven2"
+JAVA = os.environ.get("JAVA", "java")
+GRUPPE = "ch.plaintext"
+NAME = re.compile(r"[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)*")      # wie ModulKonfig im Lader
+VERSION = re.compile(r"[0-9][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+)*")
+WARTEN_S = 420
+
+
+def sag(t):
+    print(f"modul-auf-demo: {t}", flush=True)
+
+
+class Abbruch(Exception):
+    pass
+
+
+# ------------------------------------------------------------------------------------------- reine Logik
+
+def zahlen(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
+
+
+def root_min_passt(root_min, huelle, kompatibel_ab):
+    """None = passt, sonst der Grund. huelle = Plaintext-Root-Version der Hülle (1.M.m oder 2.M.m)."""
+    r, h = zahlen(root_min), zahlen(huelle)
+    if len(r) < 2 or len(h) < 2:
+        return f"Version nicht lesbar (root-min {root_min}, Hülle {huelle})"
+    if r[0] == 1 and h[0] == 2:
+        basis = (1, h[1], 0)  # v2 = (M+1).m.n auf upstream 1.m.0
+        if r > basis:
+            return f"root-min {root_min} > v1-Basis {'.'.join(map(str, basis))} der Hülle {huelle}"
+    elif r[0] == h[0]:
+        if r > h:
+            return f"root-min {root_min} > Hülle {huelle}"
+    else:
+        return f"root-min {root_min} passt zu keiner Linie der Hülle {huelle}"
+    if r[0] == 1 and kompatibel_ab and r < zahlen(kompatibel_ab):
+        return f"root-min {root_min} < Kompatibel-Ab {kompatibel_ab} der Hülle"
+    return None
+
+
+def registry_eintrag(registry, name, version):
+    m = next((x for x in registry.get("module", []) if x.get("name") == name), None)
+    if m is None or m.get("art") not in ("modul", "api"):
+        raise Abbruch(f"{name} ist kein ladbares Modul der Registry")
+    v = next((x for x in m.get("versionen", []) if x.get("version") == version), None)
+    if v is None:
+        bekannt = ", ".join(x.get("version") for x in m.get("versionen", [])) or "keine"
+        raise Abbruch(f"{name} {version} steht nicht in der Registry (bekannt: {bekannt}) — erst Registry-PR mergen")
+    return v
+
+
+def zusammenfuehren(eintraege, name, eintrag):
+    """eintraege: Liste der Lader-Einträge (dicts). Ersetzt name samt seinen Bibliotheken, hängt sonst an.
+    Liefert die neue Liste; Bibliotheken anderer Module bleiben."""
+    alt = next((e for e in eintraege if e["name"] == name), None)
+    alte_bib = set(alt.get("bibliotheken", [])) if alt else set()
+    andere_bib = {b for e in eintraege if e["name"] != name for b in e.get("bibliotheken", [])}
+    weg = {g.split(":")[1] for g in alte_bib - andere_bib}
+    neu = [e for e in eintraege if e["name"] != name and e["name"] not in weg]
+    neu.append({k: v for k, v in eintrag["modul"].items()})
+    vorhanden = {(e.get("gruppe", GRUPPE), e["name"]) for e in neu}
+    for b in eintrag["bibliotheken"]:
+        if (b["gruppe"], b["name"]) not in vorhanden:
+            neu.append(b)
+    return neu
+
+
+def schreibe_yaml(kopf, eintraege):
+    zeilen = list(kopf) + ["module:"]
+    for e in eintraege:
+        zeilen.append(f"  - name: {e['name']}")
+        if e.get("gruppe"):
+            zeilen.append(f"    gruppe: {e['gruppe']}")
+        zeilen += [f"    version: {e['version']}", f"    sha256: {e['sha256']}"]
+        if e.get("root-min"):
+            zeilen.append(f"    root-min: {e['root-min']}")
+        if e.get("bibliotheken"):
+            zeilen.append(f"    bibliotheken: [{', '.join(e['bibliotheken'])}]")
+    return "\n".join(zeilen) + "\n"
+
+
+def jar_name(e):
+    return f"{e['name']}-{e['version']}.jar"
+
+
+def ueberzaehlig(cache_dateien, eintraege):
+    """Jars im Cache, die module.yaml nicht nennt (Falle 1598: der Lader will sie löschen, der Mount ist ro)."""
+    soll = {jar_name(e) for e in eintraege}
+    return sorted(d for d in cache_dateien if d.endswith(".jar") and d not in soll)
+
+
+# ------------------------------------------------------------------------------------------- Umgebung
+
+def lauf(cmd, eingabe=None, pruefen=True, binaer=False):
+    r = subprocess.run(cmd, input=eingabe, capture_output=True, text=not binaer,
+                       stdin=None if eingabe is not None else subprocess.DEVNULL)
+    if pruefen and r.returncode != 0:
+        fehler = r.stderr.decode(errors="replace") if binaer else r.stderr
+        raise Abbruch(f"{' '.join(cmd[:2])} … Exit {r.returncode}: {fehler[-400:]}")
+    return r
+
+
+def ssh(befehl, eingabe=None, pruefen=True, binaer=False):
+    return lauf(["ssh", SERVER, befehl], eingabe, pruefen, binaer)
+
+
+def nassh(befehl):
+    # nassh liest das sudo-Passwort von stdin; das Kommando geht als EIN Argument (Memory nassh-Quoting)
+    return lauf([NASSH, befehl], pruefen=False)
+
+
+def holen(url, ziel=None):
+    with urllib.request.urlopen(url, timeout=120) as r:
+        daten = r.read()
+    if ziel:
+        Path(ziel).write_bytes(daten)
+    return daten
+
+
+def sha256(daten):
+    return hashlib.sha256(daten).hexdigest()
+
+
+def container_status():
+    r = nassh(f'docker inspect -f "{{{{json .State}}}} {{{{.RestartCount}}}}" {CONTAINER}')
+    zeile = next((z for z in r.stdout.splitlines() if z.startswith("{")), None)
+    if not zeile:
+        raise Abbruch(f"docker inspect {CONTAINER} ohne Antwort: {r.stderr[-300:]}")
+    js, rc = zeile.rsplit(" ", 1)
+    s = json.loads(js)
+    return s.get("Status"), (s.get("Health") or {}).get("Status"), int(rc), s.get("StartedAt")
+
+
+def log_seit(start):
+    # nur doppelte Anfuehrungszeichen: einfache brechen die Remote-Shell von nassh
+    r = nassh(f'docker logs --since {start} {CONTAINER} 2>&1 | grep -E "modul-lader|Registered tools| ERROR " | tail -40')
+    return r.stdout
+
+
+def neu_starten_und_warten(namen):
+    _, _, rc_vorher, start_vorher = container_status()
+    sag(f"docker restart {CONTAINER}")
+    r = nassh(f"docker restart {CONTAINER}")
+    if r.returncode != 0:
+        raise Abbruch(f"docker restart: {r.stderr[-300:]}")
+    ende = time.time() + WARTEN_S
+    while time.time() < ende:
+        time.sleep(15)
+        status, health, rc, start = container_status()
+        if start == start_vorher:
+            continue
+        log = log_seit(start)
+        if "START ABGEBROCHEN" in log or rc != rc_vorher:
+            return False, log
+        if health == "healthy":
+            bereit = next((z for z in log.splitlines() if "Module bereit" in z), "")
+            fehlend = [n for n in namen if f"{n}:" not in bereit]
+            return (not fehlend), log
+    return False, log_seit(start_vorher)
+
+
+def lader_parser(text, lader_jar, arbeit):
+    """Prüft die neue module.yaml mit ModulLader.konfigPruefen aus der Hülle (öffentlich seit Karte 1515)."""
+    quelle = Path(arbeit) / "Pruefe.java"
+    quelle.write_text("public class Pruefe { public static void main(String[] a) throws Exception {"
+                      " System.out.println(ch.plaintext.lader.ModulLader.konfigPruefen("
+                      "java.nio.file.Files.readString(java.nio.file.Path.of(a[0])))); } }\n")
+    datei = Path(arbeit) / "module.yaml.neu"
+    datei.write_text(text)
+    r = lauf([JAVA, "-cp", str(lader_jar), str(quelle), str(datei)], pruefen=False)
+    if r.returncode != 0:
+        raise Abbruch(f"Lader-Parser weist module.yaml ab: {(r.stderr or r.stdout)[-600:]}")
+    return r.stdout.strip()
+
+
+# ------------------------------------------------------------------------------------------- Ablauf
+
+def ablauf(name, version, scharf):
+    if not NAME.fullmatch(name) or not VERSION.fullmatch(version):
+        raise Abbruch(f"Name/Version ungültig: {name} {version}")
+    arbeit = tempfile.mkdtemp(prefix="modul-auf-demo-")
+    lauf(["git", "-C", str(KLON), "fetch", "-q", "origin"])
+    registry = yaml.safe_load(lauf(["git", "-C", str(KLON), "show", "origin/master:module.yaml"]).stdout)
+    stand = lauf(["git", "-C", str(KLON), "rev-parse", "--short", "origin/master"]).stdout.strip()
+    v = registry_eintrag(registry, name, version)
+    sag(f"Registry plaintext-modules@{stand}: {name} {version}, root-min {v['root-min']}, sha256 {v['sha256'][:12]}…")
+
+    # 2. Jars holen und prüfen
+    pfad = f"{GRUPPE.replace('.', '/')}/{name}/{version}/{name}-{version}.jar"
+    jar = holen(f"{REPOSILITE}/{pfad}", Path(arbeit) / f"{name}-{version}.jar")
+    if sha256(jar) != v["sha256"]:
+        raise Abbruch(f"sha256 des Jars {sha256(jar)[:12]}… != Registry {v['sha256'][:12]}…")
+    sha1 = holen(f"{REPOSILITE}/{pfad}.sha1").decode().split()[0]
+    if hashlib.sha1(jar).hexdigest() != sha1:
+        raise Abbruch("sha1 des Jars passt nicht zur .sha1 in Reposilite")
+    sag(f"Jar {len(jar)} Bytes, sha256 und sha1 stimmen")
+    bibliotheken, dateien = [], {f"{name}-{version}.jar": jar}
+    for b in v.get("bibliotheken", []):
+        g, a, bv = b["gav"].split(":")
+        daten = holen(f"{CENTRAL}/{g.replace('.', '/')}/{a}/{bv}/{a}-{bv}.jar")
+        if sha256(daten) != b["sha256"]:
+            raise Abbruch(f"Bibliothek {b['gav']}: sha256 passt nicht zur Registry")
+        bibliotheken.append({"name": a, "gruppe": g, "version": bv, "sha256": b["sha256"]})
+        dateien[f"{a}-{bv}.jar"] = daten
+
+    # 3. Hülle
+    manifest = ssh(f"unzip -p {shlex.quote(DEMO + '/huelle/app.jar')} META-INF/MANIFEST.MF").stdout
+    felder = dict(re.findall(r"^([A-Za-z-]+): (.+?)\r?$", manifest, re.M))
+    huelle, kompatibel = felder.get("Plaintext-Root-Version"), felder.get("Plaintext-Root-Kompatibel-Ab")
+    if not huelle:
+        raise Abbruch("Plaintext-Root-Version fehlt im Manifest der demo-Hülle")
+    grund = root_min_passt(v["root-min"], huelle, kompatibel)
+    if grund:
+        raise Abbruch(f"passt nicht zur demo-Hülle: {grund}")
+    sag(f"Hülle {huelle} (Kompatibel-Ab {kompatibel}): root-min {v['root-min']} passt")
+
+    # 4. heutiger Stand auf demo
+    alt_text = ssh(f"cat {shlex.quote(DEMO + '/module/module.yaml')}").stdout
+    alt = yaml.safe_load(alt_text) or {}
+    eintraege = [dict(e) for e in alt.get("module", [])]
+    namen_alt = {e["name"] for e in eintraege}
+    fehlt = [d for d in v.get("api", []) + v.get("pflicht", []) if d not in namen_alt]
+    if fehlt:
+        raise Abbruch(f"{name} braucht {', '.join(fehlt)} — steht nicht in demo/module.yaml (zuerst laden)")
+    modul = {"name": name, "version": version, "sha256": v["sha256"], "root-min": v["root-min"]}
+    if bibliotheken:
+        modul["bibliotheken"] = [f"{b['gruppe']}:{b['name']}:{b['version']}" for b in bibliotheken]
+    neu = zusammenfuehren(eintraege, name, {"modul": modul, "bibliotheken": bibliotheken})
+    stempel = time.strftime("%Y%m%d-%H%M%S")
+    kopf = [z for z in alt_text.splitlines() if z.startswith("#")]
+    kopf.append(f"# modul-auf-demo {stempel}: {name} {version} (Registry plaintext-modules@{stand});"
+                f" vorher module.yaml.vor-modul-auf-demo-{stempel}")
+    neu_text = schreibe_yaml(kopf, neu)
+    lader_jar = Path(arbeit) / "lader.jar"
+    lader_jar.write_bytes(ssh(f"cat {shlex.quote(DEMO + '/huelle/lader.jar')}", binaer=True).stdout)
+    sag(f"Lader-Parser: {lader_parser(neu_text, lader_jar, arbeit)}")
+
+    cache = DEMO + "/module/cache"
+    im_cache = ssh(f"ls -1 {shlex.quote(cache)}").stdout.split()
+    neue_jars = [d for d in dateien if d not in im_cache]
+    wegraeumen = ueberzaehlig(im_cache, neu)
+    sag(f"neu in cache/: {neue_jars or 'nichts'}; wegräumen: {wegraeumen or 'nichts'}")
+    print("---- neue module.yaml ----\n" + neu_text + "--------------------------")
+    if not scharf:
+        sag("Trockenlauf. Mit --ja wird geschrieben und plaintext-demo-app neu gestartet.")
+        return 0
+
+    # 5. schreiben
+    sicherung = f"{DEMO}/module/vor-modul-auf-demo-{stempel}"
+    ssh(f"mkdir {shlex.quote(sicherung)} && cp -p {shlex.quote(DEMO + '/module/module.yaml')}"
+        f" {shlex.quote(DEMO + '/module/module.yaml.vor-modul-auf-demo-' + stempel)}")
+    for d in neue_jars:
+        tmp = f"{cache}/.{d}.neu"
+        ssh(f"cat > {shlex.quote(tmp)} && chmod 644 {shlex.quote(tmp)} && mv -f {shlex.quote(tmp)} {shlex.quote(cache + '/' + d)}",
+            eingabe=dateien[d], binaer=True)
+        fern = ssh(f"sha256sum {shlex.quote(cache + '/' + d)}").stdout.split()[0]
+        if fern != sha256(dateien[d]):
+            raise Abbruch(f"{d}: sha256 auf dem NAS weicht ab")
+    for d in wegraeumen:
+        ssh(f"mv {shlex.quote(cache + '/' + d)} {shlex.quote(sicherung + '/')}")
+    ziel = DEMO + "/module/module.yaml"
+    ssh(f"cat > {shlex.quote(ziel + '.neu')} && chmod 644 {shlex.quote(ziel + '.neu')} && mv -f {shlex.quote(ziel + '.neu')}"
+        f" {shlex.quote(ziel)}", eingabe=neu_text)
+    sag(f"geschrieben; Sicherung module.yaml.vor-modul-auf-demo-{stempel}, weggeräumte Jars in {sicherung}")
+
+    # 6. Neustart, sonst zurück
+    namen = [e["name"] for e in neu]
+    ok, log = neu_starten_und_warten(namen)
+    print("---- Startlog (Auszug) ----\n" + log + "---------------------------")
+    if ok:
+        sag(f"OK: healthy, Module bereit mit {', '.join(namen)}")
+        return 0
+    sag("FEHLER beim Start — zurück auf den alten Stand")
+    ssh(f"cp -p {shlex.quote(ziel + '.vor-modul-auf-demo-' + stempel)} {shlex.quote(ziel + '.neu')} && mv -f {shlex.quote(ziel + '.neu')}"
+        f" {shlex.quote(ziel)}")
+    for d in neue_jars:
+        ssh(f"mv {shlex.quote(cache + '/' + d)} {shlex.quote(sicherung + '/')}")
+    for d in wegraeumen:
+        ssh(f"mv {shlex.quote(sicherung + '/' + d)} {shlex.quote(cache + '/')}")
+    ok2, log2 = neu_starten_und_warten(sorted(namen_alt))
+    print("---- Startlog nach Rückweg ----\n" + log2 + "-------------------------------")
+    sag("Rückweg " + ("OK, alter Stand läuft" if ok2 else "FEHLGESCHLAGEN — von Hand prüfen (README-1598.txt)"))
+    return 1
+
+
+# ------------------------------------------------------------------------------------------- Selbsttest
+
+def selbsttest():
+    assert root_min_passt("1.805.0", "2.805.2", "1.767.0") is None
+    assert "v1-Basis 1.805.0" in root_min_passt("1.806.0", "2.805.2", "1.767.0")   # Grenze aus 1597/1598
+    assert root_min_passt("2.805.2", "2.805.2", "1.767.0") is None
+    assert "> Hülle" in root_min_passt("2.806.1", "2.805.2", "1.767.0")
+    assert "Kompatibel-Ab" in root_min_passt("1.700.0", "2.805.2", "1.767.0")
+    assert root_min_passt("1.805.0", "1.805.0", "1.767.0") is None
+    assert "keiner Linie" in root_min_passt("2.805.2", "1.805.0", "1.767.0")
+    reg = {"module": [{"name": "plaintext-z-x", "art": "modul", "versionen": [{"version": "3.0.0", "sha256": "a"}]},
+                      {"name": "plaintext-root-common", "art": "huelle"}]}
+    assert registry_eintrag(reg, "plaintext-z-x", "3.0.0")["sha256"] == "a"
+    for n, ver in (("plaintext-z-x", "9.9.9"), ("plaintext-root-common", "1.0.0"), ("fehlt", "1.0.0")):
+        try:
+            registry_eintrag(reg, n, ver)
+            raise AssertionError(f"{n} {ver} haette abgewiesen werden muessen")
+        except Abbruch:
+            pass
+    alt = [{"name": "plaintext-z-verrechnung", "version": "2.2027.0", "sha256": "v", "root-min": "1.805.0",
+            "bibliotheken": ["ch.plaintext:plaintext-z-messenger-api:2.2027.0"]},
+           {"name": "plaintext-z-messenger-api", "gruppe": "ch.plaintext", "version": "2.2027.0", "sha256": "m"}]
+    neu = zusammenfuehren(alt, "plaintext-z-beispiel",
+                          {"modul": {"name": "plaintext-z-beispiel", "version": "3.0.0", "sha256": "b",
+                                     "root-min": "2.805.2"}, "bibliotheken": []})
+    assert [e["name"] for e in neu] == ["plaintext-z-verrechnung", "plaintext-z-messenger-api", "plaintext-z-beispiel"]
+    neu2 = zusammenfuehren(neu, "plaintext-z-beispiel",
+                           {"modul": {"name": "plaintext-z-beispiel", "version": "3.0.1", "sha256": "c",
+                                      "root-min": "2.805.2"}, "bibliotheken": []})
+    assert [(e["name"], e["version"]) for e in neu2][-1] == ("plaintext-z-beispiel", "3.0.1") and len(neu2) == 3
+    # Bibliothek eines anderen Moduls bleibt, eigene alte Bibliothek geht mit
+    neu3 = zusammenfuehren(neu2 + [{"name": "lib", "gruppe": "org.x", "version": "1", "sha256": "l"}],
+                           "plaintext-z-beispiel", {"modul": {"name": "plaintext-z-beispiel", "version": "3.0.2",
+                                                              "sha256": "d", "root-min": "2.805.2"}, "bibliotheken": []})
+    assert "plaintext-z-messenger-api" in [e["name"] for e in neu3]
+    text = schreibe_yaml(["# kopf"], neu)
+    zurueck = yaml.safe_load(text)["module"]
+    assert zurueck[0]["bibliotheken"] == ["ch.plaintext:plaintext-z-messenger-api:2.2027.0"]
+    assert zurueck[2] == {"name": "plaintext-z-beispiel", "version": "3.0.0", "sha256": "b", "root-min": "2.805.2"}
+    assert ueberzaehlig(["plaintext-z-verrechnung-2.2027.0.jar", "plaintext-z-messenger-api-2.2027.0.jar",
+                         "plaintext-z-verrechnung-2.2025.0.jar", "notiz.txt"], neu) == ["plaintext-z-verrechnung-2.2025.0.jar"]
+    lader = os.environ.get("LADER_JAR")
+    if lader:  # optional: echter Lader-Parser
+        with tempfile.TemporaryDirectory() as d:
+            ausgabe = lader_parser(schreibe_yaml([], [{"name": "plaintext-z-beispiel", "version": "3.0.0",
+                                                       "sha256": "0" * 64, "root-min": "2.805.2"}]), lader, d)
+            assert "plaintext-z-beispiel:3.0.0" in ausgabe, ausgabe
+            try:
+                lader_parser("module:\n  - name: Gross\n    version: x\n", lader, d)
+                raise AssertionError("Lader-Parser haette abweisen muessen")
+            except Abbruch:
+                pass
+        sag("Selbsttest: Lader-Parser positiv und negativ geprüft")
+    sag("Selbsttest: ok")
+    return 0
+
+
+def main(argv):
+    if argv[:1] == ["--selbsttest"]:
+        return selbsttest()
+    args = [a for a in argv if a != "--ja"]
+    if len(args) != 2:
+        print(__doc__.split("\n\n")[1], file=sys.stderr)
+        return 2
+    try:
+        return ablauf(args[0], args[1], "--ja" in argv)
+    except Abbruch as e:
+        sag(f"ABBRUCH: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

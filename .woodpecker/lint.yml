@@ -40,3 +40,13 @@ steps:
       - apk add --no-cache bash git >/dev/null
       - . ./.woodpecker/waechter.sh
       - ./quality/namespace-lint.sh .
+
+  # Karte 1599: Prueflogik von laufzeit-module/modul-auf-demo (root-min gegen die Huelle, module.yaml
+  # zusammenfuehren, Cache-Aufraeumen). Offline, ohne NAS und ohne Secret.
+  modul-auf-demo-selbsttest:
+    image: python:3.13-alpine
+    commands:
+      - apk add --no-cache bash git >/dev/null
+      - . ./.woodpecker/waechter.sh
+      - pip install -q pyyaml
+      - python3 laufzeit-module/modul-auf-demo --selbsttest
