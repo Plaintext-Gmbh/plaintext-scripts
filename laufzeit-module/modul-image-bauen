@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# modul-image-bauen — festes Image: Hülle + eingebettete, signaturgeprüfte Module (Karte 1608).
+#
+#   modul-image-bauen <app.jar> <lader.jar> <auswahl.yaml> <module-quellen.txt> <image-tag>
+#
+# Gleiche Eingabe wie der Weg zur Startzeit (auswahl.yaml), aber nur feste Versionen: "latest" lehnt der
+# Lader hier ab. Der Lader selbst löst die Auswahl auf (ModulLader --einbetten): Registries aus
+# module-quellen.txt lesen, Jars laden, sha256 und Ed25519-Signatur prüfen, Kompatibilität zur Hülle und
+# Inhaltsprüfung wie beim Start. Ergebnis: module-eingebettet/index.txt (signierte Zeilen) + Jars im Image.
+# Beim Start prüft der Lader dieselben Signaturen erneut und braucht keine Registry. Eine Laufzeit-Auswahl
+# (module/auswahl.yaml) übersteuert die eingebetteten Module nur mit "eingebettet ueberschreibbar" in der
+# module-quellen.txt der Instanz.
+#
+# Der öffentliche Schlüssel kommt beim Start aus der Instanz-Konfig (/data/config/module-quellen.txt);
+# ins Image kommt kein Schlüssel und kein Geheimnis.
+#
+# Umgebung: BASIS (Standard plaintext-runtime:jre25), JAVA (Standard java, JDK 25).
+# Ausgabe: sha256 von index.txt und je Jar; zweimal gebaut mit gleicher Eingabe = gleiche Werte.
+set -euo pipefail
+[ $# -eq 5 ] || { sed -n '7,9p' "$0"; exit 2; }
+APP="$(readlink -f "$1")"; LADER="$(readlink -f "$2")"; AUSWAHL="$(readlink -f "$3")"; QUELLEN="$(readlink -f "$4")"; TAG="$5"
+BASIS="${BASIS:-plaintext-runtime:jre25}"
+JAVA="${JAVA:-java}"
+for f in "$APP" "$LADER" "$AUSWAHL" "$QUELLEN"; do [ -f "$f" ] || { echo "modul-image-bauen: $f fehlt" >&2; exit 1; }; done
+ARBEIT="$(mktemp -d)"
+trap 'rm -rf "$ARBEIT"' EXIT
+cp "$APP" "$ARBEIT/app.jar"
+cp "$LADER" "$ARBEIT/lader.jar"
+"$JAVA" -cp "$ARBEIT/app.jar:$ARBEIT/lader.jar" ch.plaintext.lader.ModulLader --einbetten \
+    "$AUSWAHL" "$QUELLEN" "$ARBEIT/module-eingebettet"
+cat > "$ARBEIT/Dockerfile" <<EOF
+FROM $BASIS
+COPY app.jar lader.jar /huelle/
+COPY module-eingebettet/ /huelle/module-eingebettet/
+ENV PLAINTEXT_MODULE_EINGEBETTET=/huelle/module-eingebettet
+ENTRYPOINT ["/bin/sh", "-c", "exec java \$JAVA_OPTS -cp /huelle/app.jar:/huelle/lader.jar ch.plaintext.lader.ModulLader"]
+EOF
+docker build -q -t "$TAG" "$ARBEIT" >/dev/null
+echo "modul-image-bauen: Image $TAG"
+( cd "$ARBEIT/module-eingebettet" && sha256sum index.txt ./*.jar | sed 's/^/modul-image-bauen: sha256 /' )
