@@ -44,7 +44,7 @@ steps:
   # Karte 1599: Prueflogik von laufzeit-module/modul-auf-demo (root-min gegen die Huelle, module.yaml
   # zusammenfuehren, Cache-Aufraeumen). Offline, ohne NAS und ohne Secret.
   modul-auf-demo-selbsttest:
-    image: python:3.13-alpine
+    image: python:3.15-alpine
     commands:
       - apk add --no-cache bash git >/dev/null
       - . ./.woodpecker/waechter.sh
