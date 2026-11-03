@@ -438,7 +438,8 @@ jobs:
         # WELCHER TOKEN UND WARUM NICHT github.token: `github.token` gilt nur fuer DIESES Repo;
         # die Baum-API der vier anderen (privaten) Repos braucht ein uebergreifendes Leserecht.
         # Genommen wird MVN_DEPLOY_TOKEN, weil der aufrufende Workflow ihn ohnehin an diese
-        # Pipeline uebergibt.
+        # Pipeline uebergibt. Seit Karte 1639 braucht er AUCH Leserecht auf plaintext-modules
+        # (registry-konfig.yaml) und alle plaintext-modul-* — fehlt es, wird dieser Schritt rot.
         #
         # NACHGEZOGEN (Karte 1198, 13.09.2026): Hier stand als Begruendung, der Workflow
         # bekomme das Token "ohnehin, er checkt damit oben plaintext-scripts aus". Das stimmt
