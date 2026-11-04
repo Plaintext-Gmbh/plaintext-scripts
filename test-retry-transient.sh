@@ -28,7 +28,8 @@ koerper() { awk "/^$1\\(\\) \\{/,/^\\}/" "$SKRIPT"; }
 
 # Farbvariablen wie im Hauptskript, sonst bricht echo -e im extrahierten Koerper nicht —
 # es wuerde sonst trotzdem laufen, aber die Ausgabe im Test-Log waere verstümmelt.
-RED=''; YELLOW=''; NC=''
+# Werden von der unten per eval extrahierten retry_transient genutzt (export, sonst SC2034).
+export RED=''; export YELLOW=''; export NC=''
 
 TMPDIR_TEST=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_TEST"' EXIT
