@@ -48,8 +48,8 @@ root- und app-Version → schuetu → iot (gemergt mit `[skip ci]`, **kein** Rol
 
 **Release fertig** heisst: der Woodpecker-push-Lauf des Commits, aus dem `Release version X`
 gebaut wurde, ist `success` (bei failure/killed Abbruch), UND ein Blatt-Jar liegt im Paket-Repo
-(root: `plaintext-root-watch`, app: `plaintext-z-wiki`; bis app 2.2055.0 `plaintext-z-kontakte`, das seit Karte 1601
-im eigenen Repo plaintext-modul-kontakte liegt). Der Parent-POM allein reicht nicht:
+(root: `plaintext-root-watch`, app: `plaintext-z-briefing`; bis app 2.2055.0 `plaintext-z-kontakte`, bis 2.2062.0
+`plaintext-z-wiki`, die seit Karte 1601 in eigenen Repos liegen). Der Parent-POM allein reicht nicht:
 im Lauf 10/#7 (29.09.2026) lag `plaintext-root-parent` 1.732.0 schon oben, die Module noch nicht.
 
 **Wiederaufsetzbar:** Hat root (bzw. app) nichts zu patchen, weil ein frueherer Lauf es schon
