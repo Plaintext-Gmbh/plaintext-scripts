@@ -56,9 +56,28 @@
 #  Abhaengigkeitsgraph waere dagegen eine zweite Wahrheit neben den pom.xml, die genau dann
 #  falsch ist, wenn sie gebraucht wird.
 #
+#  ── DIE MODUL-REPOS (Karte 1639) ───────────────────────────────────────────────────────
+#  Seit den Umzuegen aus app (Karten 1599/1609/1617/1624/1601) liegen Migrationen auch in
+#  `plaintext-modul-*` (03.11.2026: 21 Repos, 20 davon mit zusammen 109 Migrationen). Ihre Jars
+#  landen im Klassenpfad von app/guild — dieselbe Kante wie oben. Die Liste waechst mit jedem
+#  Umzug, deshalb steht sie NICHT in FAMILIE_VORGABE, sondern wird je Lauf LIVE geholt, aus
+#  ZWEI Quellen, vereinigt:
+#    1. `gh repo list` mit dem Praefix — vollstaendig, aber nur fuer das, was der Token SIEHT.
+#       Ein Repo ohne Leserecht fehlt hier einfach, ohne Fehler: das waere der stille Uebersprung.
+#    2. `repos:` aus plaintext-modules/registry-konfig.yaml — unabhaengig vom Token, aber von
+#       Hand gepflegt (am 03.11.2026 fehlte plaintext-modul-mailbox mit 17 Migrationen; allein
+#       waere diese Quelle also die verworfene Bauform B).
+#  Was in 2 steht und der Token nicht lesen kann, laeuft unten in `fremde_pfade` auf 404 und
+#  ist ROT. Ungedeckt bleibt nur ein Repo, das weder registriert NOCH fuer den Token sichtbar
+#  ist. Die NULL-Regel gilt fuer Modul-Repos gelockert: reine -api-Repos und mermaid haben
+#  keine Migrationen. Dafuer prueft `fremde_pfade` fuer JEDES Repo, dass der Baum nicht leer
+#  ist — "null Migrationen" heisst dann "gelesen und keine da", nicht "nichts gelesen".
+#
 #  Aufruf:
 #      quality/flyway-fremdrepo-lint.sh <wurzel> --eigenes <owner/repo> [--pr <nr>]
 #                                       [--familie "<owner/repo> …"] [--ohne-offene-prs]
+#      quality/flyway-fremdrepo-lint.sh --selbsttest      (nur Selbsttest, ohne Netz)
+#  `--familie` ersetzt die GANZE Familie, die Modul-Repos werden dann nicht dazugeholt.
 #
 #  Rueckgabe: 0 sauber (Warnungen aendern daran nichts), 1 Dublette gegen einen FREMDEN
 #             master-Stand, oder kaputter Selbsttest, oder API-Fehlschlag.
@@ -107,14 +126,20 @@ set -uo pipefail
 # derselbe Name und derselbe Rumpf, statt eine zweite Variante zu erfinden.
 grep_q() { local n; n=$(grep -c "$@") || true; [ "${n:-0}" -gt 0 ]; }
 
-# Die Familie. Wer ein Repo mit `db/migration` dazunimmt, traegt es HIER ein — und nur hier;
+# Die Kern-Familie. Wer ein Repo mit `db/migration` dazunimmt, traegt es HIER ein — und nur hier;
 # alle fuenf Aufrufer erben die Liste. Ein Repo ohne Migrationen gehoert NICHT hinein: die
 # Plausibilitaetspruefung unten wuerde es rot melden (siehe dort, das ist Absicht).
+# `plaintext-modul-*` gehoert NICHT hierher: die kommen je Lauf live dazu (modul_repos, Karte 1639).
 FAMILIE_VORGABE='Plaintext-Gmbh/plaintext-root
 Plaintext-Gmbh/plaintext-app
 Plaintext-Gmbh/plaintext-guild
 Plaintext-Gmbh/plaintext-schuetu
 Plaintext-Gmbh/plaintext-iot'
+
+ORG='Plaintext-Gmbh'
+MODUL_PRAEFIX='plaintext-modul-'
+REGISTRY_REPO="${ORG}/plaintext-modules"
+REGISTRY_DATEI='registry-konfig.yaml'
 
 MIGRATIONS_PFAD='db/migration'
 # Wortgleich mit flyway-dubletten-lint.sh: der PFADbestandteil, nicht nur der Dateiname. Eine
@@ -211,7 +236,52 @@ fremde_pfade() {
         echo "::error::Die Dateiliste von '${repo}' kam GEKUERZT zurueck (truncated=${trunkiert}). Eine gekuerzte Liste kann die kollidierende Migration auslassen und waere gruen. Das Repo ist ueber die Baum-API nicht mehr in einem Stueck lesbar — hier muss auf einen flachen Klon umgestellt werden." >&2
         return 1
     fi
+    # Ein LEERER Baum ist kein Lesebeleg. Erst diese Pruefung macht "null Migrationen" bei
+    # Modul-Repos zu einer Aussage (Karte 1639, siehe Kopf).
+    if [ "$(printf '%s' "$json" | jq -r '.tree | length')" -eq 0 ]; then
+        echo "::error::Die Dateiliste von '${repo}' kam LEER zurueck. Das ist kein gelesener Stand — rot statt '0 Migrationen'." >&2
+        return 1
+    fi
     printf '%s' "$json" | jq -r '.tree[].path' | grep -E "$MUSTER" | sort
+    return 0
+}
+
+# ── Modul-Repos (Karte 1639) ──────────────────────────────────────────────────
+# stdin: registry-konfig.yaml. stdout: die Namen der Modul-Repos unter `repos:`.
+registry_modul_repos() {
+    grep -oE "name: *${MODUL_PRAEFIX}[A-Za-z0-9._-]+" | sed 's/^name: *//'
+    return 0
+}
+
+# Darf ein Repo null Migrationen haben? Nur Modul-Repos (reine -api, mermaid). Die fuenf Kern-Repos
+# haben welche; bei ihnen bleibt null ein Alarm. `plaintext-modules` ist KEIN Modul-Repo.
+null_erlaubt() {
+    case "${1##*/}" in
+        "${MODUL_PRAEFIX}"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# stdout: "<ORG>/<repo>" je Modul-Repo, Vereinigung aus Live-Liste und Registry (Kopf: WARUM zwei).
+# Jeder Fehlschlag ist rot. Liefert die Registry null Modul-Repos, hat sich ihr Format geaendert —
+# dann waere Quelle 2 still weg, also ebenfalls rot.
+modul_repos() {
+    local liste registry
+    if ! liste="$(gh_mit_wiederholung repo list "$ORG" --limit 1000 --json name -q '.[].name')"; then
+        echo "::error::Repo-Liste von '${ORG}' nicht lesbar — die Modul-Repos (${MODUL_PRAEFIX}*) waeren ungeprueft." >&2
+        return 1
+    fi
+    if ! registry="$(gh_mit_wiederholung api "repos/${REGISTRY_REPO}/contents/${REGISTRY_DATEI}" -H 'Accept: application/vnd.github.raw')"; then
+        echo "::error::${REGISTRY_REPO}/${REGISTRY_DATEI} nicht lesbar. Ohne sie fiele ein Modul-Repo, das der Token nicht sieht, STILL aus der Pruefung (Leserecht des Tokens pruefen)." >&2
+        return 1
+    fi
+    registry="$(printf '%s\n' "$registry" | registry_modul_repos)"
+    if [ -z "$registry" ]; then
+        echo "::error::${REGISTRY_REPO}/${REGISTRY_DATEI} nennt kein einziges '${MODUL_PRAEFIX}*'-Repo — Format geaendert? registry_modul_repos in $(basename "$0") anpassen." >&2
+        return 1
+    fi
+    { printf '%s\n' "$liste" | grep -E "^${MODUL_PRAEFIX}"; printf '%s\n' "$registry"; } \
+        | sort -u | sed "s|^|${ORG}/|"
     return 0
 }
 
@@ -322,7 +392,31 @@ selbsttest() {
         return 1
     fi
 
-    echo "Selbsttest bestanden: eine kuenstliche Dublette ueber Repo-Grenzen wird mit BEIDEN Fundorten rot; saubere Staende (U…, R__, Datei ausserhalb db/migration) bleiben gruen; eine repo-INTERNE Dublette wird hier nicht mitgemeldet."
+    # ── Richtung 4 (Karte 1639): Modul-Repos ──
+    # a) Die Registry wird so gelesen, wie sie heute aussieht (Auszug), und `plaintext-modules`
+    #    selbst bzw. Kern-Repos fallen NICHT hinein.
+    ausgabe="$(printf '%s\n' \
+        'repos:' \
+        '  - {name: plaintext-app, klasse: app}' \
+        '  - {name: plaintext-modul-vorlage, klasse: Vorlage (Modul-Repo)}' \
+        '  - {name: plaintext-modul-mermaid, klasse: Modul-Repo (aus app umgezogen)}' \
+        'umbenannt:' \
+        '  plaintext-z-quiz: plaintext-modul-quiz' \
+        | registry_modul_repos | tr '\n' ' ')"
+    if [ "$ausgabe" != "plaintext-modul-vorlage plaintext-modul-mermaid " ]; then
+        echo "::error::Selbsttest fehlgeschlagen — registry_modul_repos liest die Registry falsch: '$ausgabe'"
+        return 1
+    fi
+    # b) Null Migrationen: bei einem Modul-Repo erlaubt, bei Kern-Repos und bei
+    #    `plaintext-modules` (Praefix-Falle: "plaintext-modul" + "es") weiterhin ein Alarm.
+    if ! null_erlaubt 'Plaintext-Gmbh/plaintext-modul-mermaid' \
+       || null_erlaubt 'Plaintext-Gmbh/plaintext-app' \
+       || null_erlaubt 'Plaintext-Gmbh/plaintext-modules'; then
+        echo "::error::Selbsttest fehlgeschlagen — null_erlaubt trennt Modul-Repos nicht von Kern-Repos bzw. plaintext-modules."
+        return 1
+    fi
+
+    echo "Selbsttest bestanden: eine kuenstliche Dublette ueber Repo-Grenzen wird mit BEIDEN Fundorten rot; saubere Staende (U…, R__, Datei ausserhalb db/migration) bleiben gruen; eine repo-INTERNE Dublette wird hier nicht mitgemeldet; Registry-Auszug und NULL-Ausnahme fuer Modul-Repos stimmen."
     return 0
 }
 
@@ -330,8 +424,13 @@ selbsttest() {
 WURZEL='.'
 EIGENES=''
 PR_NUMMER=''
-FAMILIE="$FAMILIE_VORGABE"
+FAMILIE=''
 OFFENE_PRS=ja
+
+if [ "${1:-}" = "--selbsttest" ]; then
+    selbsttest
+    exit $?
+fi
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -378,6 +477,13 @@ if [ "$EIGEN_ANZAHL" -eq 0 ]; then
     exit 0
 fi
 
+if [ -z "$FAMILIE" ]; then
+    MODULE="$(modul_repos)" || exit 1
+    echo "Familie: $(printf '%s\n' "$FAMILIE_VORGABE" | grep -c .) Kern-Repos + $(printf '%s\n' "$MODULE" | grep -c .) Modul-Repos (${MODUL_PRAEFIX}*, Live-Liste + Registry)."
+    FAMILIE="$FAMILIE_VORGABE
+$MODULE"
+fi
+
 FEHLER=0
 
 # ── Teil 1 (BLOCKIEREND): gegen den master-Stand der Nachbarrepos ─────────────
@@ -399,6 +505,10 @@ for REPO in $FAMILIE; do
     # wirklich keine Migrationen mehr; im zweiten Fall gehoert es aus FAMILIE_VORGABE
     # gestrichen. Beide Faelle brauchen eine Hand — ein stilles "0 Nummern, also kein
     # Treffer" waere der gruene Lauf, der nichts belegt.
+    if [ "$FREMD_ANZAHL" -eq 0 ] && null_erlaubt "$REPO"; then
+        echo "  ${REPO}: keine Migrationen (Modul-Repo, Baum gelesen)."
+        continue
+    fi
     if [ "$FREMD_ANZAHL" -eq 0 ]; then
         echo "::error::Von '${REPO}' kamen NULL Migrationen zurueck. Alle Repos der Familie haben welche — entweder ist der Abruf fehlgeschlagen (Leserecht des Tokens pruefen) oder das Repo hat keine Migrationen mehr und gehoert aus FAMILIE_VORGABE in $(basename "$0") gestrichen."
         FEHLER=1
