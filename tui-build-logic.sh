@@ -2121,15 +2121,25 @@ do_release() {
 # ── Der gesperrte Abschnitt: Nummer rechnen und Nummer beanspruchen ─────────────────────
 # Laeuft AUSSCHLIESSLICH unter dem Release-Lock (siehe do_release). Setzt die globalen
 # NEW_VERSION / NEXT_SNAPSHOT_VERSION — deshalb bewusst kein `local` und keine Subshell.
+# Karte 1651: Ordnet den Fehler eines Maven-Deploy-Laufs ein — NUR an den [ERROR]-Zeilen
+# des Deploy, nicht am gesamten Log (Testausgaben wie «Tests run: 502» sind KEIN transienter
+# Fehler). «Failed to deploy»/«Could not transfer» zaehlen nur mit 50x-/Netz-Kontext.
+deploy_fehler_ist_transient() { # $1 = Pfad zum Log des fehlgeschlagenen Versuchs
+    grep -E '^\[ERROR\]' "$1" 2>/dev/null | grep -qiE \
+        'Failed to deploy.*50[234]|Could not transfer artifact.*50[234]|Could not transfer artifact.*(timed out|refused|reset|remaining)|status code:?[[:space:]]*50[234]|50[234] Bad Gateway|503 Service Unavailable|504 Gateway Timeout|Connection timed out|Connection refused|Connection reset|Could not resolve host|transfer closed with .* remaining|empty reply from server'
+}
+
 # Karte 1651: Fuehrt ein Kommando aus und wiederholt es bei VORUEBERGEHENDEN Fehlern,
-# bevor der Lauf aufgibt. Wiederholt wird NUR bei HTTP 502/503/504 und Netz-Ausfaellen
-# (Timeout, refused/reset/closed, DNS, abgerissener Uebertragung). NIE bei 401/403 — das
-# sind echte Auth-Fehler, ein Retry verschlimmert sie nur. Immer sichtbar: welcher Versuch
-# laeuft und warum (CI-Log). Wartezeiten wachsen (10 s, 30 s), Obergrenze 3 Versuche.
-# Ausgabe laeuft per tee LIVE weiter (Durchsicht worker 04.11.: Maven-Logs duerfen nicht
-# bis zum Ende gepuffert werden) und wird zusaetzlich in einer Datei fuer die Einordnung
-# mitgehalten. Zahlen-Schutz: 50[234] nur mit Wortgrenze, sonst trifft es Maven-Ausgaben
-# wie «Tests run: 502». RETRY_WARTE_BASE (Sekunden) nur fuer Tests, im Lauf ungesetzt.
+# bevor der Lauf aufgibt. Vorbild ist das bewaehrte Retry in deploy_to_slot (Z. ~1198,
+# Karte 395: genau ein Nachversuch bei nachweislich transientem Fehler, LAUT protokolliert —
+# «Ein stiller Retry waere schlimmer als keiner»). Wiederholt wird NUR bei HTTP 502/503/504
+# und Netz-Ausfaellen (Timeout, refused/reset/closed, DNS, abgerissener Uebertragung),
+# mit Wortgrenzen um 50[234], sonst trifft das Muster Logzeilen wie «Tests run: 502».
+# NIE bei 401/403 — echte Auth-Fehler, ein Retry verschlimmert sie nur. Kleine feste
+# Obergrenze (3 Versuche), Abstand waechst (10 s, 30 s), jede Wiederholung steht im Log.
+# Nur fuer git push/tag push — den Upload-PUT wiederholt Maven seit Karte 1651 selbst
+# (Flags, siehe do_release_bauen_und_veroeffentlichen).
+# RETRY_WARTE_BASE (Sekunden) nur fuer Tests, im Lauf ungesetzt.
 retry_transient() {
     local versuch max=3 warte=${RETRY_WARTE_BASE:-10} rc
     local cmd=("$@")
@@ -2162,14 +2172,6 @@ retry_transient() {
     return "$rc"
 }
 
-# Karte 1651 (Durchsicht worker 04.11.): Ordnet den Fehler eines Maven-Deploy-Laufs
-# ein, und zwar NUR an den [ERROR]-Zeilen des Deploy — nicht am gesamten Log, wo auch
-# Testausgaben («Tests run: 502», «Connection refused» aus Integrationstests) stehen.
-# Transient sind genau die bekannten Upload-/Proxy-/Netz-Fehler des Deploy-Goals.
-deploy_fehler_ist_transient() { # $1 = Pfad zum Log des fehlgeschlagenen Versuchs
-    grep -E '^\[ERROR\]' "$1" 2>/dev/null | grep -qiE \
-        'Failed to deploy.*50[234]|Could not transfer artifact.*50[234]|Could not transfer artifact.*(timed out|refused|reset|remaining)|status code:?[[:space:]]*50[234]|50[234] Bad Gateway|503 Service Unavailable|504 Gateway Timeout|Connection timed out|Connection refused|Connection reset|Could not resolve host|transfer closed with .* remaining|empty reply from server'
-}
 
 release_nummer_beanspruchen() {
     # NACH dem Erwerb des Locks den Stand neu ziehen. CURRENT_VERSION wurde vom build-Wrapper
@@ -2309,37 +2311,55 @@ do_release_bauen_und_veroeffentlichen() {
     if [ "${MVN_RELEASE_DEPLOY}" == "true" ]; then
         echo -e "${BLUE}Maven: Building + deploying version ${GREEN}${NEW_VERSION}${NC} (${TEST_FLAG}, cache-frei)"
         # Karte 1651: Ein Aussetzer (502/503/504, Verbindungsabbruch) darf den Release nicht
-        # halb stehen lassen (am 04.11. zweimal passiert). Der Erstversuch laeuft wie immer;
-        # scheitert er, wird der Fehler ZUERST an den [ERROR]-Zeilen des Deploy eingestuft
-        # (deploy_fehler_ist_transient) — Test-/Compile-Fehler bekommen keinen zweiten Bau.
-        # Reposilite vergibt 409 bei Doppel-Upload: bevor wiederholt wird, prueft ein HEAD
-        # auf die Parent-POM (REL_URL aus release_nummer_beanspruchen), ob schon etwas
-        # angekommen ist; dann kein Retry, sondern die Lage benannt und MIT Fehler abgebrochen.
-        # Der Retry wiederholt NUR den Upload (`deploy:deploy`) — der Bau steht, ein zweiter
-        # Vollbau wuerde nur Zeit kosten und koennte anders ausfallen (Durchsicht worker).
-        REL_CHECK_URL="${REL_URL:-}"
+        # halb stehen lassen (am 04.11. zweimal passiert). Gemessen am echten Mini-Projekt
+        # (test-retry-upload-mini.sh): Die Retry-Flags lassen Maven VERBINDUNGSABBRUECHE selbst
+        # wiederholen (gruen), 5xx-RESPONSES bleiben aber fatal (geprueft an Maven 3.9.16).
+        # `mvn deploy:deploy` allein kann nicht wiederholen («did not assign a file ...»).
+        # Deshalb: Flags FUER ABRUECHE + genau EIN Shell-Nachversuch fuer 5xx-Responses im
+        # bewaehrten deploy_to_slot-Muster (Z. ~1198): laut, fester Abstand, Obergrenze 1,
+        # nur der Upload (`mvn deploy`, kein clean). Einordnung nur an [ERROR]-Deploy-Zeilen.
+        # Restfall: Bricht auch das ab, wird geprueft, ob Artefakte bereits (teils) im
+        # Release-Repo sind (Reposilite 409); dann Lage benannt und MIT Fehler abgebrochen.
+        # (Durchsicht worker, am echten Mini-Projekt gemessen). Das Log laeuft per tee trotzdem
+        # live, die Einordnung liest es aus der Datei.
         DEPLOY_LOG=$(mktemp)
-        if ! mvn clean deploy ${TEST_FLAG} ${RELEASE_MVN_FLAGS} -B 2>&1 | tee "$DEPLOY_LOG"; then
+        mvn clean deploy ${TEST_FLAG} ${RELEASE_MVN_FLAGS} \
+                -Daether.connector.http.retryHandler.count="${MVN_UPLOAD_RETRY:-3}" \
+                -Dmaven.wagon.http.retryHandler.count="${MVN_UPLOAD_RETRY:-3}" -B 2>&1 | tee "$DEPLOY_LOG"
+        DEPLOY_RC=${PIPESTATUS[0]}
+        if [ "$DEPLOY_RC" -ne 0 ]; then
             if ! deploy_fehler_ist_transient "$DEPLOY_LOG"; then
                 rm -f "$DEPLOY_LOG"
                 echo -e "${RED}✗ Maven build failed! (kein voruebergehender Fehler — kein Retry)${NC}"
                 return 1
             fi
+            rm -f "$DEPLOY_LOG"
+            REL_CHECK_URL="${REL_URL:-}"
             if [ -n "$REL_CHECK_URL" ] && [ "$(curl -s -o /dev/null -w '%{http_code}' "$REL_CHECK_URL" 2>/dev/null)" = "200" ]; then
-                rm -f "$DEPLOY_LOG"
                 echo -e "${RED}✗ Upload abgebrochen UND Artefakte bereits (teils) im Release-Repo — kein Retry (Reposilite 409 bei Doppel-Upload).${NC}"
                 echo -e "${RED}  Release ${NEW_VERSION} ist HALB PUBLIZIERT: Tag draussen, Artefakte unvollstaendig.${NC}"
                 echo -e "${YELLOW}  Manuell: fehlende Module identifizieren und per Hand deployen (Karte 1651).${NC}"
                 return 1
             fi
-            rm -f "$DEPLOY_LOG"
-            echo -e "${YELLOW}Karte 1651: erster Upload-Versuch voruebergehend gescheitert, Release-Repo unveraendert — nur den Upload wiederholen.${NC}"
-            if ! retry_transient mvn deploy:deploy ${RELEASE_MVN_FLAGS} -B; then
-                echo -e "${RED}✗ Maven deploy failed!${NC}"
+            # 5xx-RESPONSES bleiben trotz der Flags fatal (gemessen, test-retry-upload-mini.sh);
+            # Verbindungsabbrueche retriert Maven dagegen selbst. Rest hier: genau ein Nachversuch
+            # im bewaehrten deploy_to_slot-Muster (Z. ~1198, Karte 395): laut, fester Abstand,
+            # Obergrenze 1 — und nur der Upload (`mvn deploy`, kein clean, kein zweiter Vollbau).
+            if [ "${RELEASE_UPLOAD_RETRY:-true}" == "true" ]; then
+                local RETRY_WAIT="${RELEASE_UPLOAD_RETRY_WAIT:-30}"
+                echo -e "${YELLOW}⟳ RETRY (1 von 1): Upload voruebergehend gescheitert (HTTP 5xx).${NC}"
+                echo -e "${YELLOW}  Warte ${RETRY_WAIT}s und wiederholt 'mvn deploy' genau EINMAL (kein clean — der Bau steht).${NC}"
+                echo -e "${YELLOW}  Abschaltbar mit RELEASE_UPLOAD_RETRY=false.${NC}"
+                sleep "$RETRY_WAIT"
+                if ! mvn deploy ${TEST_FLAG} ${RELEASE_MVN_FLAGS} -B; then
+                    echo -e "${RED}✗ Auch der Wiederholungsversuch ist gescheitert — es ist keine voruebergehende Stoerung mehr.${NC}"
+                    return 1
+                fi
+                echo -e "${GREEN}✓ Retry erfolgreich — die 5xx war transient.${NC}"
+            else
+                echo -e "${RED}✗ Maven build/deploy failed! (RELEASE_UPLOAD_RETRY=false)${NC}"
                 return 1
             fi
-        else
-            rm -f "$DEPLOY_LOG"
         fi
         # Massnahme 4: Selbstkontrolle — liegt jedes Modul der Version im Release-Repo? Nie fatal.
         release_vollstaendig_pruefen "${NEW_VERSION}"

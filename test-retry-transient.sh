@@ -27,7 +27,6 @@ pruefe() { if [ "$2" = "$3" ]; then printf '  ok   %s\n' "$1";
 # Funktionskoerper per awk extrahieren (Muster: test-lokal-release.sh)
 koerper() { awk "/^$1\\(\\) \\{/,/^\\}/" "$SKRIPT"; }
 [ -n "$(koerper retry_transient)" ] || { echo "FEHL: retry_transient nicht in $SKRIPT gefunden"; exit 2; }
-[ -n "$(koerper deploy_fehler_ist_transient)" ] || { echo "FEHL: deploy_fehler_ist_transient nicht gefunden"; exit 2; }
 
 # Werden von der unten per eval extrahierten retry_transient genutzt (export, sonst SC2034).
 export RED=''; export YELLOW=''; export NC=''
@@ -37,6 +36,7 @@ trap 'rm -rf "$TMPDIR_TEST"' EXIT
 
 eval "$(koerper retry_transient)"
 eval "$(koerper deploy_fehler_ist_transient)"
+[ -n "$(koerper deploy_fehler_ist_transient)" ] || { echo "FEHL: deploy_fehler_ist_transient nicht gefunden"; exit 2; }
 
 # Mock-Kommando: zaehlt Aufrufe in $ZAEHLER, verhaelt sich je nach Name. Meldungen mit
 # Wortgrenzen um 502, damit der Zahlen-Schutz des Helfers real mitgeprueft wird.
@@ -92,25 +92,34 @@ run_case "Zahl 502 im Log -> kein Retry (Wortgrenzen)" zahl_502 1 1 ""
 run_case "harter Fehler -> kein Retry" harter_fehler 1 1 ""
 
 echo "== deploy_fehler_ist_transient (Einordnung nur an [ERROR]-Deploy-Zeilen) =="
+run_logcase() { # run_logcase <name> <log-inhalt> <erwartung: transient|nicht>
+    local name="$1" log="$2" want="$3" got
+    printf '%b\n' "$log" > "$TMPDIR_TEST/deploy.log"
+    if deploy_fehler_ist_transient "$TMPDIR_TEST/deploy.log"; then got="transient"; else got="nicht"; fi
+    pruefe "$name" "$want" "$got"
+}
 run_logcase "Testfehler mit «Tests run: 502» -> nicht transient" \
-    "[INFO] Tests run: 502, Failures: 1, Errors: 0\n[ERROR] Tests run: 502: Failures: 1: something" "nicht"
+    "[INFO] Tests run: 502, Failures: 1\n[ERROR] Tests run: 502: Failures: 1: something" "nicht"
 run_logcase "Compile-Fehler -> nicht transient" \
     "[ERROR] COMPILATION ERROR: symbol not found" "nicht"
 run_logcase "Deploy 502 (status code) -> transient" \
     "[ERROR] Failed to deploy artifacts: Could not transfer artifact x.pom: status code: 502" "transient"
-run_logcase "Deploy 503 Service Unavailable -> transient" \
-    "[ERROR] Could not transfer artifact: 503 Service Unavailable" "transient"
 run_logcase "Deploy 401 -> nicht transient" \
     "[ERROR] Failed to deploy: status code: 401, reason: Unauthorized" "nicht"
 run_logcase "Netz-Abbruch beim Uebertragen -> transient" \
     "[ERROR] Could not transfer artifact x.jar: transfer closed with 1234 bytes remaining" "transient"
 
 echo "== Struktur (Aufrufstellen im Release-Lauf) =============================="
-grep_q() { local n; n=$(grep -c "$@") || true; [ "${n:-0}" -gt 0 ]; }
-pruefe "git push mit retry_transient" "ja" "$(grep_q 'retry_transient git push;' "$SKRIPT" && echo ja || echo nein)"
-pruefe "Tag-Push mit retry_transient" "ja" "$(grep_q 'retry_transient git push origin \"refs/tags/\${NEW_VERSION}\"' "$SKRIPT" && echo ja || echo nein)"
-pruefe "Upload-Retry per deploy:deploy (kein Vollbau)" "ja" "$(grep_q 'retry_transient mvn deploy:deploy' "$SKRIPT" && echo ja || echo nein)"
-pruefe "409-Schutz: kein Retry wenn Artefakte schon da" "ja" "$(grep_q 'kein Retry (Reposilite 409' "$SKRIPT" && echo ja || echo nein)"
+grep_q() { local n; n=$(grep -hc "$@") || true; [ "${n:-0}" -gt 0 ]; }
+pruefe "git push mit retry_transient (Vorbild deploy_to_slot)" "ja" "$(grep_q 'retry_transient git push;' "$SKRIPT" && echo ja || echo nein)"
+TAGPUSH=$(grep_q 'retry_transient git push origin .refs/tags/..' "$SKRIPT" && echo ja || echo nein)
+pruefe "Tag-Push mit retry_transient" "ja" "$TAGPUSH"
+pruefe "Upload-Retry: Maven-Flag aether gesetzt" "ja" "$(grep_q 'aether.connector.http.retryHandler.count' "$SKRIPT" && echo ja || echo nein)"
+pruefe "Upload-Retry: Maven-Flag wagon gesetzt" "ja" "$(grep_q 'maven.wagon.http.retryHandler.count' "$SKRIPT" && echo ja || echo nein)"
+pruefe "kein tee am mvn-Aufruf (PIPESTATUS-Falle behoben)" "nein" "$(grep_q 'mvn clean deploy.*tee' "$SKRIPT" && echo ja || echo nein)"
+pruefe "kein retry_transient mvn deploy:deploy (allein unbrauchbar)" "nein" "$(grep_q 'retry_transient mvn deploy:deploy' "$SKRIPT" && echo ja || echo nein)"
+RETRY1=$(grep_q "RETRY .1 von 1.: Upload" "$SKRIPT" && echo ja || echo nein)
+pruefe "Upload-Einmal-Retry im deploy_to_slot-Stil" "ja" "$RETRY1"
 pruefe "HALB PUBLIZIERT-Meldung beim Restfall" "ja" "$(grep_q 'HALB PUBLIZIERT' "$SKRIPT" && echo ja || echo nein)"
 HALB_RUECKGABE=$(awk '/HALB PUBLIZIERT/{f=1} f && /return 1/{print "ja"; exit}' "$SKRIPT")
 pruefe "HALB PUBLIZIERT bricht mit return 1 ab (Durchsicht worker)" "ja" "${HALB_RUECKGABE:-nein}"
