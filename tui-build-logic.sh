@@ -2121,6 +2121,39 @@ do_release() {
 # ── Der gesperrte Abschnitt: Nummer rechnen und Nummer beanspruchen ─────────────────────
 # Laeuft AUSSCHLIESSLICH unter dem Release-Lock (siehe do_release). Setzt die globalen
 # NEW_VERSION / NEXT_SNAPSHOT_VERSION — deshalb bewusst kein `local` und keine Subshell.
+# Karte 1651: Fuehrt ein Kommando aus und wiederholt es bei VORUEBERGEHENDEN Fehlern,
+# bevor der Lauf aufgibt. Wiederholt wird NUR bei HTTP 502/503/504 und Netz-Ausfaellen
+# (Timeout, refused/reset/closed, DNS, abgerissener Uebertragung). NIE bei 401/403 — das
+# sind echte Auth-Fehler, ein Retry verschlimmert sie nur. Immer sichtbar: welcher Versuch
+# laeuft und warum (CI-Log). Wartezeiten wachsen (10 s, 30 s), Obergrenze 3 Versuche.
+# RETRY_WARTE_BASE (Sekunden) nur fuer Tests, im Lauf ungesetzt.
+retry_transient() {
+    local versuch max=3 warte=${RETRY_WARTE_BASE:-10} out rc
+    local cmd=("$@")
+    for ((versuch=1; versuch<=max; versuch++)); do
+        if [ "$versuch" -gt 1 ]; then
+            echo -e "${YELLOW}Karte 1651: Versuch ${versuch}/${max} nach ${warte}s (voruebergehender Fehler)${NC}"
+            sleep "$warte"
+            warte=$(( warte * 3 ))
+        fi
+        out=$("${cmd[@]}" 2>&1) && rc=0 || rc=$?
+        if [ "$rc" -eq 0 ]; then
+            [ -n "$out" ] && printf '%s\n' "$out"
+            return 0
+        fi
+        [ -n "$out" ] && printf '%s\n' "$out"
+        if grep -qE '(^|[^0-9])401([^0-9]|$)|(^|[^0-9])403([^0-9]|$)' <<< "$out"; then
+            echo -e "${RED}✗ Echter Fehler (401/403) — Karte 1651: kein Retry.${NC}"
+            return "$rc"
+        fi
+        if ! grep -qiE '502|503|504|timed out|Connection refused|Connection reset|Connection closed|Could not resolve host|transfer closed with .* remaining|empty reply from server' <<< "$out"; then
+            return "$rc"
+        fi
+    done
+    echo -e "${RED}✗ ${max} Versuche gescheitert (voruebergehende Fehler).${NC}"
+    return "$rc"
+}
+
 release_nummer_beanspruchen() {
     # NACH dem Erwerb des Locks den Stand neu ziehen. CURRENT_VERSION wurde vom build-Wrapper
     # beim Start gesetzt (init_versions) — wer hier eine halbe Stunde auf einen fremden Lauf
@@ -2218,7 +2251,9 @@ Includes:
     # wiederholen. Gelingt er, ist master mindestens so weit wie das Release-Repo, und ein
     # spaeterer Abbruch kostet hoechstens den SNAPSHOT-Commit (Kosmetik, keine Blockade).
     echo -e "${BLUE}Git: Pushing release commit + tag BEFORE publishing...${NC}"
-    if ! git push; then
+    # Karte 1651: Push mit Retry bei voruebergehenden Fehlern (GitHub-Ausfall am 04.11. liess
+    # den Tag-Push scheitern). idempotent — ein wiederholter Push ist harmlos.
+    if ! retry_transient git push; then
         echo -e "${RED}✗ Push des Release-Commits abgelehnt — master hat sich inzwischen bewegt.${NC}"
         echo -e "${RED}  Es wurde NICHTS veroeffentlicht; der Zustand ist konsistent.${NC}"
         echo -e "${YELLOW}  Naechster Schritt: git pull --rebase, dann den Release erneut starten.${NC}"
@@ -2228,7 +2263,7 @@ Includes:
     # alten, vom Remote abweichenden Tags (plaintext-app: v56.x, dieselbe Falle wie beim
     # `fetch --tags` im Vorflug). Am 29.08.2026 brach so ein Lokal-Release nach Commit+Tag ab,
     # obwohl der Tag laengst draussen war (2.1708.0: Tag ohne Artefakt).
-    if ! git push origin "refs/tags/${NEW_VERSION}"; then
+    if ! retry_transient git push origin "refs/tags/${NEW_VERSION}"; then
         echo -e "${RED}✗ Tag-Push fehlgeschlagen — Tag ${NEW_VERSION} fehlt auf dem Remote.${NC}"
         echo -e "${RED}  Es wurde NICHTS veroeffentlicht; erst den Tag klaeren, dann erneut.${NC}"
         return 1
@@ -2256,9 +2291,25 @@ do_release_bauen_und_veroeffentlichen() {
     local RELEASE_MVN_FLAGS="-Dmaven.build.cache.enabled=false"
     if [ "${MVN_RELEASE_DEPLOY}" == "true" ]; then
         echo -e "${BLUE}Maven: Building + deploying version ${GREEN}${NEW_VERSION}${NC} (${TEST_FLAG}, cache-frei)"
+        # Karte 1651: Ein Aussetzer (502/503/504, Verbindungsabbruch) darf den Release nicht
+        # halb stehen lassen (am 04.11. zweimal passiert). ABER: Reposilite vergibt 409 bei
+        # Doppel-Upload — bevor der erste Fehlversuch wiederholt wird, muss klar sein, dass
+        # NOCH NICHTS im Release-Repo angekommen ist (REL_URL kommt global aus
+        # release_nummer_beanspruchen; fehlt sie, versucht der Retry es trotzdem — ein 409
+        # bricht dann sauber ab statt halb hochzuladen).
+        REL_CHECK_URL="${REL_URL:-}"
         if ! mvn clean deploy ${TEST_FLAG} ${RELEASE_MVN_FLAGS} -B; then
-            echo -e "${RED}✗ Maven build failed!${NC}"
-            return 1
+            if [ -n "$REL_CHECK_URL" ] && [ "$(curl -s -o /dev/null -w '%{http_code}' "$REL_CHECK_URL" 2>/dev/null)" = "200" ]; then
+                echo -e "${RED}✗ Upload abgebrochen UND Artefakte bereits (teils) im Release-Repo — kein Retry (Reposilite 409 bei Doppel-Upload).${NC}"
+                echo -e "${RED}  Release ${NEW_VERSION} ist HALB PUBLIZIERT: Tag draussen, Artefakte unvollstaendig.${NC}"
+                echo -e "${YELLOW}  Manuell: fehlende Module identifizieren und per Hand deployen (Karte 1651).${NC}"
+            else
+                echo -e "${YELLOW}Karte 1651: erster Upload-Versuch gescheitert, Release-Repo unveraendert — Retry.${NC}"
+                if ! retry_transient mvn clean deploy ${TEST_FLAG} ${RELEASE_MVN_FLAGS} -B; then
+                    echo -e "${RED}✗ Maven build failed!${NC}"
+                    return 1
+                fi
+            fi
         fi
         # Massnahme 4: Selbstkontrolle — liegt jedes Modul der Version im Release-Repo? Nie fatal.
         release_vollstaendig_pruefen "${NEW_VERSION}"
