@@ -2351,7 +2351,9 @@ do_release_bauen_und_veroeffentlichen() {
                 echo -e "${YELLOW}  Warte ${RETRY_WAIT}s und wiederholt 'mvn deploy' genau EINMAL (kein clean — der Bau steht).${NC}"
                 echo -e "${YELLOW}  Abschaltbar mit RELEASE_UPLOAD_RETRY=false.${NC}"
                 sleep "$RETRY_WAIT"
-                if ! mvn deploy ${TEST_FLAG} ${RELEASE_MVN_FLAGS} -B; then
+                # -DskipTests statt ${TEST_FLAG}: Der Erstversuch hat die Tests schon geprueft:
+                # Der Retry wiederholt nur den Upload, ein flaky Test darf ihn nicht rot faerben.
+                if ! mvn deploy -DskipTests ${RELEASE_MVN_FLAGS} -B; then
                     echo -e "${RED}✗ Auch der Wiederholungsversuch ist gescheitert — es ist keine voruebergehende Stoerung mehr.${NC}"
                     return 1
                 fi

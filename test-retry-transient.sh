@@ -115,6 +115,8 @@ pruefe "git push mit retry_transient (Vorbild deploy_to_slot)" "ja" "$(grep_q 'r
 TAGPUSH=$(grep_q 'retry_transient git push origin .refs/tags/..' "$SKRIPT" && echo ja || echo nein)
 pruefe "Tag-Push mit retry_transient" "ja" "$TAGPUSH"
 pruefe "Upload-Retry: Maven-Flag aether gesetzt" "ja" "$(grep_q 'aether.connector.http.retryHandler.count' "$SKRIPT" && echo ja || echo nein)"
+SKIP=$(grep_q "mvn deploy -DskipTests" "$SKRIPT" && echo ja || echo nein)
+pruefe "Nachversuch ohne Tests (-DskipTests, Durchsicht worker 3)" "ja" "$SKIP"
 pruefe "Upload-Retry: Maven-Flag wagon gesetzt" "ja" "$(grep_q 'maven.wagon.http.retryHandler.count' "$SKRIPT" && echo ja || echo nein)"
 pruefe "kein tee am mvn-Aufruf (PIPESTATUS-Falle behoben)" "nein" "$(grep_q 'mvn clean deploy.*tee' "$SKRIPT" && echo ja || echo nein)"
 pruefe "kein retry_transient mvn deploy:deploy (allein unbrauchbar)" "nein" "$(grep_q 'retry_transient mvn deploy:deploy' "$SKRIPT" && echo ja || echo nein)"
