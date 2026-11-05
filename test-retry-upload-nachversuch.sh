@@ -15,7 +15,8 @@ FEHLER=0
 pruefe() { if [ "$2" = "$3" ]; then printf '  ok   %s\n' "$1";
            else printf '  FEHL %s\n       erwartet: %s\n       erhalten: %s\n' "$1" "$2" "$3"; FEHLER=1; fi }
 
-# In der Funktion genutzte Farbvariablen (im Test ohne Wirkung, aber gesetzt wegen set -u).
+# In der extrahierten Funktion genutzte Farbvariablen (im Test ohne Wirkung, aber gesetzt wegen set -u).
+# shellcheck disable=SC2034  # werden in der zur Laufzeit extrahierten Funktion genutzt
 BLUE=""; GREEN=""; RED=""; YELLOW=""; NC=""
 
 # release_vollstaendig_pruefen ist nicht Gegenstand dieses Tests -> no-op
@@ -45,6 +46,7 @@ for ln in open(p, encoding="utf-8").read().splitlines():
         out.append("            return 0  # Test-Hook: Nachversuch geprueft, Rest unerreichbar")
 open(p, "w", encoding="utf-8").write("\n".join(out) + "\n")
 PYEOF
+# shellcheck disable=SC1090  # $FUNCS entsteht zur Laufzeit aus dem zu pruefenden Skript
 . "$FUNCS"
 
 # ── Mini-Server: erster PUT -> 502, alle weiteren -> 200 ──────────────────────
@@ -107,7 +109,7 @@ sed "s/PORT/$port/" "$WORK/proj/pom.xml.template" > "$WORK/proj/pom.xml"
 # RELEASE_UPLOAD_RETRY_WAIT=0: kein Schlaf im Test; REL_URL leer: HALB-PUBLIZIERT-Zweig ist
 # hier nicht Gegenstand (wird an Reposilite-409-Logik gemessen, nicht am Mini-Server).
 (
-    cd "$WORK/proj"
+    cd "$WORK/proj" || exit 1
     export MVN_RELEASE_DEPLOY=true MVN_TEST_FLAG=-DskipTests MVN_UPLOAD_RETRY=3
     export RELEASE_UPLOAD_RETRY=true RELEASE_UPLOAD_RETRY_WAIT=0
     export NEW_VERSION=1.0 REL_URL=""
