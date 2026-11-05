@@ -16,8 +16,9 @@ pruefe() { if [ "$2" = "$3" ]; then printf '  ok   %s\n' "$1";
            else printf '  FEHL %s\n       erwartet: %s\n       erhalten: %s\n' "$1" "$2" "$3"; FEHLER=1; fi }
 
 # In der extrahierten Funktion genutzte Farbvariablen (im Test ohne Wirkung, aber gesetzt wegen set -u).
-# shellcheck disable=SC2034  # werden in der zur Laufzeit extrahierten Funktion genutzt
-BLUE=""; GREEN=""; RED=""; YELLOW=""; NC=""
+# Export statt disable: SC2034 greift bei exportierten Variablen nicht — sie werden in der zur
+# Laufzeit extrahierten Funktion genutzt.
+export BLUE="" GREEN="" RED="" YELLOW="" NC=""
 
 # release_vollstaendig_pruefen ist nicht Gegenstand dieses Tests -> no-op
 release_vollstaendig_pruefen() { return 0; }
