@@ -501,6 +501,52 @@ lauf apply 1.722.0 2.1849.0
 pruefe "L5 apply mit app ohne Pin: verweigert"        "ja"                   "$([ "$RC" -ne 0 ] && echo ja || echo nein)"
 REPO="$ALT_REPO"; G="$ALT_G"; export ROOT_MAVEN_REPO="$ALT_MR"
 
+echo "== V2: v2-Parent liest die v2-Metadaten (Karte 1621) ======================="
+# Selbstenthaltene Fixture unter ch/plaintext/v2: 3.0.0 komplett, 3.1.0 zunaechst ohne
+# Parent-POM (Upload-Fenster). Ein Consumer mit v2-Parent muss DIESE Metadaten lesen und
+# die v1-Attrappe unter ch/plaintext unberuehrt lassen.
+G2="$REPO/ch/plaintext/v2"
+pom2_ablegen() {   # $1 = artifactId  $2 = Version  [$3 = Inhalt]
+    mkdir -p "$G2/$1/$2"
+    printf '%s\n' "${3:-<project><artifactId>$1</artifactId><version>$2</version></project>}" > "$G2/$1/$2/$1-$2.pom"
+}
+metadata2() {   # $1 = release, $2.. = alle Versionen
+    local r="$1"; shift
+    mkdir -p "$G2/plaintext-root-parent"
+    { echo '<metadata><artifactId>plaintext-root-parent</artifactId><versioning>'
+      echo "<release>$r</release><versions>"
+      for v in "$@"; do echo "<version>$v</version>"; done
+      echo '</versions></versioning></metadata>'; } > "$G2/plaintext-root-parent/maven-metadata.xml"
+}
+{ echo '<project>'
+  echo '  <parent><groupId>ch.plaintext.v2</groupId><artifactId>plaintext-root-parent</artifactId><version>3.0.0</version></parent>'
+  echo '  <artifactId>plaintext-app-parent</artifactId>'
+  echo '  <properties><plaintext-root.version>3.0.0</plaintext-root.version></properties>'
+  echo '  <dependencies>'
+  echo '    <dependency><groupId>ch.plaintext.v2</groupId><artifactId>plaintext-root-web</artifactId><version>${plaintext-root.version}</version></dependency>'
+  echo '  </dependencies>'
+  echo '</project>'; } > "$POM_FILE"
+pom2_ablegen plaintext-root-parent 3.0.0 "$(parent_pom 3.0.0 plaintext-root-web)"
+pom2_ablegen plaintext-root-web 3.0.0
+metadata2 3.1.0 3.0.0 3.1.0
+lauf detect
+pruefe "V2 detect: liest die v2-Metadaten (latest=3.1.0)" "3.1.0"  "$(ausgabe latest)"
+pruefe "V2 detect: 3.1.0 ohne Parent-POM -> bump=false"    "false" "$(ausgabe bump)"
+pruefe "V2 detect: vollstaendig=false"                    "false" "$(ausgabe vollstaendig)"
+pruefe "V2 detect: behind=1 (3.1.0 vor dem Pin)"           "1"     "$(ausgabe behind)"
+pom2_ablegen plaintext-root-parent 3.1.0 "$(parent_pom 3.1.0 plaintext-root-web)"
+pom2_ablegen plaintext-root-web 3.1.0
+lauf detect
+pruefe "V2 detect: 3.1.0 komplett -> bump=true"            "true"  "$(ausgabe bump)"
+lauf apply 3.1.0
+pruefe "V2 apply: Exit 0"                                  "0"     "$RC"
+pruefe "V2 apply: Pin gebumpt"                             "3.1.0" "$(pin)"
+pruefe "V2 apply: parent gebumpt"                          "3.1.0" "$(parent)"
+lauf detect
+pruefe "V2 apply danach: kein Bump mehr"                   "false" "$(ausgabe bump)"
+# v1-Consumer-Zustand wiederherstellen (L5-Endstand), damit spaetere Abschnitte ihn so vorfinden.
+consumer_pom 1.720.0 plaintext-root-common plaintext-root-web
+
 echo "== Verdrahtung ============================================================="
 # Karte 1127: das `|| true` im Detect-Schritt war der eigentliche Befund. Es darf nicht
 # zurueckkommen — ein Lauf, der nicht nachsehen konnte, muss rot sein.
