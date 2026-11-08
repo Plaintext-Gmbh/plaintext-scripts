@@ -1530,6 +1530,51 @@ deploy_to_dev() {
     return 1
 }
 
+# ── Registry-Index-Warte (Karte 1646) ──────────────────────────────────────────────────────────
+# Der Tag-Lauf schreibt den Registry-Index (s. /huelle/config/module-quellen.txt im Slot)
+# parallel zum Deploy; startete der neue Slot vor dem Upload, lief er bis zum naechsten Start
+# im Rueckfall (RUECKFALL-MODULE-YAML, Karte 1618) — Pinning und stand.txt griffen dann nicht.
+# Warte deshalb unter dem Deploy-Lock, bis die Release-Version im Index steht. Nach der
+# Obergrenze trotzdem starten: Der Rueckfall laedt die richtigen Module, nur der Auswahl-Weg
+# greift dann nicht. Nicht im Lader warten: Der Tag-Lauf dauert bis 9 Minuten und wuerde
+# gegen die Health-Pruefung laufen.
+REGISTRY_WARTE_MAX_SEC="${REGISTRY_WARTE_MAX_SEC:-600}"
+REGISTRY_WARTE_INTERVALL_SEC="${REGISTRY_WARTE_INTERVALL_SEC:-20}"
+
+# Steht VERSION im Registry-Index? rc 0 = ja. Die Pruefung laeuft IM aktiven Slot: Lese-Token
+# (PLAINTEXT_MODULE_REGISTRY_LESEN) und Index-URL liegen nur dort, nicht auf dem Deploy-Rechner;
+# wget ist im Slot-Alpine vorhanden, curl nicht. Abruffehler und «Version noch nicht drin»
+# sind belegt gleich — die Schleife wartet in beiden Faellen.
+registry_index_hat_version() {
+    local VERSION="$1" SLOT="$2"
+    local VERSION_ESC INDEX
+    VERSION_ESC=$(printf '%s' "$VERSION" | sed 's/[.[\*^$]/\\&/g')
+    # Keine Pipe zu grep -q: Der bricht nach dem Treffer ab, ssh kriegt SIGPIPE, und mit
+    # `set -o pipefail` (Test-Muster, CI) waere die Pipeline rc 141 statt 0.
+    INDEX=$(ssh ${DEPLOY_SERVER} "sudo docker exec ${IMAGE_NAME}-prod-${SLOT} sh -c 'wget -q -O- --user=\"\$PLAINTEXT_MODULE_REGISTRY_LESEN\" --password=x \"https://home.plaintext.ch/public.php/webdav/${IMAGE_NAME}/index.txt\"'" 2>/dev/null) || return 1
+    grep -qE "zuletzt ${VERSION_ESC}([^0-9]|\$)" <<<"$INDEX"
+}
+
+warte_auf_registry_index() {
+    local VERSION="$1" SLOT="$2" WARTE=0
+    until registry_index_hat_version "$VERSION" "$SLOT"; do
+        if [ "$WARTE" -ge "$REGISTRY_WARTE_MAX_SEC" ]; then
+            echo -e "${YELLOW}⚠ Registry-Index kennt ${VERSION} nach ${REGISTRY_WARTE_MAX_SEC}s nicht — starte trotzdem (Rückfall greift, Auswahl-Weg erst nach erneutem Start).${NC}"
+            return 0
+        fi
+        if [ "$WARTE" -eq 0 ]; then
+            echo -e "${YELLOW}Registry-Index kennt ${VERSION} noch nicht — warte auf den Tag-Lauf (Obergrenze ${REGISTRY_WARTE_MAX_SEC}s).${NC}"
+        fi
+        sleep "$REGISTRY_WARTE_INTERVALL_SEC"
+        WARTE=$((WARTE + REGISTRY_WARTE_INTERVALL_SEC))
+    done
+    if [ "$WARTE" -gt 0 ]; then
+        echo -e "${GREEN}✓ Registry-Index hat ${VERSION} nach ${WARTE}s.${NC}"
+    else
+        echo -e "${GREEN}✓ Registry-Index kennt ${VERSION} bereits.${NC}"
+    fi
+}
+
 # Function to deploy to prod server (blue-green)
 deploy_to_prod() {
     local WITH_HEALTH_CHECK=${1:-false}
@@ -1594,6 +1639,10 @@ deploy_to_prod_gesperrt() {
         echo -e "${GREEN}✓ Backup created: $(basename $BACKUP_PATH)${NC}"
     fi
     echo ""
+
+    # Karte 1646: Erst starten, wenn der Registry-Index die Version kennt — sonst bootet der
+    # Slot vor dem Index-Upload des Tag-Laufs und laeuft bis zum naechsten Start im Rueckfall.
+    warte_auf_registry_index "$RELEASE_VERSION" "$ACTIVE_SLOT"
 
     # Deploy to inactive PROD slot
     if ! deploy_blue_green "prod" "$RELEASE_VERSION"; then
