@@ -22,6 +22,13 @@
 # Quelle NICHT: der Tag entsteht vor dem `mvn deploy`, ein Tag ohne publizierte Artefakte
 # wuerde einen unaufloesbaren Bump erzeugen.
 #
+# Karte 1621 — ZWEI root-Linien: v1 (ch/plaintext, archiviert, eingefroren bei 1.821.0) und
+# v2 (ch/plaintext/v2, ab 3.0.0 die aktive Linie). Dieses Skript liest die Metadaten der
+# Linie, auf der der Consumer schon lebt (groupId seines <parent>-Blocks) — ein v1-Parent
+# bleibt auf der eingefrorenen v1-Linie, ein v2-Parent (ch.plaintext.v2) bekommt die neueste
+# 3.x-Version. Die groupId-Umschaltung selbst ist bewusst kein Bump, sondern ein einmaliger
+# Schritt je Consumer (Karte 1621, S5).
+#
 # Und auch die <release>-Angabe der metadata reicht nicht (Massnahme 4, 29.08.2026): sie steht,
 # sobald der PARENT hochgeladen ist — die 24 Module folgen ueber rund 15 Minuten. Ein Bump in
 # diesem Fenster sieht ein halbes Release. Deshalb gilt eine Version erst als veroeffentlicht,
@@ -53,6 +60,22 @@ set -euo pipefail
 POM="${POM_FILE:-pom.xml}"
 REPO_BASE="${ROOT_MAVEN_REPO:-https://maven.plaintext.ch/releases}"
 GROUP_PATH="ch/plaintext"
+
+# Karte 1621 (root v1 -> v2): root-Artefakte liegen je nach Versionslinie unter zwei Gruppen —
+# v1 unter ch/plaintext, v2 unter ch/plaintext/v2. Welche Linie DIESER Consumer verfolgt, sagt
+# die groupId seines <parent>-Blocks: ein v2-Parent (ch.plaintext.v2) liest die v2-Metadaten,
+# ein v1-Parent die v1-Metadaten (Linie eingefroren, letzte Version 1.821.0). Die Umschaltung
+# der groupId selbst ist kein Bump, sondern ein bewusster einmaliger Schritt je Consumer (Karte
+# 1621, S5); danach bumpt dieser Lauf die Versionen auf der v2-Linie weiter. APP-Artefakte
+# (plaintext-parent, Kopplung Karte 1327) liegen unabhaengig davon immer unter ch/plaintext.
+parent_gruppe() {
+  awk '/<parent>/{p=1} p&&/<groupId>/{gsub(/.*<groupId>|<\/groupId>.*/,""); print; exit}' "$POM"
+}
+if [ "$(parent_gruppe)" = "ch.plaintext.v2" ]; then
+  ROOT_GROUP="ch/plaintext/v2"
+else
+  ROOT_GROUP="$GROUP_PATH"
+fi
 
 # Rueckgabecodes von `detect` (Karte 1127) — sie sind der einzige Unterschied zwischen
 # "nachgesehen, nichts zu tun" und "konnte nicht nachsehen":
@@ -122,8 +145,11 @@ current_interfaces() {
 # darum EXIT_NICHT_PRUEFBAR statt die(). Der Code muss von jeder Ebene von Hand
 # weitergereicht werden (`|| exit $?`), set -e allein genuegt nicht — Begruendung und Messung
 # stehen bei latest_version.
+# $1 = artifactId, $2 = Gruppenpfad (Default GROUP_PATH — wird von den root-Lesen mit
+# ROOT_GROUP ueberschrieben, Karte 1621).
 fetch_metadata() {   # $1 = artifactId
-  curl -sfL --max-time 30 "${REPO_BASE}/${GROUP_PATH}/$1/maven-metadata.xml" \
+  local gp="${2:-$GROUP_PATH}"
+  curl -sfL --max-time 30 "${REPO_BASE}/${gp}/$1/maven-metadata.xml" \
     || nicht_pruefbar "maven-metadata.xml fuer $1 nicht abrufbar (${REPO_BASE}) — Repo erreichbar?"
 }
 
@@ -151,7 +177,7 @@ latest_version() {
   # Skript lief nach dem ::error einfach weiter bis zum naechsten die() (Exit 1). Damit waere
   # der Ausfall wieder als gewoehnlicher Fehler verkleidet gewesen, statt als "nicht
   # nachgesehen" (Exit 4). Der Code wird deshalb an jeder Ebene von Hand weitergereicht.
-  meta="$(fetch_metadata plaintext-root-parent)" || exit $?
+  meta="$(fetch_metadata plaintext-root-parent "$ROOT_GROUP")" || exit $?
   candidate="$(echo "$meta" | grep -o '<release>[^<]*</release>' | sed 's/.*<release>//;s/<.*//')"
   [ -n "$candidate" ] || die "kein <release> in der metadata von plaintext-root-parent"
   echo "$candidate"
@@ -162,7 +188,7 @@ latest_version() {
 # 2 Parent-POM nicht abrufbar, 3 Parent-POM ohne Module). Ein unvollstaendiges Release ist KEIN
 # Fehler dieses Skripts, sondern ein Zeitfenster — der Aufrufer wartet auf den naechsten Lauf.
 release_fehlend() {
-  reposilite_release_fehlend "$REPO_BASE" "$GROUP_PATH" plaintext-root-parent "$1" "${BUMP_IGNORIERE_MODULE:-}"
+  reposilite_release_fehlend "$REPO_BASE" "$ROOT_GROUP" plaintext-root-parent "$1" "${BUMP_IGNORIERE_MODULE:-}"
 }
 
 # Safety (seit Karte 361, kaputte Deploy-Pfade): die Version muss fuer JEDES Artefakt publiziert
@@ -178,7 +204,7 @@ pruefe_benoetigte_artefakte() {   # $1 = Version
     benoetigt[${#benoetigt[@]}]="$a"
   done < <(required_artifacts)
   [ "${#benoetigt[@]}" -gt 0 ] || return 0
-  fehlend="$(reposilite_fehlende_artefakte "$REPO_BASE" "$GROUP_PATH" "$1" "${benoetigt[@]}" | tr '\n' ' ')" || true
+  fehlend="$(reposilite_fehlende_artefakte "$REPO_BASE" "$ROOT_GROUP" "$1" "${benoetigt[@]}" | tr '\n' ' ')" || true
   [ -z "${fehlend% }" ] || case "$fehlend" in
     # Karte 1127: "(HTTP …)" heisst nicht pruefbar, nicht "fehlt". Ein Repo, das mitten in der
     # Pruefung wegbricht, darf nicht als "Modul in root entfernt" gemeldet werden — und schon
@@ -200,7 +226,7 @@ pruefe_benoetigte_artefakte() {   # $1 = Version
 AUSWEICH_MAX="${AUSWEICH_MAX:-5}"
 neueste_vollstaendige_unter() {   # $1 = neueste (unvollstaendige) Version, $2 = Pin
   local meta v f rc n=0
-  meta="$(fetch_metadata plaintext-root-parent)" || return 0
+  meta="$(fetch_metadata plaintext-root-parent "$ROOT_GROUP")" || return 0
   while read -r v; do
     [ -n "$v" ] || continue
     [ "$v" != "$1" ] || continue
@@ -322,7 +348,7 @@ count_behind() {   # $1 = aktuell gepinnte Version
   # Kein $(...)-Zwischenschritt: fetch_metadata laeuft hier direkt in der Pipeline, ihr `exit 4`
   # beendet die Subshell von count_behind, und der Aufrufer reicht den Code per `|| exit $?`
   # weiter (siehe Kommentar in latest_version).
-  fetch_metadata plaintext-root-parent \
+  fetch_metadata plaintext-root-parent "$ROOT_GROUP" \
     | grep -o '<version>[^<]*</version>' | sed 's/.*<version>//;s/<.*//' \
     | { n=0; while read -r v; do
           [ -n "$v" ] || continue
@@ -394,7 +420,7 @@ case "${1:-detect}" in
         #           artefakte haengt den Code an). Es fehlt nicht — es ist unbekannt.
         if [ "$VOLL" -eq 2 ]; then
           PCODE_RC=0
-          PCODE="$(reposilite_vorhanden "$(reposilite_pom_url "$REPO_BASE" "$GROUP_PATH" plaintext-root-parent "$LATEST")")" || PCODE_RC=$?
+          PCODE="$(reposilite_vorhanden "$(reposilite_pom_url "$REPO_BASE" "$ROOT_GROUP" plaintext-root-parent "$LATEST")")" || PCODE_RC=$?
           [ "$PCODE_RC" -eq 1 ] \
             || UNPRUEFBAR="Parent-POM von ${LATEST} nicht lesbar (HTTP ${PCODE}) — kein 404, also keine Aussage ueber den Upload-Stand"
         fi
