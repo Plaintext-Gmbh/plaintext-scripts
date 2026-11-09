@@ -130,8 +130,9 @@ grep_q() { local n; n=$(grep -c "$@") || true; [ "${n:-0}" -gt 0 ]; }
 # alle fuenf Aufrufer erben die Liste. Ein Repo ohne Migrationen gehoert NICHT hinein: die
 # Plausibilitaetspruefung unten wuerde es rot melden (siehe dort, das ist Absicht).
 # `plaintext-modul-*` gehoert NICHT hierher: die kommen je Lauf live dazu (modul_repos, Karte 1639).
-FAMILIE_VORGABE='Plaintext-Gmbh/plaintext-root
-Plaintext-Gmbh/plaintext-app
+# `plaintext-root` (v1) steht seit dem Archivieren von v1 am 08.11.2026 (Karte 1621) nicht mehr
+# darin: v1 landet nie wieder in einem Klassenpfad der Familie, Dubletten gegen es sind unerreichbar.
+FAMILIE_VORGABE='Plaintext-Gmbh/plaintext-app
 Plaintext-Gmbh/plaintext-guild
 Plaintext-Gmbh/plaintext-schuetu
 Plaintext-Gmbh/plaintext-iot'
@@ -253,7 +254,7 @@ registry_modul_repos() {
     return 0
 }
 
-# Darf ein Repo null Migrationen haben? Nur Modul-Repos (reine -api, mermaid). Die fuenf Kern-Repos
+# Darf ein Repo null Migrationen haben? Nur Modul-Repos (reine -api, mermaid). Die vier Kern-Repos
 # haben welche; bei ihnen bleibt null ein Alarm. `plaintext-modules` ist KEIN Modul-Repo.
 null_erlaubt() {
     case "${1##*/}" in
@@ -499,7 +500,7 @@ for REPO in $FAMILIE; do
     fi
     FREMD_ANZAHL="$(grep -c . "$ARBEIT/fremd.pfade" || true)"
 
-    # PLAUSIBILITAET. Alle fuenf Repos der Familie haben Migrationen (root 69, app 155,
+    # PLAUSIBILITAET. Alle vier Kern-Repos der Familie haben Migrationen (app 155,
     # guild 47, schuetu 18, iot 13 — gezaehlt 08.09.2026). Kommen null zurueck, ist entweder
     # der Abruf schiefgegangen (leerer Baum bei fehlender Berechtigung) oder das Repo hat
     # wirklich keine Migrationen mehr; im zweiten Fall gehoert es aus FAMILIE_VORGABE
