@@ -55,7 +55,7 @@ maven_einrichten
 # Release andere Repos verwenden, haben eines — und nur sie reichen ihre Version weiter.
 REPOS="
 plaintext-root||ja|plaintext-root-watch
-plaintext-app|https://app.plaintext.ch/nosec/version|ja|plaintext-z-briefing
+plaintext-app|https://app.plaintext.ch/nosec/version|ja|plaintext-app-basis
 plaintext-guild|https://guild.plaintext.ch/nosec/version|ja|
 plaintext-schuetu|https://schuelerturnier.plaintext.ch/nosec/version|ja|
 plaintext-iot||nein|
