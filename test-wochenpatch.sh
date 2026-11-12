@@ -155,7 +155,7 @@ case "$url" in
   */api/repos/lookup/*) echo '{"id":1}' ;;
   */pipelines*) if [ "${MOCK_LAEUFT:-0}" = 1 ]; then echo '[{"number":5,"branch":"master","event":"push","status":"running"}]'
                 else echo "[{\"number\":4,\"branch\":\"master\",\"event\":\"push\",\"commit\":\"${MOCK_PIPE_COMMIT:-abc}\",\"status\":\"${MOCK_PIPE_STATUS:-success}\"}]"; fi ;;
-  */plaintext-root-watch-*.jar|*/plaintext-z-briefing-*.jar) [ "${MOCK_ARTEFAKT:-1}" = 1 ] || exit 22 ;;
+  */plaintext-root-watch-*.jar|*/plaintext-app-basis-*.jar) [ "${MOCK_ARTEFAKT:-1}" = 1 ] || exit 22 ;;
   */nosec/version) echo 1.2.0 ;;
   *) exit 22 ;;
 esac
