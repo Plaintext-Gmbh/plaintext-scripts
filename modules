@@ -11,8 +11,8 @@ set -e
 # PROJECT_DIR must be set by caller (e.g. start script) or defaults to cwd
 SCRIPT_DIR="${PROJECT_DIR:-$(pwd)}"
 
-source "$HOME/codeplain/plaintext-scripts/tui-common.sh"
-source "$HOME/codeplain/plaintext-scripts/tui-modules-logic.sh"
+source "${PLAINTEXT_CODE:-$HOME/code}/plaintext-scripts/tui-common.sh"
+source "${PLAINTEXT_CODE:-$HOME/code}/plaintext-scripts/tui-modules-logic.sh"
 
 # ── Non-interactive mode ─────────────────────────────────────
 

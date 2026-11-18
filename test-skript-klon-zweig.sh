@@ -4,7 +4,7 @@
 #   Die Build-Logik, die einen lokalen Release oder einen PROD-Deploy fährt, muss selbst von
 #   'master' kommen.
 #
-# WORUM ES GEHT (Vorfall Karte 1151, 09.09.2026): ~/codeplain/plaintext-scripts stand elf Tage
+# WORUM ES GEHT (Vorfall Karte 1151, 09.09.2026): ~/codeplain/plaintext-scripts (heute $PLAINTEXT_CODE/plaintext-scripts) stand elf Tage
 # auf einem Zweig, den GitHub längst gelöscht hatte. Ein Handstart hätte in dieser Zeit PROD ohne
 # NAS-Deploy-Lock und ohne Migrations-Backup ausgerollt (gemessen: 0 statt 22 Vorkommen von
 # `deploy_lock` in tui-build-logic.sh). `lokal_vorflug` prüfte den Zweig der APP — nur seinen

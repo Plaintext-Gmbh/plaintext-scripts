@@ -39,7 +39,7 @@ export -f smart_open_browser
 # Loads build-conf.txt from plaintext-config repo first, falls back to project dir.
 # Usage: load_build_conf "/path/to/project"
 # Sets: IMAGE_NAME, WEBAPP_MODULE, TUI_TITLE, DB_NAME, etc.
-PLAINTEXT_CONFIG_DIR="${PLAINTEXT_CONFIG_DIR:-$HOME/codeplain/plaintext-config}"
+PLAINTEXT_CONFIG_DIR="${PLAINTEXT_CONFIG_DIR:-${PLAINTEXT_CODE:-$HOME/code}/plaintext-config}"
 
 load_build_conf() {
     local project_dir="${1:-.}"
