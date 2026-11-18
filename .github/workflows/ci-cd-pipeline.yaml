@@ -1317,6 +1317,7 @@ jobs:
       - name: Install plaintext-scripts
         run: |
           mkdir -p $HOME/codeplain
+          echo "PLAINTEXT_CODE=$HOME/codeplain" >> "$GITHUB_ENV"   # Karte 2359: ./build findet die Bibliotheken ueber $PLAINTEXT_CODE
           # Ziel vorher leeren: auf wiederverwendeten Runner-Workspaces würde `cp -r` sonst INS
           # bestehende Verzeichnis kopieren und die alten Skripte stehen lassen (Änderungen wirkungslos).
           rm -rf "$HOME/codeplain/plaintext-scripts"

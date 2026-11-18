@@ -67,7 +67,7 @@ deploy, mit Tests); master→release-all (nur deploy, mit Tests+Release+dev+prod
 **`Plaintext-Gmbh`**. Der deploy-Job klonte bis dahin `daniel-marthaler/plaintext-scripts`; das
 funktionierte nur über GitHubs Repo-Redirect und zog die Deploy-Skripte aus einem Namespace, den die
 Organisation nicht kontrolliert. Es gibt kein zweites Remote und keinen Fork synchron zu halten.
-Lokal: `/home/mad/codeplain/plaintext-scripts`.
+Lokal: `$PLAINTEXT_CODE/plaintext-scripts` (Karte 2359; früher `~/codeplain/plaintext-scripts`).
 
 **Validierung (ohne andere Apps zu brechen):** plaintext-scripts-Branch `feat/build-once`; in einem
 plaintext-app-Testbranch `ci-cd.yaml` temporär auf `@feat/build-once` zeigen; Push (→ snapshot-dev) →

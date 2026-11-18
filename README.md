@@ -21,18 +21,18 @@ This repository provides a reusable TUI-based build system and developer tools:
 ## Installation
 
 Das Repo wird **nicht automatisch geklont**. Die `build`-Wrapper der Projekte sourcen die
-Bibliothek fest aus `$HOME/codeplain/plaintext-scripts` (so steht es in plaintext-app, -iot,
+Bibliothek aus `$PLAINTEXT_CODE/plaintext-scripts` (Vorgabe `~/code`, Karte 2359; bis 18.11.2026 fest `$HOME/codeplain/plaintext-scripts`) (so steht es in plaintext-app, -iot,
 -schuetu, -guild und -root); die CI-Pipeline kopiert ihren Checkout an dieselbe Stelle
 (Schritt „Install plaintext-scripts" in `ci-cd-pipeline.yaml`).
 
 ```bash
-git clone git@github.com:Plaintext-Gmbh/plaintext-scripts.git ~/codeplain/plaintext-scripts
+git clone git@github.com:Plaintext-Gmbh/plaintext-scripts.git ~/code/plaintext-scripts
 ```
 
 Aktualisieren:
 
 ```bash
-git -C ~/codeplain/plaintext-scripts pull
+git -C "$PLAINTEXT_CODE/plaintext-scripts" pull
 ```
 
 > Bis zum Zustandsbericht 29.08.2026 stand hier `~/.plaintext-scripts` samt Auto-Clone beim
@@ -49,8 +49,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Bibliothek: fester Pfad, kein Auto-Clone (siehe Installation)
-source "$HOME/codeplain/plaintext-scripts/tui-common.sh"
-source "$HOME/codeplain/plaintext-scripts/tui-build-logic.sh"
+source "${PLAINTEXT_CODE:-$HOME/code}/plaintext-scripts/tui-common.sh"
+source "${PLAINTEXT_CODE:-$HOME/code}/plaintext-scripts/tui-build-logic.sh"
 
 init_versions
 
@@ -63,13 +63,13 @@ Die Konfiguration der Plaintext-Projekte liegt zentral im privaten Repo `plainte
 unter `plaintext-config/<projektname>/build-conf.txt` (daneben `compose.yaml`,
 `modules-conf.txt`, `deploy/`, `config/`). `load_build_conf()` leitet `<projektname>` aus dem
 Verzeichnisnamen des Projekts ab (`basename`) und sucht zuerst dort — `$PLAINTEXT_CONFIG_DIR`,
-Default `$HOME/codeplain/plaintext-config`; die CI-Pipeline checkt `plaintext-config` an genau
+Default `$PLAINTEXT_CODE/plaintext-config` (Vorgabe `~/code`); die CI-Pipeline checkt `plaintext-config` an genau
 diese Stelle aus.
 
 ```bash
-git clone git@github.com:Plaintext-Gmbh/plaintext-config.git ~/codeplain/plaintext-config
-cp ~/codeplain/plaintext-scripts/build-conf.txt.template \
-   ~/codeplain/plaintext-config/<projektname>/build-conf.txt
+git clone git@github.com:Plaintext-Gmbh/plaintext-config.git ~/code/plaintext-config
+cp ~/code/plaintext-scripts/build-conf.txt.template \
+   ~/code/plaintext-config/<projektname>/build-conf.txt
 ```
 
 Eine `build-conf.txt` **im Projektverzeichnis** ist nur der Rueckfall fuer Projekte ausserhalb
@@ -582,7 +582,7 @@ Muster wie beim `build`-Wrapper:
 ```bash
 #!/usr/bin/env bash
 # .github/scripts/root-autobump.sh — Wrapper, die Logik liegt in plaintext-scripts/ci/root-autobump.sh
-exec "${PLAINTEXT_SCRIPTS_DIR:-$HOME/codeplain/plaintext-scripts}/ci/root-autobump.sh" "$@"
+exec "${PLAINTEXT_SCRIPTS_DIR:-${PLAINTEXT_CODE:-$HOME/code}/plaintext-scripts}/ci/root-autobump.sh" "$@"
 ```
 
 Aufruf: `root-autobump.sh detect` (stdout + `GITHUB_OUTPUT`: current/parent/latest/behind/

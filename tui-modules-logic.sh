@@ -9,7 +9,7 @@
 #  for the expected format.
 # ═══════════════════════════════════════════════════════════════
 
-PLAINTEXT_CONFIG_DIR="${PLAINTEXT_CONFIG_DIR:-$HOME/codeplain/plaintext-config}"
+PLAINTEXT_CONFIG_DIR="${PLAINTEXT_CONFIG_DIR:-${PLAINTEXT_CODE:-$HOME/code}/plaintext-config}"
 _project_name=$(basename "$SCRIPT_DIR")
 
 # Resolve modules-conf.txt: plaintext-config first, then project-local

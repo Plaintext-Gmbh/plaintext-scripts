@@ -2696,7 +2696,7 @@ release_stand_nachziehen() {
 }
 
 # ── Die Build-Logik dieses Laufs muss selbst von 'master' kommen ───────────────────────
-# VORFALL (Karten 1151/1154, 09.09.2026): ~/codeplain/plaintext-scripts — der Klon, den JEDES
+# VORFALL (Karten 1151/1154, 09.09.2026): ~/codeplain/plaintext-scripts (heute $PLAINTEXT_CODE/plaintext-scripts, Karte 2359) — der Klon, den JEDES
 # lokale ./build sourct — stand elf Tage auf `lokal-release-schnell`, einem Zweig, den GitHub beim
 # Merge von PR #89 laengst geloescht hatte. Ein Handstart haette in dieser Zeit PROD **ohne
 # NAS-Deploy-Lock** und ohne die Migrations-Backup-Logik ausgerollt; gemessen wurden 0 statt 22
@@ -3091,7 +3091,7 @@ do_sonar() {
     if [ -z "$SONAR_TOKEN" ]; then
         local TOKEN_LOCATIONS=(
             "${SCRIPT_DIR}/config/sonarqube/token.txt"
-            "${PLAINTEXT_CONFIG_DIR:-$HOME/codeplain/plaintext-config}/${IMAGE_NAME}/sonar-token.txt"
+            "${PLAINTEXT_CONFIG_DIR:-${PLAINTEXT_CODE:-$HOME/code}/plaintext-config}/${IMAGE_NAME}/sonar-token.txt"
         )
         for TOKEN_FILE in "${TOKEN_LOCATIONS[@]}"; do
             if [ -f "$TOKEN_FILE" ]; then

@@ -121,7 +121,7 @@ get_status_line() {
 # ── Flyway Version Number ─────────────────────────────────────
 
 do_flywaynr() {
-    exec "$HOME/codeplain/plaintext-scripts/getflywaynr"
+    exec "${PLAINTEXT_CODE:-$HOME/code}/plaintext-scripts/getflywaynr"
 }
 
 # ── Playwright Integration Tests ──────────────────────────────

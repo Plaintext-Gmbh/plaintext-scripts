@@ -8,7 +8,7 @@
 #       env: int | prod  (beide Blue-Green-Slots einer Umgebung teilen sich /data)
 #   Ohne --ja wird nur geprueft und angezeigt, was geschrieben wuerde.
 #
-# Quelle: module.yaml aus einem Klon von plaintext-modules (MODULES_KLON, Vorgabe ~/plaintext-modules),
+# Quelle: module.yaml aus einem Klon von plaintext-modules (MODULES_KLON, Vorgabe $PLAINTEXT_CODE/plaintext-modules),
 # Stand origin/master. Ziel: /volume1/docker/<app>/data/<env>/module/registry.yaml, atomar
 # (temp + mv im selben Verzeichnis, wie das Jar-Staging in tui-build-logic.sh).
 set -euo pipefail
@@ -16,7 +16,7 @@ set -euo pipefail
 APP="${1:-}"; UMGEBUNG="${2:-}"; JA="${3:-}"
 NAS_HOST="${NAS_HOST:-192.100.0.1}"
 DEPLOY_SERVER="${DEPLOY_SERVER:-mad@${NAS_HOST}}"
-KLON="${MODULES_KLON:-$HOME/plaintext-modules}"
+KLON="${MODULES_KLON:-${PLAINTEXT_CODE:-$HOME/code}/plaintext-modules}"
 
 case "$UMGEBUNG" in int|prod) ;; *) echo "Aufruf: $0 <app> <int|prod> [--ja]" >&2; exit 2 ;; esac
 [[ "$APP" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "FEHLER: App-Name '$APP' ungueltig" >&2; exit 2; }

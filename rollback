@@ -69,7 +69,7 @@ GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC
 # Eigenen Pfad ueber den Symlink hinweg aufloesen — ~/scripts/rollback zeigt hierher.
 SELBST="$(readlink -f "${BASH_SOURCE[0]}")"
 SKRIPTE_DIR="$(cd "$(dirname "$SELBST")" && pwd)"
-CONFIG_DIR="${PLAINTEXT_CONFIG_DIR:-$HOME/codeplain/plaintext-config}"
+CONFIG_DIR="${PLAINTEXT_CONFIG_DIR:-${PLAINTEXT_CODE:-$HOME/code}/plaintext-config}"
 
 hinweis() { echo -e "$*"; }
 fehler()  { echo -e "${RED}✗ $*${NC}" >&2; }
