@@ -23,7 +23,7 @@ in module/cache/ und schreibt module/module.yaml. Ablauf:
     warten. Schlägt das fehl: alles zurück, neu starten, Exit 1.
 
 Umgebung: DEPLOY_SERVER (mad@192.100.0.1), DEMO_DIR (/volume1/docker/plaintext-demo), MODULES_KLON
-($PLAINTEXT_CODE/plaintext-modules), NASSH (~/scripts/nassh: docker auf dem NAS mit sudo), REPOSILITE, JAVA (java 25).
+($PLAINTEXT_CODE/plaintext-modules), NASSH ($PLAINTEXT_DEVOPS/nas-ssh/nas-ssh: docker auf dem NAS mit sudo), REPOSILITE, JAVA (java 25).
 Keine Geheimnisse: Reposilite und Central werden ohne Anmeldung gelesen.
 """
 import hashlib

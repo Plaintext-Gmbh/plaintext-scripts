@@ -25,14 +25,14 @@ fi
 #      cat "${TMP}" | ssh "${DEPLOY_SERVER}" "cat > /tmp/… && sudo docker load -i /tmp/… && rm -f …"
 #
 #  Das kann auf dieser Maschine nicht funktionieren. `docker` ist auf dem NAS nicht passwortfrei
-#  — deshalb gibt es ~/scripts/nassh, das das sudo-Passwort aus dem Vault holt und **allein** auf
+#  — deshalb gibt es $PLAINTEXT_DEVOPS/nas-ssh/nas-ssh (frueher ~/scripts/nassh), das das sudo-Passwort aus dem Vault holt und **allein** auf
 #  stdin schickt. In der Zeile oben ist stdin aber schon belegt, naemlich mit dem 74-MB-Tarball:
 #  `sudo -S` bekommt seine Passwortzeile nie. Dasselbe Muster steht in Karte 774 (ein Kommando,
 #  das stdin mitliest, verbraucht das Passwort bzw. laesst den Aufruf haengen).
 #
 #  Der Tarball geht deshalb per `scp` als Datei hinueber, und erst das Laden laeuft ueber `nassh`
 #  — dessen stdin ist dann frei fuer das Passwort.
-NASSH="${NASSH:-$HOME/scripts/nassh}"
+NASSH="${NASSH:-${PLAINTEXT_DEVOPS:-$HOME/code/plaintext-devops}/nas-ssh/nas-ssh}"   # Karte 2359: kein ~/scripts mehr
 [ -x "$NASSH" ] || { echo "FEHLER: $NASSH fehlt — ohne sudo-Weg auf den NAS geht das Laden nicht." >&2; exit 1; }
 
 echo "=== Save + Transfer + Load auf ${DEPLOY_SERVER} ==="
