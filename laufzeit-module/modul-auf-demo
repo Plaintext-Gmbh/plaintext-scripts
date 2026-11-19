@@ -23,7 +23,7 @@ in module/cache/ und schreibt module/module.yaml. Ablauf:
     warten. Schlägt das fehl: alles zurück, neu starten, Exit 1.
 
 Umgebung: DEPLOY_SERVER (mad@192.100.0.1), DEMO_DIR (/volume1/docker/plaintext-demo), MODULES_KLON
-($PLAINTEXT_CODE/plaintext-modules), NASSH (~/scripts/nassh: docker auf dem NAS mit sudo), REPOSILITE, JAVA (java 25).
+($PLAINTEXT_CODE/plaintext-modules), NASSH ($PLAINTEXT_DEVOPS/nas-ssh/nas-ssh: docker auf dem NAS mit sudo), REPOSILITE, JAVA (java 25).
 Keine Geheimnisse: Reposilite und Central werden ohne Anmeldung gelesen.
 """
 import hashlib
@@ -44,7 +44,7 @@ SERVER = os.environ.get("DEPLOY_SERVER", "mad@192.100.0.1")
 DEMO = os.environ.get("DEMO_DIR", "/volume1/docker/plaintext-demo")
 CONTAINER = "plaintext-demo-app"
 KLON = Path(os.environ.get("MODULES_KLON", Path.home() / "plaintext-modules"))
-NASSH = os.environ.get("NASSH", str(Path.home() / "scripts/nassh"))
+NASSH = os.environ.get("NASSH") or os.path.join(os.environ.get("PLAINTEXT_DEVOPS") or str(Path.home() / "code/plaintext-devops"), "nas-ssh", "nas-ssh")   # Karte 2359
 REPOSILITE = os.environ.get("REPOSILITE", "https://maven.plaintext.ch/releases").rstrip("/")
 CENTRAL = "https://repo1.maven.org/maven2"
 JAVA = os.environ.get("JAVA", "java")
