@@ -53,6 +53,8 @@ if [[ "$*" == *"grep '^registry '"* ]]; then
     esac
     exit 0
 fi
+# chef (394): MOCK_MODUS=echt fuehrt das Slot-Skript (stdin) lokal aus - mit Ersatz-wget, der seine Argumente festhaelt.
+if [ "${MOCK_MODUS:-}" = "echt" ]; then exec sh; fi
 cat > /dev/null
 z=$(( $(cat "$ZAEHLER" 2>/dev/null || echo 0) + 1 )); echo "$z" > "$ZAEHLER"
 case "$MOCK_MODUS" in
@@ -104,5 +106,24 @@ pruefe "Meldung «ABBRUCH vor dem Slot-Start»" "ja" "$(grep -q 'ABBRUCH vor dem
 AUSGABE=$(warte_auf_registry_index "1.629.0" "green"); pruefe "modules: Version da -> rc 0" "0" "$?"
 export MOCK_QUELLE=nextcloud
 registry_quelle_ist_modules "green"; pruefe "Nextcloud-Quelle ist nicht modules -> rc 1" "1" "$?"
+
+echo "chef (394): Zugang nie auf der Kommandozeile (wget liest ihn aus einer Konfigdatei in /dev/shm):"
+cat > "$TMPDIR_TEST/wget" <<'EOW'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$WGET_ARGV"
+for a in "$@"; do case "$a" in --config=*) k="${a#--config=}"; cat "$k" >> "$WGET_KONFIG"; stat -c '%a' "$k" >> "$WGET_RECHTE" ;; esac; done
+printf 'plaintext-modul-index 1\nmodul plaintext-guild-basis 1.629.0 root-min=3.68.0\n'
+EOW
+chmod +x "$TMPDIR_TEST/wget"
+export WGET_ARGV="$TMPDIR_TEST/argv" WGET_KONFIG="$TMPDIR_TEST/konfig" WGET_RECHTE="$TMPDIR_TEST/rechte"
+printf 'registry fwtool https://modules.example.test/nosec/a/fwtool/index.txt anmeldung-env=TEST_ZUGANG\n' > "$TMPDIR_TEST/quellen.txt"
+export MODUL_QUELLEN_DATEI="$TMPDIR_TEST/quellen.txt" TEST_ZUGANG="kunde-x:Geheim-2389-xyz" MOCK_MODUS=echt
+registry_index_hat_version "1.629.0" "green"; pruefe "echtes Slot-Skript findet die modul-Zeile -> rc 0" "0" "$?"
+pruefe "Passwort NICHT in den wget-Argumenten" "nein" "$(grep -qF 'Geheim-2389-xyz' "$WGET_ARGV" && echo ja || echo nein)"
+pruefe "wget bekam --config" "ja" "$(grep -q -- '--config=/dev/shm/' "$WGET_ARGV" && echo ja || echo nein)"
+pruefe "Konfigdatei trug Benutzer und Passwort" "ja" "$(grep -q 'user = kunde-x' "$WGET_KONFIG" && grep -q 'password = Geheim-2389-xyz' "$WGET_KONFIG" && echo ja || echo nein)"
+pruefe "Konfigdatei nur fuer den Eigentuemer (600)" "600" "$(head -1 "$WGET_RECHTE")"
+pruefe "Konfigdatei danach weg" "0" "$(find /dev/shm -maxdepth 1 -name 'registry-warte.*' 2>/dev/null | wc -l)"
+unset MODUL_QUELLEN_DATEI TEST_ZUGANG
 
 if [ "$FEHLER" -eq 0 ]; then echo "ALLE TESTS BESTANDEN"; else echo "TESTS FEHLGESCHLAGEN"; exit 1; fi

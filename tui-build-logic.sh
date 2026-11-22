@@ -1539,7 +1539,8 @@ deploy_to_dev() {
 # Karte 2389 (chef 391/392): Die Quelle steht im Slot in /huelle/config/module-quellen.txt — nicht
 # mehr fest die Nextcloud-Registry. Jede `registry`-Zeile wird mit ihrem `anmeldung-env` gelesen
 # (Wert `<benutzer>:<passwort>` wie bei modules.plaintext.ch, sonst Token als Benutzer wie bei der
-# Nextcloud-Freigabe). Treffer: Kopfzeile «zuletzt <VERSION>» (Nextcloud, registry.sh) ODER Zeile
+# Nextcloud-Freigabe). Der Zugang steht nie auf der Kommandozeile (chef 394): wget liest ihn aus einer
+# Konfigdatei in /dev/shm des Slots (umask 077, danach shred -u). Treffer: Kopfzeile «zuletzt <VERSION>» (Nextcloud, registry.sh) ODER Zeile
 # `modul <basis> <VERSION> ` (modules-Index; Basis-Modul REGISTRY_BASIS_MODUL, Vorgabe
 # ${IMAGE_NAME}-basis). Liest der Slot von modules, ist das Ende der Obergrenze ein ABBRUCH vor dem
 # Slot-Start (Traffic bleibt, wo er ist) statt des Rueckfalls; Nextcloud-Quellen starten wie bisher
@@ -1554,12 +1555,18 @@ REGISTRY_WARTE_INTERVALL_SEC="${REGISTRY_WARTE_INTERVALL_SEC:-20}"
 registry_indizes_im_slot() {
     local SLOT="$1"
     ssh ${DEPLOY_SERVER} "sudo docker exec -i ${IMAGE_NAME}-prod-${SLOT} sh" <<'EOS'
-grep '^registry ' /huelle/config/module-quellen.txt 2>/dev/null | while read -r _ _ url rest; do
+umask 077
+grep '^registry ' "${MODUL_QUELLEN_DATEI:-/huelle/config/module-quellen.txt}" 2>/dev/null | while read -r _ _ url rest; do
     var=$(printf '%s\n' "$rest" | sed -n 's/.*anmeldung-env=\([A-Za-z0-9_]*\).*/\1/p')
     wert=""; [ -n "$var" ] && eval "wert=\${$var:-}"
     case "$wert" in *:*) b="${wert%%:*}"; p="${wert#*:}" ;; *) b="$wert"; p="x" ;; esac
     echo "#quelle $url"
-    if [ -n "$b" ]; then wget -q -O- --user="$b" --password="$p" "$url" 2>/dev/null; else wget -q -O- "$url" 2>/dev/null; fi
+    # chef (394): Zugang nie auf der Kommandozeile (ps) - GNU-wget-Konfig in /dev/shm, per printf (Builtin) geschrieben.
+    k=/dev/shm/registry-warte.$$
+    : > "$k"
+    [ -n "$b" ] && printf 'user = %s\npassword = %s\n' "$b" "$p" > "$k"
+    wget --config="$k" -q -O- "$url" 2>/dev/null
+    shred -u "$k" 2>/dev/null || rm -f "$k"
     echo
 done
 EOS
