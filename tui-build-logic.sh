@@ -1530,40 +1530,79 @@ deploy_to_dev() {
     return 1
 }
 
-# ── Registry-Index-Warte (Karte 1646) ──────────────────────────────────────────────────────────
-# Der Tag-Lauf schreibt den Registry-Index (s. /huelle/config/module-quellen.txt im Slot)
-# parallel zum Deploy; startete der neue Slot vor dem Upload, lief er bis zum naechsten Start
-# im Rueckfall (RUECKFALL-MODULE-YAML, Karte 1618) — Pinning und stand.txt griffen dann nicht.
-# Warte deshalb unter dem Deploy-Lock, bis die Release-Version im Index steht. Nach der
-# Obergrenze trotzdem starten: Der Rueckfall laedt die richtigen Module, nur der Auswahl-Weg
-# greift dann nicht. Nicht im Lader warten: Der Tag-Lauf dauert bis 9 Minuten und wuerde
-# gegen die Health-Pruefung laufen.
+# ── Registry-Index-Warte (Karte 1646, Karte 2389) ─────────────────────────────────────────────
+# Der Tag-Lauf schreibt den Index der Quelle parallel zum Deploy; startete der neue Slot vorher,
+# lief er bis zum naechsten Start im Rueckfall (RUECKFALL-MODULE-YAML, Karte 1618) — Pinning und
+# stand.txt griffen dann nicht. Warte deshalb unter dem Deploy-Lock, bis die Release-Version im
+# Index steht. Nicht im Lader warten: das wuerde gegen die Health-Pruefung laufen.
+#
+# Karte 2389 (chef 391/392): Die Quelle steht im Slot in /huelle/config/module-quellen.txt — nicht
+# mehr fest die Nextcloud-Registry. Jede `registry`-Zeile wird mit ihrem `anmeldung-env` gelesen
+# (Wert `<benutzer>:<passwort>` wie bei modules.plaintext.ch, sonst Token als Benutzer wie bei der
+# Nextcloud-Freigabe). Treffer: Kopfzeile «zuletzt <VERSION>» (Nextcloud, registry.sh) ODER Zeile
+# `modul <basis> <VERSION> ` (modules-Index; Basis-Modul REGISTRY_BASIS_MODUL, Vorgabe
+# ${IMAGE_NAME}-basis). Liest der Slot von modules, ist das Ende der Obergrenze ein ABBRUCH vor dem
+# Slot-Start (Traffic bleibt, wo er ist) statt des Rueckfalls; Nextcloud-Quellen starten wie bisher
+# trotzdem. Die Obergrenze fuer modules deckt Katalog-Cron (15 min) + Einleser (5 min).
 REGISTRY_WARTE_MAX_SEC="${REGISTRY_WARTE_MAX_SEC:-600}"
+REGISTRY_WARTE_MODULES_MAX_SEC="${REGISTRY_WARTE_MODULES_MAX_SEC:-1500}"
 REGISTRY_WARTE_INTERVALL_SEC="${REGISTRY_WARTE_INTERVALL_SEC:-20}"
 
-# Steht VERSION im Registry-Index? rc 0 = ja. Die Pruefung laeuft IM aktiven Slot: Lese-Token
-# (PLAINTEXT_MODULE_REGISTRY_LESEN) und Index-URL liegen nur dort, nicht auf dem Deploy-Rechner;
-# wget ist im Slot-Alpine vorhanden, curl nicht. Abruffehler und «Version noch nicht drin»
-# sind belegt gleich — die Schleife wartet in beiden Faellen.
+# Indizes aller Quellen des Slots auf stdout. Laeuft IM aktiven Slot: Lese-Zugaenge liegen nur dort
+# (env), nicht auf dem Deploy-Rechner; wget ist im Slot-Alpine vorhanden, curl nicht. Je Quelle eine
+# Markierungszeile `#quelle <url>` vorweg. Das Skript kommt ueber stdin (kein Quoting durch ssh).
+registry_indizes_im_slot() {
+    local SLOT="$1"
+    ssh ${DEPLOY_SERVER} "sudo docker exec -i ${IMAGE_NAME}-prod-${SLOT} sh" <<'EOS'
+grep '^registry ' /huelle/config/module-quellen.txt 2>/dev/null | while read -r _ _ url rest; do
+    var=$(printf '%s\n' "$rest" | sed -n 's/.*anmeldung-env=\([A-Za-z0-9_]*\).*/\1/p')
+    wert=""; [ -n "$var" ] && eval "wert=\${$var:-}"
+    case "$wert" in *:*) b="${wert%%:*}"; p="${wert#*:}" ;; *) b="$wert"; p="x" ;; esac
+    echo "#quelle $url"
+    if [ -n "$b" ]; then wget -q -O- --user="$b" --password="$p" "$url" 2>/dev/null; else wget -q -O- "$url" 2>/dev/null; fi
+    echo
+done
+EOS
+}
+
+# Steht VERSION im Index einer Quelle? rc 0 = ja. Abruffehler und «Version noch nicht drin» sind
+# belegt gleich — die Schleife wartet in beiden Faellen.
 registry_index_hat_version() {
     local VERSION="$1" SLOT="$2"
-    local VERSION_ESC INDEX
+    local VERSION_ESC BASIS INDEX
     VERSION_ESC=$(printf '%s' "$VERSION" | sed 's/[.[\*^$]/\\&/g')
+    BASIS="${REGISTRY_BASIS_MODUL:-${IMAGE_NAME}-basis}"
     # Keine Pipe zu grep -q: Der bricht nach dem Treffer ab, ssh kriegt SIGPIPE, und mit
     # `set -o pipefail` (Test-Muster, CI) waere die Pipeline rc 141 statt 0.
-    INDEX=$(ssh ${DEPLOY_SERVER} "sudo docker exec ${IMAGE_NAME}-prod-${SLOT} sh -c 'wget -q -O- --user=\"\$PLAINTEXT_MODULE_REGISTRY_LESEN\" --password=x \"https://home.plaintext.ch/public.php/webdav/${IMAGE_NAME}/index.txt\"'" 2>/dev/null) || return 1
-    grep -qE "zuletzt ${VERSION_ESC}([^0-9]|\$)" <<<"$INDEX"
+    INDEX=$(registry_indizes_im_slot "$SLOT" 2>/dev/null) || return 1
+    grep -qE "zuletzt ${VERSION_ESC}([^0-9]|\$)" <<<"$INDEX" && return 0
+    grep -qE "^modul ${BASIS} ${VERSION_ESC} " <<<"$INDEX"
+}
+
+# Liest der Slot (auch) von modules.plaintext.ch? Dann Abbruch statt Rueckfall (Karte 2389).
+registry_quelle_ist_modules() {
+    local SLOT="$1" Q
+    Q=$(ssh ${DEPLOY_SERVER} "sudo docker exec ${IMAGE_NAME}-prod-${SLOT} grep '^registry ' /huelle/config/module-quellen.txt" 2>/dev/null) || return 1
+    grep -q '/nosec/[ak]/' <<<"$Q"
 }
 
 warte_auf_registry_index() {
-    local VERSION="$1" SLOT="$2" WARTE=0
+    local VERSION="$1" SLOT="$2" WARTE=0 MAX="$REGISTRY_WARTE_MAX_SEC" ABBRUCH=false
+    if registry_quelle_ist_modules "$SLOT"; then
+        MAX="$REGISTRY_WARTE_MODULES_MAX_SEC"; ABBRUCH=true
+    fi
     until registry_index_hat_version "$VERSION" "$SLOT"; do
-        if [ "$WARTE" -ge "$REGISTRY_WARTE_MAX_SEC" ]; then
-            echo -e "${YELLOW}⚠ Registry-Index kennt ${VERSION} nach ${REGISTRY_WARTE_MAX_SEC}s nicht — starte trotzdem (Rückfall greift, Auswahl-Weg erst nach erneutem Start).${NC}"
+        if [ "$WARTE" -ge "$MAX" ]; then
+            if [ "$ABBRUCH" == "true" ]; then
+                echo -e "${RED}✗ modules-Index kennt ${VERSION} nach ${MAX}s nicht — ABBRUCH vor dem Slot-Start (Karte 2389).${NC}"
+                echo -e "${YELLOW}  Pruefen: Begleitdatei in Reposilite (Katalog-Lauf), Einleser auf modules, Ablage-Modulliste. Traffic bleibt auf ${SLOT}.${NC}"
+                return 1
+            fi
+            echo -e "${YELLOW}⚠ Registry-Index kennt ${VERSION} nach ${MAX}s nicht — starte trotzdem (Rückfall greift, Auswahl-Weg erst nach erneutem Start).${NC}"
             return 0
         fi
         if [ "$WARTE" -eq 0 ]; then
-            echo -e "${YELLOW}Registry-Index kennt ${VERSION} noch nicht — warte auf den Tag-Lauf (Obergrenze ${REGISTRY_WARTE_MAX_SEC}s).${NC}"
+            echo -e "${YELLOW}Registry-Index kennt ${VERSION} noch nicht — warte (Obergrenze ${MAX}s$([ "$ABBRUCH" == "true" ] && echo ', danach Abbruch')).${NC}"
         fi
         sleep "$REGISTRY_WARTE_INTERVALL_SEC"
         WARTE=$((WARTE + REGISTRY_WARTE_INTERVALL_SEC))
@@ -1642,7 +1681,11 @@ deploy_to_prod_gesperrt() {
 
     # Karte 1646: Erst starten, wenn der Registry-Index die Version kennt — sonst bootet der
     # Slot vor dem Index-Upload des Tag-Laufs und laeuft bis zum naechsten Start im Rueckfall.
-    warte_auf_registry_index "$RELEASE_VERSION" "$ACTIVE_SLOT"
+    # Karte 2389: liest der Slot von modules, bricht die Warte nach der Obergrenze ab (rc 1).
+    if ! warte_auf_registry_index "$RELEASE_VERSION" "$ACTIVE_SLOT"; then
+        echo -e "${RED}=== PROD Deploy abgebrochen: neue Version nicht im Modul-Index ===${NC}"
+        return 1
+    fi
 
     # Deploy to inactive PROD slot
     if ! deploy_blue_green "prod" "$RELEASE_VERSION"; then
