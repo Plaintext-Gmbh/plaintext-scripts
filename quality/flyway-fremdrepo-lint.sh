@@ -6,7 +6,8 @@
 #  den GESAMTEN Klassenpfad. Der Klassenpfad einer laufenden Anwendung endet nicht am Repo:
 #
 #      plaintext-app     = app-Module          + plaintext-root-*  (Parent + Abhaengigkeiten)
-#      plaintext-guild   = guild-Module        + plaintext-root-*  + acht plaintext-z-*-Module,
+#      plaintext-guild   = guild-Module        + plaintext-root-*  + acht plaintext-z-*-Module (Stand 08.09.;
+#                          seit 26.11.2026 liegen die guild-Module in plaintext-modul-guild-*),
 #                                                die im Repo plaintext-APP liegen
 #      plaintext-schuetu = schuetu-Module      + plaintext-root-*
 #      plaintext-iot     = iot-Module          + plaintext-root-*
@@ -132,8 +133,9 @@ grep_q() { local n; n=$(grep -c "$@") || true; [ "${n:-0}" -gt 0 ]; }
 # `plaintext-modul-*` gehoert NICHT hierher: die kommen je Lauf live dazu (modul_repos, Karte 1639).
 # `plaintext-root` (v1) steht seit dem Archivieren von v1 am 08.11.2026 (Karte 1621) nicht mehr
 # darin: v1 landet nie wieder in einem Klassenpfad der Familie, Dubletten gegen es sind unerreichbar.
+# `plaintext-guild` steht seit 26.11.2026 (Karte 2525) nicht mehr darin: seine Migrationen sind mit den
+# Guild-Modulen in die Repos `plaintext-modul-guild-*` gezogen (kommen live dazu), die Huelle hat keine mehr.
 FAMILIE_VORGABE='Plaintext-Gmbh/plaintext-app
-Plaintext-Gmbh/plaintext-guild
 Plaintext-Gmbh/plaintext-schuetu
 Plaintext-Gmbh/plaintext-iot'
 
@@ -254,7 +256,7 @@ registry_modul_repos() {
     return 0
 }
 
-# Darf ein Repo null Migrationen haben? Nur Modul-Repos (reine -api, mermaid). Die vier Kern-Repos
+# Darf ein Repo null Migrationen haben? Nur Modul-Repos (reine -api, mermaid). Die drei Kern-Repos
 # haben welche; bei ihnen bleibt null ein Alarm. `plaintext-modules` ist KEIN Modul-Repo.
 null_erlaubt() {
     case "${1##*/}" in
@@ -500,8 +502,8 @@ for REPO in $FAMILIE; do
     fi
     FREMD_ANZAHL="$(grep -c . "$ARBEIT/fremd.pfade" || true)"
 
-    # PLAUSIBILITAET. Alle vier Kern-Repos der Familie haben Migrationen (app 155,
-    # guild 47, schuetu 18, iot 13 — gezaehlt 08.09.2026). Kommen null zurueck, ist entweder
+    # PLAUSIBILITAET. Alle Kern-Repos der Familie haben Migrationen (gezaehlt 08.09.2026: app 155,
+    # guild 47, schuetu 18, iot 13; guild seit 26.11.2026 ohne). Kommen null zurueck, ist entweder
     # der Abruf schiefgegangen (leerer Baum bei fehlender Berechtigung) oder das Repo hat
     # wirklich keine Migrationen mehr; im zweiten Fall gehoert es aus FAMILIE_VORGABE
     # gestrichen. Beide Faelle brauchen eine Hand — ein stilles "0 Nummern, also kein
