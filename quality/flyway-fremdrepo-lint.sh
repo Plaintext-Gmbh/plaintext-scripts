@@ -6,7 +6,8 @@
 #  den GESAMTEN Klassenpfad. Der Klassenpfad einer laufenden Anwendung endet nicht am Repo:
 #
 #      plaintext-app     = app-Module          + plaintext-root-*  (Parent + Abhaengigkeiten)
-#      plaintext-guild   = guild-Module        + plaintext-root-*  + acht plaintext-z-*-Module,
+#      plaintext-guild   = guild-Module        + plaintext-root-*  + acht plaintext-z-*-Module (Stand 08.09.;
+#                          seit 26.11.2026 liegen die guild-Module in plaintext-modul-guild-*),
 #                                                die im Repo plaintext-APP liegen
 #      plaintext-schuetu = schuetu-Module      + plaintext-root-*
 #      plaintext-iot     = iot-Module          + plaintext-root-*
@@ -501,8 +502,8 @@ for REPO in $FAMILIE; do
     fi
     FREMD_ANZAHL="$(grep -c . "$ARBEIT/fremd.pfade" || true)"
 
-    # PLAUSIBILITAET. Alle drei Kern-Repos der Familie haben Migrationen (app 155,
-    # guild 47, schuetu 18, iot 13 — gezaehlt 08.09.2026). Kommen null zurueck, ist entweder
+    # PLAUSIBILITAET. Alle Kern-Repos der Familie haben Migrationen (gezaehlt 08.09.2026: app 155,
+    # guild 47, schuetu 18, iot 13; guild seit 26.11.2026 ohne). Kommen null zurueck, ist entweder
     # der Abruf schiefgegangen (leerer Baum bei fehlender Berechtigung) oder das Repo hat
     # wirklich keine Migrationen mehr; im zweiten Fall gehoert es aus FAMILIE_VORGABE
     # gestrichen. Beide Faelle brauchen eine Hand — ein stilles "0 Nummern, also kein
